@@ -570,11 +570,13 @@ impl RequireAuth {
     }
 }
 
-#[async_trait]
 impl Guard for RequireAuth {
-    async fn check(&self, ctx: &Context<'_>) -> GraphqlResult<()> {
-        let _ = auth_user_from_ctx(ctx)?;
-        Ok(())
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let result = auth_user_from_ctx(ctx).map(|_| ());
+        async move { result }
     }
 }
 
@@ -595,19 +597,23 @@ impl RequireAnyRole {
     }
 }
 
-#[async_trait]
 impl Guard for RequireAnyRole {
-    async fn check(&self, ctx: &Context<'_>) -> GraphqlResult<()> {
-        let user = auth_user_from_ctx(ctx)?;
-        if self
-            .roles
-            .iter()
-            .any(|role| user.roles.iter().any(|r| r == role))
-        {
-            Ok(())
-        } else {
-            Err(AuthError::Forbidden.extend())
-        }
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
+            if self
+                .roles
+                .iter()
+                .any(|role| user.roles.iter().any(|r| r == role))
+            {
+                Ok(())
+            } else {
+                Err(AuthError::Forbidden.extend())
+            }
+        });
+        async move { allowed }
     }
 }
 
@@ -628,19 +634,23 @@ impl RequireAllRoles {
     }
 }
 
-#[async_trait]
 impl Guard for RequireAllRoles {
-    async fn check(&self, ctx: &Context<'_>) -> GraphqlResult<()> {
-        let user = auth_user_from_ctx(ctx)?;
-        if self
-            .roles
-            .iter()
-            .all(|role| user.roles.iter().any(|r| r == role))
-        {
-            Ok(())
-        } else {
-            Err(AuthError::Forbidden.extend())
-        }
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
+            if self
+                .roles
+                .iter()
+                .all(|role| user.roles.iter().any(|r| r == role))
+            {
+                Ok(())
+            } else {
+                Err(AuthError::Forbidden.extend())
+            }
+        });
+        async move { allowed }
     }
 }
 
