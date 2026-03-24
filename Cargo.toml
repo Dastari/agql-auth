@@ -1,0 +1,26 @@
+[package]
+name = "agql-auth"
+version = "0.1.0"
+edition = "2024"
+authors = ["Toby Martin <toby@dastari.net>"]
+description = "Database-agnostic authentication primitives and async-graphql integration helpers."
+repository = "https://github.com/Dastari/agql-auth"
+homepage = "https://github.com/Dastari/agql-auth"
+documentation = "https://docs.rs/agql-auth"
+readme = "README.md"
+keywords = ["auth", "graphql", "async-graphql", "jwt", "refresh-token"]
+categories = ["authentication", "web-programming"]
+
+[dependencies]
+async-graphql = "7"
+async-trait = "0.1"
+argon2 = "0.5"
+base64 = "0.22"
+jsonwebtoken = "10"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+uuid = { version = "1", features = ["serde", "v4"] }
