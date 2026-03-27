@@ -76,6 +76,16 @@ Application-owned storage and policy:
 - implement `LoginChallengeStore` to persist hashed login codes, attempt counters, and consume state
 - keep SMTP, SMS, UI flows, ORM entities, and business policy in the consuming application
 
+## Migration Note
+
+Consuming apps can keep existing login, refresh, logout, and GraphQL auth wiring unchanged.
+
+To use the new recovery and challenge primitives:
+
+- add app-owned persistence implementations for `PasswordResetTokenStore` and `LoginChallengeStore`
+- call the new `AuthService` helpers from your password-reset, email-code, or SMS-code workflows
+- store TOTP enrollment state in the application, not in `agql-auth`
+
 ## Status
 
 This crate is focused on reusable auth primitives and `async-graphql` integration. It does not own your application's database schema, ORM entities, transport bootstrap, email delivery, SMS delivery, or app-specific authorization policy.
