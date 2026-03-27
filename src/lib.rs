@@ -64,10 +64,65 @@ pub struct ClientMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuthMethod {
+    Password,
+    EmailCode,
+    SmsCode,
+    TotpStepUp,
+    ServiceToken,
+}
+
+impl Default for AuthMethod {
+    fn default() -> Self {
+        Self::Password
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MfaState {
+    pub satisfied: bool,
+    pub methods: Vec<MfaMethod>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MfaMethod {
+    Totp,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveScope {
+    pub tenant_id: Option<String>,
+    pub organization_id: Option<String>,
+    pub catalog_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionContext {
+    #[serde(default)]
+    pub auth_method: AuthMethod,
+    #[serde(default)]
+    pub mfa: MfaState,
+    #[serde(default)]
+    pub active_scope: Option<ActiveScope>,
+}
+
+impl SessionContext {
+    pub fn for_auth_method(auth_method: AuthMethod) -> Self {
+        Self {
+            auth_method,
+            mfa: MfaState::default(),
+            active_scope: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthUser {
     pub user_id: String,
     pub session_id: Uuid,
     pub roles: Vec<String>,
+    #[serde(default)]
+    pub session: SessionContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +149,8 @@ pub struct StoredRefreshToken {
     pub user_id: String,
     pub session_id: Uuid,
     pub session_family_id: Uuid,
+    #[serde(default)]
+    pub session: SessionContext,
     pub token_hash: String,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
@@ -128,6 +185,8 @@ struct AccessTokenClaims {
     sub: String,
     sid: String,
     roles: Vec<String>,
+    #[serde(default)]
+    ctx: SessionContext,
     iss: String,
     aud: String,
     exp: i64,
@@ -514,6 +573,7 @@ where
             user_id: user.id,
             session_id,
             roles: user.roles,
+            session: SessionContext::for_auth_method(AuthMethod::Password),
         };
 
         self.issue_auth_payload(auth_user, session_family_id, metadata)
@@ -579,6 +639,7 @@ where
             user_id: user.id,
             session_id: existing.session_id,
             roles: user.roles,
+            session: existing.session.clone(),
         };
 
         let (new_raw_refresh_token, new_record, access_token, access_token_expires_at) = self
@@ -651,12 +712,46 @@ where
             user_id: claims.sub,
             session_id,
             roles: claims.roles,
+            session: claims.ctx,
         })
     }
 
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
         self.authenticate_access_token(token)
+    }
+
+    pub async fn issue_verified_user_session(
+        &self,
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        auth_method: AuthMethod,
+        metadata: ClientMetadata,
+    ) -> AuthResult<AuthPayload> {
+        self.issue_session_for_user(
+            user_id,
+            roles,
+            SessionContext::for_auth_method(auth_method),
+            metadata,
+        )
+        .await
+    }
+
+    pub async fn issue_session_for_user(
+        &self,
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        session: SessionContext,
+        metadata: ClientMetadata,
+    ) -> AuthResult<AuthPayload> {
+        let auth_user = AuthUser {
+            user_id: user_id.into(),
+            session_id: Uuid::new_v4(),
+            roles,
+            session,
+        };
+        self.issue_auth_payload(auth_user, Uuid::new_v4(), metadata)
+            .await
     }
 
     pub fn issue_password_reset_token(
@@ -991,6 +1086,7 @@ where
             user_id: auth_user.user_id.clone(),
             session_id: auth_user.session_id,
             session_family_id,
+            session: auth_user.session.clone(),
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
             expires_at: refresh_token_expires_at,
@@ -1019,6 +1115,7 @@ where
             sub: auth_user.user_id.clone(),
             sid: auth_user.session_id.to_string(),
             roles: auth_user.roles.clone(),
+            ctx: auth_user.session.clone(),
             iss: self.config.issuer.clone(),
             aud: self.config.audience.clone(),
             exp: expires_at.unix_timestamp(),
@@ -1275,8 +1372,10 @@ fn generate_totp_code_for_step(secret: &[u8], step: u64, digits: u32) -> AuthRes
 }
 
 pub mod prelude {
+    pub use crate::ActiveScope;
     pub use crate::AuthConfig;
     pub use crate::AuthError;
+    pub use crate::AuthMethod;
     pub use crate::AuthPayload;
     pub use crate::AuthResult;
     pub use crate::AuthService;
@@ -1285,6 +1384,8 @@ pub mod prelude {
     pub use crate::IssuedLoginChallenge;
     pub use crate::LoginChallengeOptions;
     pub use crate::LoginChallengeStore;
+    pub use crate::MfaMethod;
+    pub use crate::MfaState;
     pub use crate::PasswordResetToken;
     pub use crate::PasswordResetTokenStore;
     pub use crate::RefreshTokenRevocationReason;
@@ -1292,6 +1393,7 @@ pub mod prelude {
     pub use crate::RequireAllRoles;
     pub use crate::RequireAnyRole;
     pub use crate::RequireAuth;
+    pub use crate::SessionContext;
     pub use crate::StoredLoginChallenge;
     pub use crate::StoredRefreshToken;
     pub use crate::StoredUser;
@@ -1578,6 +1680,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(payload.user.user_id, "user-1");
+        assert_eq!(payload.user.session.auth_method, AuthMethod::Password);
+        assert!(!payload.user.session.mfa.satisfied);
+        assert!(payload.user.session.mfa.methods.is_empty());
+        assert_eq!(payload.user.session.active_scope, None);
         assert!(!payload.access_token.is_empty());
         assert!(!payload.refresh_token.is_empty());
 
@@ -1586,6 +1692,7 @@ mod tests {
             .unwrap();
         assert_eq!(authenticated.user_id, payload.user.user_id);
         assert_eq!(authenticated.session_id, payload.user.session_id);
+        assert_eq!(authenticated.session, payload.user.session);
     }
 
     #[tokio::test]
@@ -1657,6 +1764,8 @@ mod tests {
             original_record.session_family_id
         );
         assert_eq!(new_record.session_id, original_record.session_id);
+        assert_eq!(new_record.session, original_record.session);
+        assert_eq!(refreshed.user.session, login_payload.user.session);
     }
 
     #[tokio::test]
@@ -1802,6 +1911,62 @@ mod tests {
             .and_then(|value| value.downcast_ref::<AuthUser>())
             .unwrap();
         assert_eq!(data_user.user_id, "user-1");
+        assert_eq!(data_user.session.auth_method, AuthMethod::Password);
+    }
+
+    #[tokio::test]
+    async fn verified_user_session_issuance_supports_email_code_and_totp_context() {
+        let auth = test_auth_service(Default::default(), Default::default());
+        let payload = auth
+            .issue_verified_user_session(
+                "user-verified",
+                vec!["CatalogEditor".to_string()],
+                AuthMethod::EmailCode,
+                metadata(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(payload.user.user_id, "user-verified");
+        assert_eq!(payload.user.session.auth_method, AuthMethod::EmailCode);
+        assert!(!payload.user.session.mfa.satisfied);
+        assert!(payload.user.session.active_scope.is_none());
+
+        let stepped_up = auth
+            .issue_session_for_user(
+                "user-verified",
+                vec!["CatalogEditor".to_string()],
+                SessionContext {
+                    auth_method: AuthMethod::TotpStepUp,
+                    mfa: MfaState {
+                        satisfied: true,
+                        methods: vec![MfaMethod::Totp],
+                    },
+                    active_scope: Some(ActiveScope {
+                        tenant_id: Some("tenant-1".to_string()),
+                        organization_id: Some("org-1".to_string()),
+                        catalog_id: Some("catalog-1".to_string()),
+                    }),
+                },
+                metadata(),
+            )
+            .await
+            .unwrap();
+
+        let decoded = auth
+            .authenticate_access_token(&stepped_up.access_token)
+            .unwrap();
+        assert_eq!(decoded.session.auth_method, AuthMethod::TotpStepUp);
+        assert!(decoded.session.mfa.satisfied);
+        assert_eq!(decoded.session.mfa.methods, vec![MfaMethod::Totp]);
+        assert_eq!(
+            decoded
+                .session
+                .active_scope
+                .as_ref()
+                .and_then(|scope| scope.catalog_id.as_deref()),
+            Some("catalog-1")
+        );
     }
 
     #[tokio::test]

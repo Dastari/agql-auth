@@ -9,6 +9,7 @@ This crate provides:
 - Argon2 password hashing and verification
 - short-lived JWT access tokens
 - rotated opaque refresh tokens
+- structured session-context claims for auth method, MFA state, and active scope
 - database-agnostic storage traits
 - password-reset token issuance and verification primitives
 - one-time login challenge and code primitives
@@ -25,6 +26,11 @@ This crate provides:
 - `PasswordResetTokenStore`
 - `LoginChallengeStore`
 - `AuthUser`
+- `SessionContext`
+- `AuthMethod`
+- `MfaState`
+- `MfaMethod`
+- `ActiveScope`
 - `AuthPayload`
 - `PasswordResetToken`
 - `IssuedLoginChallenge`
@@ -54,6 +60,13 @@ TOTP:
 - generate new shared secrets
 - build `otpauth://` provisioning URIs
 - verify codes with configurable digits, period, and skew window
+
+Structured session context:
+
+- access tokens carry a typed session context envelope
+- typed context includes auth method, MFA satisfaction, and optional active tenant/org/catalog scope
+- existing password login and refresh flows default to password auth with unsatisfied MFA and no active scope
+- already-verified users can receive a full auth session through `issue_verified_user_session` or `issue_session_for_user`
 
 ## Intended Integration
 
