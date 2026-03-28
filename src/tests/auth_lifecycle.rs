@@ -36,12 +36,20 @@ async fn login_issues_tokens_and_authenticates_access_token() {
     assert!(!payload.user.session.mfa.satisfied);
     assert!(payload.user.session.mfa.methods.is_empty());
     assert_eq!(payload.user.session.active_scope, None);
+    assert_eq!(
+        payload.user.scopes,
+        vec![
+            "users.read".to_string(),
+            "collection.collection-1.records.read".to_string()
+        ]
+    );
 
     let authenticated = auth
         .authenticate_access_token(&payload.access_token)
         .unwrap();
     assert_eq!(authenticated.user_id, payload.user.user_id);
     assert_eq!(authenticated.session_id, payload.user.session_id);
+    assert_eq!(authenticated.scopes, payload.user.scopes);
     assert_eq!(authenticated.session, payload.user.session);
 }
 
@@ -111,7 +119,9 @@ async fn refresh_rotates_tokens_and_tracks_usage_metadata() {
         original_record.session_family_id
     );
     assert_eq!(new_record.session_id, original_record.session_id);
+    assert_eq!(new_record.scopes, original_record.scopes);
     assert_eq!(new_record.session, original_record.session);
+    assert_eq!(refreshed.user.scopes, login_payload.user.scopes);
     assert_eq!(refreshed.user.session, login_payload.user.session);
 }
 
@@ -252,6 +262,7 @@ async fn bearer_and_connection_init_authentication_work() {
         .and_then(|value| value.downcast_ref::<AuthUser>())
         .unwrap();
     assert_eq!(data_user.user_id, "user-1");
+    assert_eq!(data_user.scopes, payload.user.scopes);
     assert_eq!(data_user.session.auth_method, AuthMethod::Password);
 }
 
@@ -270,13 +281,18 @@ async fn verified_user_session_issuance_supports_email_code_and_totp_context() {
 
     assert_eq!(payload.user.user_id, "user-verified");
     assert_eq!(payload.user.session.auth_method, AuthMethod::EmailCode);
+    assert!(payload.user.scopes.is_empty());
     assert!(!payload.user.session.mfa.satisfied);
     assert!(payload.user.session.active_scope.is_none());
 
     let stepped_up = auth
-        .issue_session_for_user(
+        .issue_session_for_user_with_scopes(
             "user-verified",
             vec!["CatalogEditor".to_string()],
+            vec![
+                "global.admin".to_string(),
+                "collection.catalog-1.records.write".to_string(),
+            ],
             SessionContext {
                 auth_method: AuthMethod::TotpStepUp,
                 mfa: MfaState {
@@ -297,6 +313,13 @@ async fn verified_user_session_issuance_supports_email_code_and_totp_context() {
     let decoded = auth
         .authenticate_access_token(&stepped_up.access_token)
         .unwrap();
+    assert_eq!(
+        decoded.scopes,
+        vec![
+            "global.admin".to_string(),
+            "collection.catalog-1.records.write".to_string()
+        ]
+    );
     assert_eq!(decoded.session.auth_method, AuthMethod::TotpStepUp);
     assert!(decoded.session.mfa.satisfied);
     assert_eq!(decoded.session.mfa.methods, vec![MfaMethod::Totp]);

@@ -14,6 +14,7 @@ mod graphql;
 mod guards;
 mod models;
 pub mod prelude;
+mod scopes;
 mod service;
 mod session;
 mod stores;
@@ -31,6 +32,7 @@ pub use models::{
     RefreshTokenRevocationReason, StoredLoginChallenge, StoredRefreshToken, StoredUser,
     TotpOptions, TotpProvisioning, TotpSecret, VerifiedLoginChallenge, VerifiedPasswordResetToken,
 };
+pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;
 pub use session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use stores::{LoginChallengeStore, PasswordResetTokenStore, RefreshTokenStore, UserStore};

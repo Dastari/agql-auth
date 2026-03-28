@@ -1,6 +1,7 @@
 mod auth_lifecycle;
 mod challenges;
 mod recovery;
+mod scopes;
 mod totp;
 
 use std::collections::{HashMap, HashSet};
@@ -243,6 +244,10 @@ pub(super) fn stored_user(
         principal: principal.to_string(),
         password_hash: auth.hash_password(password).unwrap(),
         roles: vec!["CatalogEditor".to_string()],
+        scopes: vec![
+            "users.read".to_string(),
+            "collection.collection-1.records.read".to_string(),
+        ],
         disabled: false,
     }
 }

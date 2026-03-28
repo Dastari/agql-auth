@@ -9,6 +9,7 @@ This crate provides:
 - Argon2 password hashing and verification
 - short-lived JWT access tokens
 - rotated opaque refresh tokens
+- first-class string scope claims alongside roles
 - structured session-context claims for auth method, MFA state, and active scope
 - database-agnostic storage traits
 - password-reset token issuance and verification primitives
@@ -32,6 +33,9 @@ This crate provides:
 - `MfaMethod`
 - `ActiveScope`
 - `AuthPayload`
+- `has_scope`
+- `has_any_scope`
+- `has_all_scopes`
 - `PasswordResetToken`
 - `IssuedLoginChallenge`
 - `StoredLoginChallenge`
@@ -61,12 +65,34 @@ TOTP:
 - build `otpauth://` provisioning URIs
 - verify codes with configurable digits, period, and skew window
 
-Structured session context:
+Roles, scopes, and structured session context:
 
+- access tokens carry `roles`, `scopes`, and typed `ctx`
+- roles remain available for coarse identity and operator meaning
+- scopes are opaque strings owned by the host application
+- old access tokens without `scopes` still decode with `scopes = []`
+- scope helpers use exact string matching only; wildcard or prefix semantics are intentionally not built in
 - access tokens carry a typed session context envelope
 - typed context includes auth method, MFA satisfaction, and optional active tenant/org/catalog scope
 - existing password login and refresh flows default to password auth with unsatisfied MFA and no active scope
 - already-verified users can receive a full auth session through `issue_verified_user_session` or `issue_session_for_user`
+
+Example host-app session issuance with scopes:
+
+```rust
+let payload = auth_service
+    .issue_verified_user_session_with_scopes(
+        user.id.clone(),
+        vec!["Operator".to_string()],
+        vec![
+            "users.read".to_string(),
+            format!("collection.{}.records.write", collection_id),
+        ],
+        AuthMethod::EmailCode,
+        metadata,
+    )
+    .await?;
+```
 
 ## Intended Integration
 

@@ -32,6 +32,8 @@ struct AccessTokenClaims {
     sid: String,
     roles: Vec<String>,
     #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
     ctx: SessionContext,
     iss: String,
     aud: String,
@@ -132,6 +134,7 @@ where
             user_id: user.id,
             session_id,
             roles: user.roles,
+            scopes: user.scopes,
             session: SessionContext::for_auth_method(AuthMethod::Password),
         };
 
@@ -198,6 +201,7 @@ where
             user_id: user.id,
             session_id: existing.session_id,
             roles: user.roles,
+            scopes: existing.scopes.clone(),
             session: existing.session.clone(),
         };
 
@@ -271,6 +275,7 @@ where
             user_id: claims.sub,
             session_id,
             roles: claims.roles,
+            scopes: claims.scopes,
             session: claims.ctx,
         })
     }
@@ -287,9 +292,28 @@ where
         auth_method: AuthMethod,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
-        self.issue_session_for_user(
+        self.issue_verified_user_session_with_scopes(
             user_id,
             roles,
+            Vec::new(),
+            auth_method,
+            metadata,
+        )
+        .await
+    }
+
+    pub async fn issue_verified_user_session_with_scopes(
+        &self,
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        auth_method: AuthMethod,
+        metadata: ClientMetadata,
+    ) -> AuthResult<AuthPayload> {
+        self.issue_session_for_user_with_scopes(
+            user_id,
+            roles,
+            scopes,
             SessionContext::for_auth_method(auth_method),
             metadata,
         )
@@ -303,10 +327,23 @@ where
         session: SessionContext,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
+        self.issue_session_for_user_with_scopes(user_id, roles, Vec::new(), session, metadata)
+            .await
+    }
+
+    pub async fn issue_session_for_user_with_scopes(
+        &self,
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        session: SessionContext,
+        metadata: ClientMetadata,
+    ) -> AuthResult<AuthPayload> {
         let auth_user = AuthUser {
             user_id: user_id.into(),
             session_id: Uuid::new_v4(),
             roles,
+            scopes,
             session,
         };
         self.issue_auth_payload(auth_user, Uuid::new_v4(), metadata)
@@ -375,6 +412,7 @@ where
             user_id: auth_user.user_id.clone(),
             session_id: auth_user.session_id,
             session_family_id,
+            scopes: auth_user.scopes.clone(),
             session: auth_user.session.clone(),
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
@@ -404,6 +442,7 @@ where
             sub: auth_user.user_id.clone(),
             sid: auth_user.session_id.to_string(),
             roles: auth_user.roles.clone(),
+            scopes: auth_user.scopes.clone(),
             ctx: auth_user.session.clone(),
             iss: self.config.issuer.clone(),
             aud: self.config.audience.clone(),

@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::scopes::{
+    has_all_scopes as scopes_include_all, has_any_scope as scopes_include_any,
+    has_scope as scope_exists,
+};
 use crate::session::SessionContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -10,7 +14,29 @@ pub struct AuthUser {
     pub session_id: Uuid,
     pub roles: Vec<String>,
     #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
     pub session: SessionContext,
+}
+
+impl AuthUser {
+    pub fn has_scope(&self, required: &str) -> bool {
+        scope_exists(&self.scopes, required)
+    }
+
+    pub fn has_any_scope<S>(&self, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        scopes_include_any(&self.scopes, required)
+    }
+
+    pub fn has_all_scopes<S>(&self, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        scopes_include_all(&self.scopes, required)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +45,8 @@ pub struct StoredUser {
     pub principal: String,
     pub password_hash: String,
     pub roles: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
     pub disabled: bool,
 }
 
@@ -37,6 +65,8 @@ pub struct StoredRefreshToken {
     pub user_id: String,
     pub session_id: Uuid,
     pub session_family_id: Uuid,
+    #[serde(default)]
+    pub scopes: Vec<String>,
     #[serde(default)]
     pub session: SessionContext,
     pub token_hash: String,

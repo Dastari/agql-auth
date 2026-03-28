@@ -7,6 +7,7 @@ pub use crate::models::{
     RefreshTokenRevocationReason, StoredLoginChallenge, StoredRefreshToken, StoredUser,
     TotpOptions, TotpProvisioning, TotpSecret, VerifiedLoginChallenge, VerifiedPasswordResetToken,
 };
+pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use crate::service::AuthService;
 pub use crate::session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use crate::stores::{
