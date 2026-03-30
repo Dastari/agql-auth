@@ -117,7 +117,7 @@ pub(crate) fn hash_refresh_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     let digest = hasher.finalize();
-    encode_hex(digest.as_slice())
+    encode_hex(digest)
 }
 
 fn encode_hex(bytes: impl AsRef<[u8]>) -> String {
