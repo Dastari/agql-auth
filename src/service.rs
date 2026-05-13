@@ -75,8 +75,8 @@ where
         }
 
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_issuer(&[config.issuer.clone()]);
-        validation.set_audience(&[config.audience.clone()]);
+        validation.set_issuer(std::slice::from_ref(&config.issuer));
+        validation.set_audience(std::slice::from_ref(&config.audience));
         validation.required_spec_claims.extend(
             ["exp", "iat", "iss", "aud", "sub"]
                 .into_iter()

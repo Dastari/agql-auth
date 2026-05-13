@@ -1,18 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuthMethod {
+    #[default]
     Password,
     EmailCode,
     SmsCode,
     TotpStepUp,
     ServiceToken,
-}
-
-impl Default for AuthMethod {
-    fn default() -> Self {
-        Self::Password
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
