@@ -43,6 +43,22 @@ pub enum AuthError {
     InvalidTotpCode,
     #[error("invalid totp secret")]
     InvalidTotpSecret,
+    #[error("invalid oauth state")]
+    InvalidOAuthState,
+    #[error("oauth state expired")]
+    OAuthStateExpired,
+    #[error("oauth state replay detected")]
+    OAuthStateReplayed,
+    #[error("oidc discovery failed: {0}")]
+    OidcDiscovery(String),
+    #[error("oidc token exchange failed: {0}")]
+    OidcTokenExchange(String),
+    #[error("oidc callback failed: {0}")]
+    OidcCallback(String),
+    #[error("oidc token validation failed: {0}")]
+    OidcTokenValidation(String),
+    #[error("external login rejected: {0}")]
+    ExternalLoginRejected(String),
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
     #[error("missing authorization data")]
@@ -87,6 +103,14 @@ impl ErrorExtensions for AuthError {
                     AuthError::InvalidLoginCode => "INVALID_LOGIN_CODE",
                     AuthError::InvalidTotpCode => "INVALID_TOTP_CODE",
                     AuthError::InvalidTotpSecret => "INVALID_TOTP_SECRET",
+                    AuthError::InvalidOAuthState => "INVALID_OAUTH_STATE",
+                    AuthError::OAuthStateExpired => "OAUTH_STATE_EXPIRED",
+                    AuthError::OAuthStateReplayed => "OAUTH_STATE_REPLAYED",
+                    AuthError::OidcDiscovery(_) => "OIDC_DISCOVERY_FAILED",
+                    AuthError::OidcTokenExchange(_) => "OIDC_TOKEN_EXCHANGE_FAILED",
+                    AuthError::OidcCallback(_) => "OIDC_CALLBACK_FAILED",
+                    AuthError::OidcTokenValidation(_) => "OIDC_TOKEN_VALIDATION_FAILED",
+                    AuthError::ExternalLoginRejected(_) => "EXTERNAL_LOGIN_REJECTED",
                     AuthError::InvalidConfiguration(_) => "INVALID_CONFIGURATION",
                     AuthError::MissingAuthorizationData => "MISSING_AUTHORIZATION_DATA",
                     AuthError::MissingConnectionInitAuth => "MISSING_CONNECTION_INIT_AUTH",

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -207,4 +208,152 @@ impl Default for TotpOptions {
             allowed_skew: 1,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OidcAuthorizationRequest {
+    pub authorization_url: String,
+    pub provider_name: String,
+    pub state: String,
+    pub nonce: String,
+    pub code_verifier: String,
+    pub code_challenge: String,
+    pub expires_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OidcCallbackInput {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+impl OidcCallbackInput {
+    pub fn code_and_state(code: impl Into<String>, state: impl Into<String>) -> Self {
+        Self {
+            code: Some(code.into()),
+            state: Some(state.into()),
+            error: None,
+            error_description: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcTokenResponse {
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub id_token: String,
+    pub token_type: Option<String>,
+    pub expires_in: Option<i64>,
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub raw: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatedOidcClaims {
+    pub provider_name: String,
+    pub issuer: String,
+    pub audiences: Vec<String>,
+    pub subject: String,
+    pub external_subject: String,
+    pub expires_at: OffsetDateTime,
+    pub not_before: OffsetDateTime,
+    pub issued_at: OffsetDateTime,
+    pub nonce: String,
+    pub tenant_id: Option<String>,
+    pub object_id: Option<String>,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub preferred_username: Option<String>,
+    pub roles: Vec<String>,
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub raw: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalIdentity {
+    pub provider_name: String,
+    pub external_subject: String,
+    pub user_id: String,
+    pub issuer: String,
+    pub tenant_id: Option<String>,
+    pub provider_user_id: Option<String>,
+    #[serde(default)]
+    pub claims_snapshot: JsonValue,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthLoginState {
+    pub provider_name: String,
+    pub state_hash: String,
+    pub nonce: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub created_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    pub consumed_at: Option<OffsetDateTime>,
+}
+
+impl OAuthLoginState {
+    pub fn is_expired(&self, now: OffsetDateTime) -> bool {
+        self.expires_at <= now
+    }
+
+    pub fn is_consumed(&self) -> bool {
+        self.consumed_at.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MicrosoftEntraClaims {
+    pub issuer: String,
+    pub audience: Vec<String>,
+    pub subject: String,
+    pub tenant_id: String,
+    pub object_id: Option<String>,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub preferred_username: Option<String>,
+    pub roles: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+impl TryFrom<&ValidatedOidcClaims> for MicrosoftEntraClaims {
+    type Error = crate::AuthError;
+
+    fn try_from(claims: &ValidatedOidcClaims) -> Result<Self, Self::Error> {
+        let tenant_id = claims.tenant_id.clone().ok_or_else(|| {
+            crate::AuthError::OidcTokenValidation(
+                "Microsoft Entra ID token is missing tid".to_string(),
+            )
+        })?;
+
+        Ok(Self {
+            issuer: claims.issuer.clone(),
+            audience: claims.audiences.clone(),
+            subject: claims.subject.clone(),
+            tenant_id,
+            object_id: claims.object_id.clone(),
+            email: claims.email.clone(),
+            name: claims.name.clone(),
+            preferred_username: claims.preferred_username.clone(),
+            roles: claims.roles.clone(),
+            groups: claims.groups.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcLoginResult {
+    pub auth: AuthPayload,
+    pub claims: ValidatedOidcClaims,
+    pub external_identity: ExternalIdentity,
+    pub token_response: OidcTokenResponse,
 }

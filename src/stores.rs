@@ -3,7 +3,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    AuthResult, RefreshTokenRevocationReason, StoredLoginChallenge, StoredRefreshToken, StoredUser,
+    AuthResult, ExternalIdentity, OAuthLoginState, OidcTokenResponse, RefreshTokenRevocationReason,
+    StoredLoginChallenge, StoredRefreshToken, StoredUser,
 };
 
 #[async_trait]
@@ -81,4 +82,53 @@ pub trait LoginChallengeStore: Send + Sync {
         challenge_id: Uuid,
         consumed_at: OffsetDateTime,
     ) -> AuthResult<bool>;
+}
+
+#[async_trait]
+pub trait OAuthStateStore: Send + Sync {
+    async fn insert_oauth_state(&self, state: OAuthLoginState) -> AuthResult<()>;
+
+    async fn consume_oauth_state(
+        &self,
+        provider_name: &str,
+        state_hash: &str,
+        consumed_at: OffsetDateTime,
+    ) -> AuthResult<Option<OAuthLoginState>>;
+
+    async fn expire_oauth_states(
+        &self,
+        older_than: OffsetDateTime,
+        expired_at: OffsetDateTime,
+    ) -> AuthResult<u64>;
+}
+
+#[async_trait]
+pub trait ExternalIdentityStore: Send + Sync {
+    async fn find_external_identity(
+        &self,
+        provider_name: &str,
+        external_subject: &str,
+    ) -> AuthResult<Option<ExternalIdentity>>;
+
+    async fn link_external_identity(&self, identity: ExternalIdentity) -> AuthResult<()>;
+
+    async fn update_external_identity_claims_snapshot(
+        &self,
+        provider_name: &str,
+        external_subject: &str,
+        claims_snapshot: serde_json::Value,
+        updated_at: OffsetDateTime,
+    ) -> AuthResult<()>;
+}
+
+#[async_trait]
+pub trait OAuthTokenStore: Send + Sync {
+    async fn store_oauth_tokens(
+        &self,
+        provider_name: &str,
+        external_subject: &str,
+        user_id: &str,
+        token_response: &OidcTokenResponse,
+        stored_at: OffsetDateTime,
+    ) -> AuthResult<()>;
 }

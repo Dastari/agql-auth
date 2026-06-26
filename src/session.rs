@@ -8,6 +8,8 @@ pub enum AuthMethod {
     SmsCode,
     TotpStepUp,
     ServiceToken,
+    Oidc,
+    MicrosoftOidc,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,5 +1,6 @@
 mod auth_lifecycle;
 mod challenges;
+mod oidc;
 mod recovery;
 mod scopes;
 mod totp;
