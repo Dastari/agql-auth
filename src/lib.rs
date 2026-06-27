@@ -1,40 +1,55 @@
 //! Database-agnostic authentication primitives and `async-graphql` helpers.
 //!
-//! The crate is designed around a few principles:
+//! `agql-auth` gives host applications reusable authentication building blocks
+//! without taking over the host's database, HTTP framework, cookie policy, user
+//! provisioning, or business authorization model.
 //!
-//! - short-lived JWT access tokens
-//! - rotated opaque refresh tokens
-//! - configurable HS256 or RS256 local JWT signing
-//! - JWKS export for asymmetric local token validation by routers
-//! - OpenID Connect authorization-code + PKCE login primitives
-//! - Microsoft Entra ID provider configuration and ID-token validation
-//! - database-agnostic storage via traits
-//! - thin integration points for `async-graphql` HTTP requests and subscriptions
-//! - minimal assumptions about the consuming application's ORM or transport setup
+//! ## Core Pieces
 //!
-//! ## OIDC and Microsoft Entra ID
+//! - [`AuthService`] issues and validates local sessions.
+//! - [`AuthConfig`] configures issuer, audience, TTLs, and JWT signing mode.
+//! - [`UserStore`] and [`RefreshTokenStore`] let the host provide persistence.
+//! - [`AuthUser`] is injected into `async-graphql` request data after
+//!   authentication.
+//! - [`RequireAuth`], [`RequireAnyRole`], [`RequireScope`], and related guards
+//!   protect resolvers.
 //!
-//! `OidcProvider` owns provider discovery, authorization URL generation, token
-//! exchange, JWKS caching, ID-token validation, and the handoff into local
-//! `AuthService` session issuance. Host applications keep ownership of HTTP
-//! transport, redirect handlers, database schemas, provisioning policy, and
-//! provider token persistence.
+//! ## Local Sessions
 //!
-//! For Microsoft Entra ID, start from `MicrosoftEntraConfig`, implement
-//! `OAuthStateStore` with atomic one-time state consumption, implement
-//! `ExternalIdentityStore` for stable provider links, and provide an
-//! `ExternalUserProvisioner` to create, link, or reject local users. After a
-//! successful callback, `login_with_callback` returns a local `AuthPayload` with
-//! normal `agql-auth` access and refresh tokens. Microsoft access tokens are not
-//! used as local authorization tokens.
+//! Access tokens are short-lived JWTs containing the local user ID, session ID,
+//! roles, scopes, and [`SessionContext`]. Refresh tokens are opaque, hashed
+//! before storage, and rotated on refresh. A replayed refresh token revokes the
+//! token family through the host's [`RefreshTokenStore`].
 //!
-//! ## Local JWT Signing
+//! ## JWT Signing And JWKS
 //!
-//! `AuthConfig::new(secret)` preserves legacy HS256 behavior. For deployments
-//! where a router or another service needs to validate local `agql-auth` access
-//! tokens without sharing a symmetric secret, use `AuthConfig::with_rs256_pem`.
-//! RS256 tokens include the configured `kid`, validate locally with the public
-//! key, and can be exposed through `AuthService::jwks()`.
+//! [`AuthConfig::new`] preserves the legacy HS256 behavior. New deployments that
+//! need routers or other services to validate local `agql-auth` tokens should
+//! use [`AuthConfig::with_rs256_pem`]. RS256 tokens include the configured
+//! `kid`, validate locally with public key material, and can be exposed through
+//! [`AuthService::jwks`].
+//!
+//! ## OIDC And Microsoft Entra ID
+//!
+//! [`OidcProvider`] owns OIDC discovery, authorization URL generation, token
+//! exchange, JWKS caching, ID-token validation, state and nonce validation, and
+//! the handoff into local [`AuthService`] session issuance.
+//!
+//! Microsoft Entra ID setup starts with [`MicrosoftEntraConfig`]. Host
+//! applications provide an [`OAuthStateStore`] with atomic one-time state
+//! consumption, an [`ExternalIdentityStore`] for stable provider links, an
+//! [`ExternalUserProvisioner`] for account creation/linking/rejection, and an
+//! optional [`ClaimsMapper`] for local roles and scopes.
+//!
+//! Microsoft access tokens are not used as local authorization tokens. After a
+//! successful OIDC callback, `agql-auth` returns an [`OidcLoginResult`] whose
+//! `auth` field is a normal local [`AuthPayload`].
+//!
+//! ## More Documentation
+//!
+//! The repository README links focused guides for storage traits, authorization,
+//! JWT signing and JWKS, Microsoft Entra OIDC, recovery flows, and MFA
+//! primitives.
 
 mod config;
 mod errors;

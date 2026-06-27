@@ -9,22 +9,30 @@ use crate::scopes::{
 };
 use crate::session::SessionContext;
 
+/// Authenticated local user attached to `async-graphql` request data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthUser {
+    /// Stable local user ID.
     pub user_id: String,
+    /// Local session ID.
     pub session_id: Uuid,
+    /// Local roles assigned to the session.
     pub roles: Vec<String>,
+    /// Local scopes assigned to the session.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Typed session context embedded in the access-token `ctx` claim.
     #[serde(default)]
     pub session: SessionContext,
 }
 
 impl AuthUser {
+    /// Returns `true` when the exact required scope is present.
     pub fn has_scope(&self, required: &str) -> bool {
         scope_exists(&self.scopes, required)
     }
 
+    /// Returns `true` when any required scope is present.
     pub fn has_any_scope<S>(&self, required: &[S]) -> bool
     where
         S: AsRef<str>,
@@ -32,6 +40,7 @@ impl AuthUser {
         scopes_include_any(&self.scopes, required)
     }
 
+    /// Returns `true` when all required scopes are present.
     pub fn has_all_scopes<S>(&self, required: &[S]) -> bool
     where
         S: AsRef<str>,
@@ -40,113 +49,180 @@ impl AuthUser {
     }
 }
 
+/// User record returned by the host's [`crate::UserStore`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredUser {
+    /// Stable local user ID.
     pub id: String,
+    /// Login principal, such as email or username.
     pub principal: String,
+    /// Argon2 password hash.
     pub password_hash: String,
+    /// Local roles.
     pub roles: Vec<String>,
+    /// Local scopes.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Whether login and refresh should be rejected.
     pub disabled: bool,
 }
 
+/// Reason a refresh token was revoked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RefreshTokenRevocationReason {
+    /// User logged out.
     Logout,
+    /// Token was replaced during refresh-token rotation.
     Rotation,
+    /// A revoked token was reused.
     ReplayDetected,
+    /// Administrative revocation.
     AdminRevoked,
+    /// Token expired.
     Expired,
 }
 
+/// Host-persisted refresh-token record.
+///
+/// The raw refresh token is returned only once in [`AuthPayload`]. Stores should
+/// persist `token_hash`, not the raw token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredRefreshToken {
+    /// Refresh-token record ID.
     pub id: Uuid,
+    /// Local user ID.
     pub user_id: String,
+    /// Local session ID.
     pub session_id: Uuid,
+    /// Session-family ID used for replay revocation.
     pub session_family_id: Uuid,
+    /// Local scopes bound to refresh-token rotation.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Session context bound to refresh-token rotation.
     #[serde(default)]
     pub session: SessionContext,
+    /// Hash of the raw refresh token.
     pub token_hash: String,
+    /// Creation time.
     pub created_at: OffsetDateTime,
+    /// Expiry time.
     pub expires_at: OffsetDateTime,
+    /// Last successful use time.
     pub last_used_at: Option<OffsetDateTime>,
+    /// Revocation time, if revoked.
     pub revoked_at: Option<OffsetDateTime>,
+    /// Replacement token ID after rotation.
     pub replaced_by_token_id: Option<Uuid>,
+    /// Last recorded user-agent metadata.
     pub user_agent: Option<String>,
+    /// Last recorded IP metadata.
     pub ip_address: Option<String>,
 }
 
 impl StoredRefreshToken {
+    /// Returns `true` when the record has expired.
     pub fn is_expired(&self, now: OffsetDateTime) -> bool {
         self.expires_at <= now
     }
 
+    /// Returns `true` when the record is revoked.
     pub fn is_revoked(&self) -> bool {
         self.revoked_at.is_some()
     }
 }
 
+/// Local session payload returned after login, refresh, or verified-session issuance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthPayload {
+    /// Authenticated local user.
     pub user: AuthUser,
+    /// Short-lived local JWT access token.
     pub access_token: String,
+    /// Access-token expiry time.
     pub access_token_expires_at: OffsetDateTime,
+    /// Opaque refresh token returned once to the client.
     pub refresh_token: String,
+    /// Refresh-token expiry time.
     pub refresh_token_expires_at: OffsetDateTime,
 }
 
+/// Password-reset token issued by [`crate::AuthService`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PasswordResetToken {
+    /// Local user ID.
     pub user_id: String,
+    /// Token ID used for one-time storage.
     pub token_id: Uuid,
+    /// Signed reset token sent to the user.
     pub token: String,
+    /// Expiry time.
     pub expires_at: OffsetDateTime,
 }
 
+/// Verified password-reset token claims.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifiedPasswordResetToken {
+    /// Local user ID.
     pub user_id: String,
+    /// Token ID used for one-time consume.
     pub token_id: Uuid,
+    /// Token issued-at time.
     pub issued_at: OffsetDateTime,
+    /// Token expiry time.
     pub expires_at: OffsetDateTime,
 }
 
+/// Host-persisted one-time login challenge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredLoginChallenge {
+    /// Challenge ID.
     pub id: Uuid,
+    /// Principal being challenged.
     pub principal: String,
+    /// Password hash of the one-time code.
     pub code_hash: String,
+    /// Creation time.
     pub created_at: OffsetDateTime,
+    /// Expiry time.
     pub expires_at: OffsetDateTime,
+    /// Failed verification attempts.
     pub failed_attempts: u32,
+    /// Maximum allowed failed attempts.
     pub max_attempts: u32,
+    /// Consumption time, if consumed.
     pub consumed_at: Option<OffsetDateTime>,
+    /// Optional delivery channel label.
     pub channel: Option<String>,
 }
 
 impl StoredLoginChallenge {
+    /// Returns `true` when the challenge has expired.
     pub fn is_expired(&self, now: OffsetDateTime) -> bool {
         self.expires_at <= now
     }
 
+    /// Returns `true` when the challenge has been consumed.
     pub fn is_consumed(&self) -> bool {
         self.consumed_at.is_some()
     }
 
+    /// Returns `true` when failed attempts have reached the maximum.
     pub fn attempts_exhausted(&self) -> bool {
         self.failed_attempts >= self.max_attempts
     }
 }
 
+/// Options for a one-time login challenge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginChallengeOptions {
+    /// Numeric code length.
     pub code_length: usize,
+    /// Challenge lifetime.
     pub ttl: Duration,
+    /// Maximum failed attempts before rejection.
     pub max_attempts: u32,
+    /// Optional delivery channel label.
     pub channel: Option<String>,
 }
 
@@ -161,42 +237,66 @@ impl Default for LoginChallengeOptions {
     }
 }
 
+/// One-time login challenge returned to the host for delivery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssuedLoginChallenge {
+    /// Challenge ID.
     pub challenge_id: Uuid,
+    /// Principal being challenged.
     pub principal: String,
+    /// Raw code to deliver to the user.
     pub code: String,
+    /// Expiry time.
     pub expires_at: OffsetDateTime,
+    /// Maximum failed attempts.
     pub max_attempts: u32,
+    /// Optional delivery channel label.
     pub channel: Option<String>,
 }
 
+/// Result of a successfully verified login challenge.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifiedLoginChallenge {
+    /// Challenge ID.
     pub challenge_id: Uuid,
+    /// Principal that completed the challenge.
     pub principal: String,
+    /// Verification time.
     pub verified_at: OffsetDateTime,
+    /// Optional delivery channel label.
     pub channel: Option<String>,
 }
 
+/// Generated TOTP secret.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpSecret {
+    /// Raw random secret bytes.
     pub raw_secret: Vec<u8>,
+    /// Base32-encoded secret used in authenticator apps.
     pub base32_secret: String,
 }
 
+/// TOTP provisioning details for authenticator apps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpProvisioning {
+    /// Issuer displayed by authenticator apps.
     pub issuer: String,
+    /// Account name displayed by authenticator apps.
     pub account_name: String,
+    /// Base32 secret.
     pub secret: String,
+    /// `otpauth://` provisioning URI.
     pub uri: String,
 }
 
+/// TOTP generation and validation options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpOptions {
+    /// Number of digits in generated codes.
     pub digits: u32,
+    /// TOTP period length in seconds.
     pub period_seconds: u64,
+    /// Allowed number of time steps before and after the current step.
     pub allowed_skew: u64,
 }
 
@@ -210,26 +310,40 @@ impl Default for TotpOptions {
     }
 }
 
+/// Authorization redirect information returned by [`crate::OidcProvider`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcAuthorizationRequest {
+    /// Fully built provider authorization URL.
     pub authorization_url: String,
+    /// Provider name.
     pub provider_name: String,
+    /// Raw OAuth state sent to the browser.
     pub state: String,
+    /// Raw OIDC nonce.
     pub nonce: String,
+    /// PKCE code verifier stored in state.
     pub code_verifier: String,
+    /// PKCE S256 challenge sent to the provider.
     pub code_challenge: String,
+    /// State expiry time.
     pub expires_at: OffsetDateTime,
 }
 
+/// Host-provided OIDC callback data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcCallbackInput {
+    /// Authorization code from the provider callback.
     pub code: Option<String>,
+    /// Raw state from the provider callback.
     pub state: Option<String>,
+    /// Provider error code.
     pub error: Option<String>,
+    /// Provider error description.
     pub error_description: Option<String>,
 }
 
 impl OidcCallbackInput {
+    /// Creates callback input for a successful authorization-code callback.
     pub fn code_and_state(code: impl Into<String>, state: impl Into<String>) -> Self {
         Self {
             code: Some(code.into()),
@@ -240,88 +354,147 @@ impl OidcCallbackInput {
     }
 }
 
+/// OIDC token endpoint response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcTokenResponse {
+    /// Provider access token, if returned.
     pub access_token: Option<String>,
+    /// Provider refresh token, if returned and requested.
     pub refresh_token: Option<String>,
+    /// Provider ID token.
     pub id_token: String,
+    /// Token type.
     pub token_type: Option<String>,
+    /// Access-token lifetime in seconds.
     pub expires_in: Option<i64>,
+    /// Provider-returned scope string.
     pub scope: Option<String>,
+    /// Raw token response.
     #[serde(default)]
     pub raw: JsonValue,
 }
 
+/// Claims accepted after OIDC ID-token validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatedOidcClaims {
+    /// Provider name.
     pub provider_name: String,
+    /// Token issuer.
     pub issuer: String,
+    /// Token audiences.
     pub audiences: Vec<String>,
+    /// OIDC subject.
     pub subject: String,
+    /// Stable external subject used for linking.
     pub external_subject: String,
+    /// Expiry time.
     pub expires_at: OffsetDateTime,
+    /// Not-before time.
     pub not_before: OffsetDateTime,
+    /// Issued-at time.
     pub issued_at: OffsetDateTime,
+    /// Validated nonce.
     pub nonce: String,
+    /// Provider tenant ID, when present.
     pub tenant_id: Option<String>,
+    /// Provider object ID, when present.
     pub object_id: Option<String>,
+    /// Email claim, when present.
     pub email: Option<String>,
+    /// Display name, when present.
     pub name: Option<String>,
+    /// Preferred username, when present.
     pub preferred_username: Option<String>,
+    /// Provider roles claim.
     pub roles: Vec<String>,
+    /// Provider groups claim.
     pub groups: Vec<String>,
+    /// Raw accepted claims.
     #[serde(default)]
     pub raw: JsonValue,
 }
 
+/// Link between a provider identity and a local user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalIdentity {
+    /// Provider name.
     pub provider_name: String,
+    /// Stable provider subject selected by `agql-auth`.
     pub external_subject: String,
+    /// Local user ID.
     pub user_id: String,
+    /// Issuer associated with the link.
     pub issuer: String,
+    /// Tenant ID, when present.
     pub tenant_id: Option<String>,
+    /// Provider-specific user ID, when present.
     pub provider_user_id: Option<String>,
+    /// Raw claims snapshot from the latest successful login.
     #[serde(default)]
     pub claims_snapshot: JsonValue,
+    /// Link creation time.
     pub created_at: OffsetDateTime,
+    /// Last update time.
     pub updated_at: OffsetDateTime,
 }
 
+/// Stored OIDC authorization state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthLoginState {
+    /// Provider name.
     pub provider_name: String,
+    /// Hash of the raw state value.
     pub state_hash: String,
+    /// OIDC nonce bound to this authorization request.
     pub nonce: String,
+    /// PKCE code verifier.
     pub code_verifier: String,
+    /// Redirect URI used during authorization.
     pub redirect_uri: String,
+    /// Requested scopes.
     pub scopes: Vec<String>,
+    /// Creation time.
     pub created_at: OffsetDateTime,
+    /// Expiry time.
     pub expires_at: OffsetDateTime,
+    /// Consumption time, if consumed.
     pub consumed_at: Option<OffsetDateTime>,
 }
 
 impl OAuthLoginState {
+    /// Returns `true` when the state has expired.
     pub fn is_expired(&self, now: OffsetDateTime) -> bool {
         self.expires_at <= now
     }
 
+    /// Returns `true` when the state has already been consumed.
     pub fn is_consumed(&self) -> bool {
         self.consumed_at.is_some()
     }
 }
 
+/// Microsoft-specific view of validated OIDC claims.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MicrosoftEntraClaims {
+    /// Token issuer.
     pub issuer: String,
+    /// Token audiences.
     pub audience: Vec<String>,
+    /// OIDC subject.
     pub subject: String,
+    /// Microsoft tenant ID.
     pub tenant_id: String,
+    /// Microsoft object ID.
     pub object_id: Option<String>,
+    /// Email claim, when present.
     pub email: Option<String>,
+    /// Display name, when present.
     pub name: Option<String>,
+    /// Preferred username, when present.
     pub preferred_username: Option<String>,
+    /// Microsoft roles claim.
     pub roles: Vec<String>,
+    /// Microsoft groups claim.
     pub groups: Vec<String>,
 }
 
@@ -350,10 +523,15 @@ impl TryFrom<&ValidatedOidcClaims> for MicrosoftEntraClaims {
     }
 }
 
+/// Result of a completed OIDC login and local session issuance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcLoginResult {
+    /// Local `agql-auth` session payload.
     pub auth: AuthPayload,
+    /// Validated OIDC claims.
     pub claims: ValidatedOidcClaims,
+    /// External identity that was linked or updated.
     pub external_identity: ExternalIdentity,
+    /// Provider token endpoint response.
     pub token_response: OidcTokenResponse,
 }

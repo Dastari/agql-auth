@@ -60,6 +60,13 @@ pub(super) struct PasswordResetTokenClaims {
     pub(super) iat: i64,
 }
 
+/// Main authentication service.
+///
+/// `AuthService` owns password hashing, local JWT issuance and validation,
+/// refresh-token rotation, optional JWKS export, GraphQL request injection,
+/// password reset tokens, login challenges, and TOTP helpers. Persistence is
+/// supplied by host implementations of [`crate::UserStore`] and
+/// [`crate::RefreshTokenStore`].
 pub struct AuthService<U, R> {
     pub(super) config: AuthConfig,
     pub(super) user_store: Arc<U>,
@@ -78,6 +85,9 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
+    /// Creates an authentication service and validates local JWT key material.
+    ///
+    /// RS256 PEM keys are parsed and checked during construction.
     pub fn new(config: AuthConfig, user_store: Arc<U>, refresh_store: Arc<R>) -> AuthResult<Self> {
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
 
@@ -95,6 +105,7 @@ where
         })
     }
 
+    /// Hashes a password with Argon2.
     pub fn hash_password(&self, password: &str) -> AuthResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         self.argon2
@@ -103,6 +114,7 @@ where
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))
     }
 
+    /// Verifies a password against an Argon2 password hash.
     pub fn verify_password(&self, password: &str, password_hash: &str) -> AuthResult<()> {
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
@@ -111,6 +123,10 @@ where
             .map_err(|_| AuthError::InvalidCredentials)
     }
 
+    /// Performs password login and issues a local session.
+    ///
+    /// The returned [`AuthPayload`] contains a short-lived local JWT access
+    /// token and an opaque refresh token.
     pub async fn login(
         &self,
         principal: &str,
@@ -143,6 +159,10 @@ where
             .await
     }
 
+    /// Rotates a refresh token and returns a new local session payload.
+    ///
+    /// Reuse of a revoked refresh token is treated as replay and revokes the
+    /// token family through the configured store.
     pub async fn refresh(
         &self,
         refresh_token: &str,
@@ -237,6 +257,7 @@ where
         })
     }
 
+    /// Revokes a refresh token or its full session family.
     pub async fn logout(&self, refresh_token: &str, revoke_family: bool) -> AuthResult<()> {
         let now = OffsetDateTime::now_utc();
         let token_hash = hash_refresh_token(refresh_token);
@@ -263,6 +284,7 @@ where
         }
     }
 
+    /// Validates a local JWT access token and returns the authenticated user.
     pub fn authenticate_access_token(&self, token: &str) -> AuthResult<AuthUser> {
         self.validate_local_jwt_header(token)
             .map_err(|_| AuthError::InvalidAccessToken)?;
@@ -283,15 +305,20 @@ where
         })
     }
 
+    /// Validates a bearer token with or without the `Bearer ` prefix.
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
         self.authenticate_access_token(token)
     }
 
+    /// Returns the public JWKS document for asymmetric signing.
+    ///
+    /// HS256 configurations return [`AuthError::JwksUnsupported`].
     pub fn jwks(&self) -> AuthResult<JsonValue> {
         self.jwks.clone().ok_or(AuthError::JwksUnsupported)
     }
 
+    /// Issues a local session for a user already verified by the host.
     pub async fn issue_verified_user_session(
         &self,
         user_id: impl Into<String>,
@@ -309,6 +336,7 @@ where
         .await
     }
 
+    /// Issues a local session with roles and scopes for a user already verified by the host.
     pub async fn issue_verified_user_session_with_scopes(
         &self,
         user_id: impl Into<String>,
@@ -327,6 +355,7 @@ where
         .await
     }
 
+    /// Issues a local session with an explicit session context.
     pub async fn issue_session_for_user(
         &self,
         user_id: impl Into<String>,
@@ -338,6 +367,7 @@ where
             .await
     }
 
+    /// Issues a local session with scopes and an explicit session context.
     pub async fn issue_session_for_user_with_scopes(
         &self,
         user_id: impl Into<String>,
@@ -357,6 +387,9 @@ where
             .await
     }
 
+    /// Injects an authenticated user into an `async-graphql` request when a token is present.
+    ///
+    /// Passing `None` leaves the request unauthenticated.
     pub async fn inject_http_auth(
         &self,
         mut request: async_graphql::Request,
@@ -370,6 +403,7 @@ where
         Ok(request)
     }
 
+    /// Authenticates an `async-graphql` WebSocket connection-init payload.
     pub async fn authenticate_connection_init_value(&self, value: JsonValue) -> AuthResult<Data> {
         let token = extract_connection_init_token(&value)?;
         let auth_user = self.authenticate_bearer(&token)?;

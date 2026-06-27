@@ -13,6 +13,7 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
+    /// Issues a password-reset token with the default one-hour TTL.
     pub fn issue_password_reset_token(
         &self,
         user_id: impl Into<String>,
@@ -20,6 +21,7 @@ where
         self.issue_password_reset_token_with_ttl(user_id, Duration::hours(1))
     }
 
+    /// Issues a password-reset token with a custom TTL.
     pub fn issue_password_reset_token_with_ttl(
         &self,
         user_id: impl Into<String>,
@@ -49,6 +51,7 @@ where
         })
     }
 
+    /// Issues a password-reset token and records its token ID in a store.
     pub async fn issue_password_reset_token_with_store<S>(
         &self,
         store: &S,
@@ -65,6 +68,7 @@ where
         Ok(issued)
     }
 
+    /// Validates a password-reset token without consuming its stored token ID.
     pub fn authenticate_password_reset_token(
         &self,
         token: &str,
@@ -97,6 +101,7 @@ where
         })
     }
 
+    /// Validates and consumes a password-reset token exactly once.
     pub async fn consume_password_reset_token<S>(
         &self,
         store: &S,

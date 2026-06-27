@@ -1,78 +1,118 @@
 use async_graphql::ErrorExtensions;
 use thiserror::Error;
 
+/// Error type returned by `agql-auth` APIs.
+///
+/// The implementation also maps each variant to an `async-graphql` extension
+/// code through [`async_graphql::ErrorExtensions`].
 #[derive(Debug, Error)]
 pub enum AuthError {
+    /// Principal/password did not match.
     #[error("invalid credentials")]
     InvalidCredentials,
+    /// No authenticated user was present.
     #[error("unauthenticated")]
     Unauthenticated,
+    /// The authenticated user lacks required authorization.
     #[error("forbidden")]
     Forbidden,
+    /// Bearer token syntax was invalid.
     #[error("invalid bearer token")]
     InvalidBearerToken,
+    /// Access token failed validation.
     #[error("invalid access token")]
     InvalidAccessToken,
+    /// Access token is expired.
     #[error("access token expired")]
     AccessTokenExpired,
+    /// Refresh token was not found or is invalid.
     #[error("invalid refresh token")]
     InvalidRefreshToken,
+    /// Refresh token is expired.
     #[error("refresh token expired")]
     RefreshTokenExpired,
+    /// A revoked refresh token was reused.
     #[error("refresh token replay detected")]
     RefreshTokenReplayDetected,
+    /// User exists but is disabled.
     #[error("user is disabled")]
     UserDisabled,
+    /// Password-reset token failed validation.
     #[error("invalid password reset token")]
     InvalidPasswordResetToken,
+    /// Password-reset token is expired.
     #[error("password reset token expired")]
     PasswordResetTokenExpired,
+    /// Password-reset token was consumed more than once.
     #[error("password reset token replay detected")]
     PasswordResetTokenReplayed,
+    /// Login challenge was not found or is invalid.
     #[error("invalid login challenge")]
     InvalidLoginChallenge,
+    /// Login challenge is expired.
     #[error("login challenge expired")]
     LoginChallengeExpired,
+    /// Login challenge was consumed more than once.
     #[error("login challenge replay detected")]
     LoginChallengeReplayed,
+    /// Login challenge exceeded allowed attempts.
     #[error("login challenge attempts exhausted")]
     LoginChallengeAttemptsExhausted,
+    /// Login challenge code did not match.
     #[error("invalid login challenge code")]
     InvalidLoginCode,
+    /// TOTP code did not match.
     #[error("invalid totp code")]
     InvalidTotpCode,
+    /// TOTP secret could not be decoded or used.
     #[error("invalid totp secret")]
     InvalidTotpSecret,
+    /// OAuth state was missing or invalid.
     #[error("invalid oauth state")]
     InvalidOAuthState,
+    /// OAuth state is expired.
     #[error("oauth state expired")]
     OAuthStateExpired,
+    /// OAuth state was consumed more than once.
     #[error("oauth state replay detected")]
     OAuthStateReplayed,
+    /// OIDC discovery failed.
     #[error("oidc discovery failed: {0}")]
     OidcDiscovery(String),
+    /// OIDC token exchange failed.
     #[error("oidc token exchange failed: {0}")]
     OidcTokenExchange(String),
+    /// OIDC callback contained an error or was malformed.
     #[error("oidc callback failed: {0}")]
     OidcCallback(String),
+    /// OIDC ID-token validation failed.
     #[error("oidc token validation failed: {0}")]
     OidcTokenValidation(String),
+    /// Host provisioning or linking policy rejected external login.
     #[error("external login rejected: {0}")]
     ExternalLoginRejected(String),
+    /// JWKS export is unavailable for the configured signing mode.
     #[error("JWKS export is unsupported for the configured JWT signing mode")]
     JwksUnsupported,
+    /// Public configuration was invalid.
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
+    /// Authorization data was missing.
     #[error("missing authorization data")]
     MissingAuthorizationData,
+    /// WebSocket connection-init payload had no usable auth data.
     #[error("missing websocket authorization payload")]
     MissingConnectionInitAuth,
+    /// Token creation failed.
     #[error("token creation failed: {0}")]
     TokenCreation(String),
+    /// Password hashing or verification failed unexpectedly.
     #[error("password hashing failed: {0}")]
     PasswordHashing(String),
+    /// Host store operation failed.
     #[error("storage error: {0}")]
     Store(String),
+    /// Legacy configuration error.
     #[error("configuration error: {0}")]
     Config(String),
 }

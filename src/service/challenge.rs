@@ -14,6 +14,7 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
+    /// Creates a one-time login challenge and returns the raw code for delivery.
     pub async fn create_login_challenge<S>(
         &self,
         store: &S,
@@ -50,6 +51,7 @@ where
         })
     }
 
+    /// Verifies and consumes a one-time login challenge.
     pub async fn verify_login_challenge<S>(
         &self,
         store: &S,

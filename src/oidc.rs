@@ -57,50 +57,77 @@ const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
 const MICROSOFT_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 #[async_trait]
+/// Minimal HTTP abstraction used by [`OidcProvider`].
+///
+/// Host applications implement this with their preferred HTTP client.
 pub trait OidcHttpClient: Send + Sync {
+    /// Performs a JSON GET request.
     async fn get_json(&self, url: &str) -> AuthResult<JsonValue>;
 
+    /// Performs a form-encoded POST request and returns JSON.
     async fn post_form_json(&self, url: &str, form: &[(String, String)]) -> AuthResult<JsonValue>;
 }
 
+/// OIDC discovery document fields used by `agql-auth`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcDiscoveryDocument {
+    /// Provider issuer.
     pub issuer: String,
+    /// Authorization endpoint.
     pub authorization_endpoint: String,
+    /// Token endpoint.
     pub token_endpoint: String,
+    /// JWKS URI.
     pub jwks_uri: String,
+    /// Raw discovery response.
     #[serde(default)]
     pub raw: JsonValue,
 }
 
+/// PKCE verifier and S256 challenge pair.
 #[derive(Debug, Clone)]
 pub struct PkcePair {
+    /// Random PKCE code verifier.
     pub code_verifier: String,
+    /// Base64url-encoded SHA-256 challenge.
     pub code_challenge: String,
 }
 
+/// Result of validating an OIDC callback before local user resolution.
 #[derive(Debug, Clone)]
 pub struct OidcCallbackOutcome {
+    /// Consumed state record.
     pub state: OAuthLoginState,
+    /// Provider token endpoint response.
     pub token_response: OidcTokenResponse,
+    /// Validated ID-token claims.
     pub claims: ValidatedOidcClaims,
 }
 
+/// Local roles and scopes derived from provider claims.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MappedClaims {
+    /// Local roles to assign.
     pub roles: Vec<String>,
+    /// Local scopes to assign.
     pub scopes: Vec<String>,
 }
 
+/// Local user resolution returned by an [`ExternalUserProvisioner`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedExternalUser {
+    /// Local user ID.
     pub user_id: String,
+    /// Local roles for the issued session.
     pub roles: Vec<String>,
+    /// Local scopes for the issued session.
     pub scopes: Vec<String>,
+    /// Whether to link this external identity when no link exists yet.
     pub link_external_identity: bool,
 }
 
 impl ProvisionedExternalUser {
+    /// Creates a provisioned external-user result that links by default.
     pub fn new(user_id: impl Into<String>, roles: Vec<String>, scopes: Vec<String>) -> Self {
         Self {
             user_id: user_id.into(),
@@ -110,6 +137,7 @@ impl ProvisionedExternalUser {
         }
     }
 
+    /// Creates a provisioned user using mapped local roles and scopes.
     pub fn from_mapped_claims(user_id: impl Into<String>, mapped_claims: &MappedClaims) -> Self {
         Self::new(
             user_id,
@@ -120,10 +148,13 @@ impl ProvisionedExternalUser {
 }
 
 #[async_trait]
+/// Maps validated provider claims into local roles and scopes.
 pub trait ClaimsMapper: Send + Sync {
+    /// Returns local roles and scopes derived from validated claims.
     async fn map_claims(&self, claims: &ValidatedOidcClaims) -> AuthResult<MappedClaims>;
 }
 
+/// Claims mapper that assigns no roles or scopes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopClaimsMapper;
 
@@ -135,7 +166,12 @@ impl ClaimsMapper for NoopClaimsMapper {
 }
 
 #[async_trait]
+/// Host extension point for external user provisioning and account linking.
 pub trait ExternalUserProvisioner: Send + Sync {
+    /// Resolves a validated external identity to a local user.
+    ///
+    /// Implementations may create a user, link to an existing user, or reject
+    /// the login by returning an error.
     async fn resolve_external_user(
         &self,
         claims: &ValidatedOidcClaims,
@@ -144,23 +180,34 @@ pub trait ExternalUserProvisioner: Send + Sync {
     ) -> AuthResult<ProvisionedExternalUser>;
 }
 
+/// Claims mapper for common Microsoft Entra role, group, tenant, and object-ID mappings.
 #[derive(Debug, Clone, Default)]
 pub struct MicrosoftClaimsMapper {
+    /// Microsoft app role to local roles.
     pub role_to_roles: HashMap<String, Vec<String>>,
+    /// Microsoft app role to local scopes.
     pub role_to_scopes: HashMap<String, Vec<String>>,
+    /// Microsoft group ID to local roles.
     pub group_to_roles: HashMap<String, Vec<String>>,
+    /// Microsoft group ID to local scopes.
     pub group_to_scopes: HashMap<String, Vec<String>>,
+    /// Microsoft tenant ID to local roles.
     pub tenant_to_roles: HashMap<String, Vec<String>>,
+    /// Microsoft tenant ID to local scopes.
     pub tenant_to_scopes: HashMap<String, Vec<String>>,
+    /// Microsoft object ID to local roles.
     pub object_id_to_roles: HashMap<String, Vec<String>>,
+    /// Microsoft object ID to local scopes.
     pub object_id_to_scopes: HashMap<String, Vec<String>>,
 }
 
 impl MicrosoftClaimsMapper {
+    /// Creates an empty Microsoft claims mapper.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Maps a Microsoft role claim to a local role.
     pub fn map_role_to_role(
         mut self,
         microsoft_role: impl Into<String>,
@@ -173,6 +220,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft role claim to a local scope.
     pub fn map_role_to_scope(
         mut self,
         microsoft_role: impl Into<String>,
@@ -185,6 +233,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft group ID to a local role.
     pub fn map_group_to_role(
         mut self,
         microsoft_group: impl Into<String>,
@@ -197,6 +246,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft group ID to a local scope.
     pub fn map_group_to_scope(
         mut self,
         microsoft_group: impl Into<String>,
@@ -209,6 +259,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft tenant ID to a local role.
     pub fn map_tenant_to_role(
         mut self,
         tenant_id: impl Into<String>,
@@ -221,6 +272,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft tenant ID to a local scope.
     pub fn map_tenant_to_scope(
         mut self,
         tenant_id: impl Into<String>,
@@ -233,6 +285,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft object ID to a local role.
     pub fn map_object_id_to_role(
         mut self,
         object_id: impl Into<String>,
@@ -245,6 +298,7 @@ impl MicrosoftClaimsMapper {
         self
     }
 
+    /// Maps a Microsoft object ID to a local scope.
     pub fn map_object_id_to_scope(
         mut self,
         object_id: impl Into<String>,
@@ -328,6 +382,7 @@ fn push_mapped(values: Option<&Vec<String>>, output: &mut Vec<String>, seen: &mu
     }
 }
 
+/// OIDC provider client for discovery, authorization, token exchange, and validation.
 #[derive(Clone)]
 pub struct OidcProvider {
     config: OidcProviderConfig,
@@ -337,6 +392,7 @@ pub struct OidcProvider {
 }
 
 impl OidcProvider {
+    /// Creates a provider from validated OIDC configuration and a host HTTP client.
     pub fn new(
         config: OidcProviderConfig,
         http_client: Arc<dyn OidcHttpClient>,
@@ -350,10 +406,12 @@ impl OidcProvider {
         })
     }
 
+    /// Returns provider configuration.
     pub fn config(&self) -> &OidcProviderConfig {
         &self.config
     }
 
+    /// Fetches and caches the OIDC discovery document.
     pub async fn discover(&self) -> AuthResult<OidcDiscoveryDocument> {
         if let Some(document) = self
             .discovery_cache
@@ -382,6 +440,9 @@ impl OidcProvider {
         Ok(document)
     }
 
+    /// Creates an authorization URL and stores one-time state.
+    ///
+    /// The generated request always includes PKCE and nonce.
     pub async fn create_authorization_request<S>(
         &self,
         state_store: &S,
@@ -437,6 +498,7 @@ impl OidcProvider {
         })
     }
 
+    /// Handles a callback through state consumption, token exchange, and ID-token validation.
     pub async fn handle_callback<S>(
         &self,
         state_store: &S,
@@ -484,6 +546,10 @@ impl OidcProvider {
         })
     }
 
+    /// Completes an OIDC login and issues a local `agql-auth` session.
+    ///
+    /// This method validates the provider callback, resolves or links a local
+    /// user through host extension points, and returns an [`OidcLoginResult`].
     #[allow(clippy::too_many_arguments)]
     pub async fn login_with_callback<U, R, S, E, P, M>(
         &self,
@@ -587,6 +653,7 @@ impl OidcProvider {
         })
     }
 
+    /// Exchanges an authorization code using the stored PKCE verifier.
     pub async fn exchange_code(
         &self,
         code: &str,
@@ -627,6 +694,7 @@ impl OidcProvider {
         Ok(token_response)
     }
 
+    /// Validates an OIDC ID token against discovery, JWKS, audience, issuer, and nonce.
     pub async fn validate_id_token(
         &self,
         id_token: &str,
@@ -884,6 +952,7 @@ impl OneOrMany {
     }
 }
 
+/// Generates a random PKCE verifier and S256 challenge.
 pub fn generate_pkce_pair() -> PkcePair {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -895,24 +964,32 @@ pub fn generate_pkce_pair() -> PkcePair {
     }
 }
 
+/// Computes the PKCE S256 challenge for a verifier.
 pub fn pkce_s256_challenge(code_verifier: &str) -> String {
     let digest = Sha256::digest(code_verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Generates a random OAuth state value.
 pub fn generate_oauth_state() -> String {
     generate_urlsafe_secret()
 }
 
+/// Generates a random OIDC nonce value.
 pub fn generate_oidc_nonce() -> String {
     generate_urlsafe_secret()
 }
 
+/// Hashes an OAuth state value for storage.
 pub fn hash_oauth_state(state: &str) -> String {
     let digest = Sha256::digest(state.as_bytes());
     encode_hex(digest)
 }
 
+/// Selects the stable external subject used for account linking.
+///
+/// Microsoft Entra work/school accounts prefer `tenant_id:object_id`. Generic
+/// OIDC and Microsoft tokens without an object ID fall back to `issuer:subject`.
 pub fn stable_external_subject(
     provider_kind: &OidcProviderKind,
     issuer: &str,

@@ -1,3 +1,8 @@
+//! Commonly used `agql-auth` exports.
+//!
+//! Import this module when you want the primary service, models, stores,
+//! guards, OIDC helpers, and session types in one place.
+
 pub use crate::config::{
     AuthConfig, ClientMetadata, JwtSigningConfig, MicrosoftEntraConfig, MicrosoftEntraTenant,
     OidcProviderConfig, OidcProviderKind,

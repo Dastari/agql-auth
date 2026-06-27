@@ -2,10 +2,12 @@ use async_graphql::{Context, ErrorExtensions, Guard, Result as GraphqlResult};
 
 use crate::{AuthError, auth_user_from_ctx};
 
+/// `async-graphql` guard requiring an authenticated `AuthUser` in request data.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RequireAuth;
 
 impl RequireAuth {
+    /// Creates an authentication guard.
     pub fn new() -> Self {
         Self
     }
@@ -21,12 +23,14 @@ impl Guard for RequireAuth {
     }
 }
 
+/// `async-graphql` guard requiring at least one matching role.
 #[derive(Clone, Debug)]
 pub struct RequireAnyRole {
     roles: Vec<String>,
 }
 
 impl RequireAnyRole {
+    /// Creates a guard from accepted role names.
     pub fn new<I, S>(roles: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -58,12 +62,14 @@ impl Guard for RequireAnyRole {
     }
 }
 
+/// `async-graphql` guard requiring every configured role.
 #[derive(Clone, Debug)]
 pub struct RequireAllRoles {
     roles: Vec<String>,
 }
 
 impl RequireAllRoles {
+    /// Creates a guard from required role names.
     pub fn new<I, S>(roles: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -75,12 +81,14 @@ impl RequireAllRoles {
     }
 }
 
+/// `async-graphql` guard requiring one exact scope.
 #[derive(Clone, Debug)]
 pub struct RequireScope {
     scope: String,
 }
 
 impl RequireScope {
+    /// Creates a guard from the required scope.
     pub fn new(scope: impl Into<String>) -> Self {
         Self {
             scope: scope.into(),
@@ -104,12 +112,14 @@ impl Guard for RequireScope {
     }
 }
 
+/// `async-graphql` guard requiring at least one exact scope match.
 #[derive(Clone, Debug)]
 pub struct RequireAnyScope {
     scopes: Vec<String>,
 }
 
 impl RequireAnyScope {
+    /// Creates a guard from accepted scopes.
     pub fn new<I, S>(scopes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -137,12 +147,14 @@ impl Guard for RequireAnyScope {
     }
 }
 
+/// `async-graphql` guard requiring every configured scope.
 #[derive(Clone, Debug)]
 pub struct RequireAllScopes {
     scopes: Vec<String>,
 }
 
 impl RequireAllScopes {
+    /// Creates a guard from required scopes.
     pub fn new<I, S>(scopes: I) -> Self
     where
         I: IntoIterator<Item = S>,

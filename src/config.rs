@@ -5,13 +5,27 @@ use time::Duration;
 
 use crate::errors::AuthError;
 
+/// Runtime configuration for [`crate::AuthService`].
+///
+/// `AuthConfig::new(secret)` and [`AuthConfig::with_hs256_secret`] preserve the
+/// legacy HS256 behavior. Use [`AuthConfig::with_rs256_pem`] when local
+/// `agql-auth` tokens need to be validated by routers or services that should
+/// only receive public key material.
 #[derive(Clone)]
 pub struct AuthConfig {
+    /// Expected issuer for locally issued JWTs.
     pub issuer: String,
+    /// Expected audience for locally issued JWTs.
     pub audience: String,
+    /// Legacy HS256 secret field retained for backward compatibility.
+    ///
+    /// New code should prefer [`AuthConfig::jwt_signing`].
     pub jwt_secret: String,
+    /// Configured local JWT signing mode.
     pub jwt_signing: JwtSigningConfig,
+    /// Access-token lifetime.
     pub access_token_ttl: Duration,
+    /// Refresh-token lifetime.
     pub refresh_token_ttl: Duration,
 }
 
@@ -29,10 +43,12 @@ impl fmt::Debug for AuthConfig {
 }
 
 impl AuthConfig {
+    /// Creates a legacy HS256 configuration from a symmetric secret.
     pub fn new(jwt_secret: impl Into<String>) -> Self {
         Self::with_hs256_secret(jwt_secret)
     }
 
+    /// Creates an explicit HS256 configuration from a symmetric secret.
     pub fn with_hs256_secret(secret: impl Into<String>) -> Self {
         let secret = secret.into();
         Self {
@@ -45,6 +61,10 @@ impl AuthConfig {
         }
     }
 
+    /// Creates an RS256 configuration from PEM-encoded key material.
+    ///
+    /// The private key is used only for signing. The public key is used for
+    /// local validation and JWKS export. `key_id` must be non-empty.
     pub fn with_rs256_pem(
         private_key_pem: impl Into<String>,
         public_key_pem: impl Into<String>,
@@ -64,6 +84,9 @@ impl AuthConfig {
         }
     }
 
+    /// Replaces the local JWT signing configuration.
+    ///
+    /// This also keeps the legacy `jwt_secret` field in sync for HS256 callers.
     pub fn set_jwt_signing(&mut self, signing: JwtSigningConfig) {
         self.jwt_secret = match &signing {
             JwtSigningConfig::Hs256 { secret } => secret.clone(),
@@ -73,14 +96,21 @@ impl AuthConfig {
     }
 }
 
+/// Signing configuration for locally issued `agql-auth` JWTs.
 #[derive(Clone)]
 pub enum JwtSigningConfig {
+    /// HS256 signing with a shared symmetric secret.
     Hs256 {
+        /// Shared signing and validation secret.
         secret: String,
     },
+    /// RS256 signing with private key material and public-key validation.
     Rs256 {
+        /// PEM-encoded RSA private key used only for signing.
         private_key_pem: String,
+        /// PEM-encoded RSA public key used for local validation and JWKS export.
         public_key_pem: String,
+        /// Key identifier placed in JWT headers and JWKS output.
         key_id: String,
     },
 }
@@ -102,38 +132,61 @@ impl fmt::Debug for JwtSigningConfig {
     }
 }
 
+/// Metadata captured when issuing or rotating a local session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientMetadata {
+    /// Client IP address, if the host chooses to record it.
     pub ip_address: Option<String>,
+    /// Client user-agent, if the host chooses to record it.
     pub user_agent: Option<String>,
 }
 
+/// Built-in provider behavior for OIDC validation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OidcProviderKind {
+    /// Standards-based OIDC validation without Microsoft-specific tenant rules.
     Generic,
+    /// Microsoft Entra ID validation with tenant and consumer-account checks.
     MicrosoftEntra,
 }
 
+/// Provider-agnostic OIDC configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcProviderConfig {
+    /// Stable provider name used in state and external-identity storage.
     pub provider_name: String,
+    /// Provider-specific validation behavior.
     pub provider_kind: OidcProviderKind,
+    /// URL of the provider's `.well-known/openid-configuration` document.
     pub discovery_url: String,
+    /// OAuth2 client ID.
     pub client_id: String,
+    /// Optional client secret for confidential clients.
     pub client_secret: Option<String>,
+    /// Redirect URI registered with the provider.
     pub redirect_uri: String,
+    /// Requested OAuth/OIDC scopes before optional `offline_access` is appended.
     pub requested_scopes: Vec<String>,
+    /// Whether to request `offline_access`.
     pub request_offline_access: bool,
+    /// Allowed tenant IDs for providers that expose tenant claims.
     pub allowed_tenants: Vec<String>,
+    /// Allowed issuer strings. Microsoft templates may include `{tenantid}`.
     pub allowed_issuers: Vec<String>,
+    /// Whether Microsoft consumer accounts are allowed.
     pub allow_consumer_accounts: bool,
+    /// Time to keep fetched JWKS documents in memory.
     pub jwks_cache_ttl: Duration,
+    /// Permitted clock skew for token validation.
     pub clock_skew: Duration,
+    /// Lifetime for OAuth state records.
     pub state_ttl: Duration,
+    /// Allowed ID-token signature algorithms.
     pub allowed_id_token_algs: Vec<String>,
 }
 
 impl OidcProviderConfig {
+    /// Creates a generic OIDC provider config with `openid profile email`.
     pub fn new(
         provider_name: impl Into<String>,
         discovery_url: impl Into<String>,
@@ -163,6 +216,7 @@ impl OidcProviderConfig {
         }
     }
 
+    /// Validates required provider configuration.
     pub fn validate(&self) -> crate::AuthResult<()> {
         if self.provider_name.trim().is_empty() {
             return Err(AuthError::InvalidConfiguration(
@@ -221,6 +275,7 @@ impl OidcProviderConfig {
         Ok(())
     }
 
+    /// Returns requested scopes with `offline_access` appended when configured.
     pub fn scopes(&self) -> Vec<String> {
         let mut scopes = self.requested_scopes.clone();
         if self.request_offline_access && !scopes.iter().any(|scope| scope == "offline_access") {
@@ -230,15 +285,21 @@ impl OidcProviderConfig {
     }
 }
 
+/// Microsoft Entra tenant mode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MicrosoftEntraTenant {
+    /// A single tenant by tenant ID.
     TenantId(String),
+    /// Work or school accounts from any organization.
     Organizations,
+    /// Both organization and consumer accounts, subject to account policy.
     Common,
+    /// Consumer accounts only. Disabled unless explicitly selected.
     Consumers,
 }
 
 impl MicrosoftEntraTenant {
+    /// Returns the path segment used in Microsoft discovery URLs.
     pub fn as_path_segment(&self) -> &str {
         match self {
             MicrosoftEntraTenant::TenantId(tenant_id) => tenant_id.as_str(),
@@ -249,24 +310,39 @@ impl MicrosoftEntraTenant {
     }
 }
 
+/// Microsoft Entra ID OIDC configuration helper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MicrosoftEntraConfig {
+    /// Stable provider name used in state and external-identity storage.
     pub provider_name: String,
+    /// Tenant mode for Microsoft endpoints.
     pub tenant: MicrosoftEntraTenant,
+    /// Microsoft application client ID.
     pub client_id: String,
+    /// Optional client secret for confidential clients.
     pub client_secret: Option<String>,
+    /// Registered redirect URI.
     pub redirect_uri: String,
+    /// Allowed tenant IDs. Empty means any tenant accepted by the tenant mode.
     pub allowed_tenants: Vec<String>,
+    /// Allowed issuer strings. Templates may include `{tenantid}`.
     pub allowed_issuers: Vec<String>,
+    /// Requested OAuth/OIDC scopes before optional `offline_access` is appended.
     pub requested_scopes: Vec<String>,
+    /// Whether to request `offline_access`.
     pub request_offline_access: bool,
+    /// Time to keep fetched JWKS documents in memory.
     pub jwks_cache_ttl: Duration,
+    /// Permitted clock skew for token validation.
     pub clock_skew: Duration,
+    /// Lifetime for OAuth state records.
     pub state_ttl: Duration,
+    /// Whether Microsoft consumer accounts are allowed.
     pub allow_consumers: bool,
 }
 
 impl MicrosoftEntraConfig {
+    /// Creates a single-tenant Microsoft Entra configuration.
     pub fn single_tenant(
         tenant_id: impl Into<String>,
         client_id: impl Into<String>,
@@ -294,14 +370,17 @@ impl MicrosoftEntraConfig {
         }
     }
 
+    /// Creates a multi-tenant work/school configuration.
     pub fn organizations(client_id: impl Into<String>, redirect_uri: impl Into<String>) -> Self {
         Self::multi_tenant(MicrosoftEntraTenant::Organizations, client_id, redirect_uri)
     }
 
+    /// Creates a Microsoft `common` configuration.
     pub fn common(client_id: impl Into<String>, redirect_uri: impl Into<String>) -> Self {
         Self::multi_tenant(MicrosoftEntraTenant::Common, client_id, redirect_uri)
     }
 
+    /// Creates a consumer-account configuration and explicitly enables consumers.
     pub fn consumers(client_id: impl Into<String>, redirect_uri: impl Into<String>) -> Self {
         let mut config =
             Self::multi_tenant(MicrosoftEntraTenant::Consumers, client_id, redirect_uri);
@@ -335,6 +414,7 @@ impl MicrosoftEntraConfig {
         }
     }
 
+    /// Converts the Microsoft helper into provider-agnostic OIDC configuration.
     pub fn into_oidc_provider_config(self) -> crate::AuthResult<OidcProviderConfig> {
         if matches!(self.tenant, MicrosoftEntraTenant::Consumers) && !self.allow_consumers {
             return Err(AuthError::InvalidConfiguration(

@@ -15,6 +15,7 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
+    /// Generates a random TOTP secret.
     pub fn generate_totp_secret(&self, num_bytes: usize) -> AuthResult<TotpSecret> {
         if num_bytes < 10 {
             return Err(AuthError::InvalidConfiguration(
@@ -31,6 +32,7 @@ where
         })
     }
 
+    /// Builds an `otpauth://` provisioning URI for an authenticator app.
     pub fn build_totp_provisioning(
         &self,
         secret: &TotpSecret,
@@ -59,6 +61,7 @@ where
         })
     }
 
+    /// Verifies a TOTP code for the supplied secret and time.
     pub fn verify_totp_code(
         &self,
         secret_base32: &str,
