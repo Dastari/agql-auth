@@ -1,6 +1,6 @@
 pub use crate::config::{
-    AuthConfig, ClientMetadata, MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig,
-    OidcProviderKind,
+    AuthConfig, ClientMetadata, JwtSigningConfig, MicrosoftEntraConfig, MicrosoftEntraTenant,
+    OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::errors::AuthError;
 pub use crate::graphql::{auth_user_from_ctx, auth_user_from_ctx_opt};

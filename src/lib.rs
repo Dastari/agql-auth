@@ -4,6 +4,8 @@
 //!
 //! - short-lived JWT access tokens
 //! - rotated opaque refresh tokens
+//! - configurable HS256 or RS256 local JWT signing
+//! - JWKS export for asymmetric local token validation by routers
 //! - OpenID Connect authorization-code + PKCE login primitives
 //! - Microsoft Entra ID provider configuration and ID-token validation
 //! - database-agnostic storage via traits
@@ -25,6 +27,14 @@
 //! successful callback, `login_with_callback` returns a local `AuthPayload` with
 //! normal `agql-auth` access and refresh tokens. Microsoft access tokens are not
 //! used as local authorization tokens.
+//!
+//! ## Local JWT Signing
+//!
+//! `AuthConfig::new(secret)` preserves legacy HS256 behavior. For deployments
+//! where a router or another service needs to validate local `agql-auth` access
+//! tokens without sharing a symmetric secret, use `AuthConfig::with_rs256_pem`.
+//! RS256 tokens include the configured `kid`, validate locally with the public
+//! key, and can be exposed through `AuthService::jwks()`.
 
 mod config;
 mod errors;
@@ -43,8 +53,8 @@ mod util;
 mod tests;
 
 pub use config::{
-    AuthConfig, ClientMetadata, MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig,
-    OidcProviderKind,
+    AuthConfig, ClientMetadata, JwtSigningConfig, MicrosoftEntraConfig, MicrosoftEntraTenant,
+    OidcProviderConfig, OidcProviderKind,
 };
 pub use errors::AuthError;
 pub use graphql::{auth_user_from_ctx, auth_user_from_ctx_opt};

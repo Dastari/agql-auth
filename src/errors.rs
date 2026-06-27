@@ -59,6 +59,8 @@ pub enum AuthError {
     OidcTokenValidation(String),
     #[error("external login rejected: {0}")]
     ExternalLoginRejected(String),
+    #[error("JWKS export is unsupported for the configured JWT signing mode")]
+    JwksUnsupported,
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
     #[error("missing authorization data")]
@@ -111,6 +113,7 @@ impl ErrorExtensions for AuthError {
                     AuthError::OidcCallback(_) => "OIDC_CALLBACK_FAILED",
                     AuthError::OidcTokenValidation(_) => "OIDC_TOKEN_VALIDATION_FAILED",
                     AuthError::ExternalLoginRejected(_) => "EXTERNAL_LOGIN_REJECTED",
+                    AuthError::JwksUnsupported => "JWKS_UNSUPPORTED",
                     AuthError::InvalidConfiguration(_) => "INVALID_CONFIGURATION",
                     AuthError::MissingAuthorizationData => "MISSING_AUTHORIZATION_DATA",
                     AuthError::MissingConnectionInitAuth => "MISSING_CONNECTION_INIT_AUTH",

@@ -1,25 +1,103 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
 use crate::errors::AuthError;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthConfig {
     pub issuer: String,
     pub audience: String,
     pub jwt_secret: String,
+    pub jwt_signing: JwtSigningConfig,
     pub access_token_ttl: Duration,
     pub refresh_token_ttl: Duration,
 }
 
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("jwt_secret", &"[redacted]")
+            .field("jwt_signing", &self.jwt_signing)
+            .field("access_token_ttl", &self.access_token_ttl)
+            .field("refresh_token_ttl", &self.refresh_token_ttl)
+            .finish()
+    }
+}
+
 impl AuthConfig {
     pub fn new(jwt_secret: impl Into<String>) -> Self {
+        Self::with_hs256_secret(jwt_secret)
+    }
+
+    pub fn with_hs256_secret(secret: impl Into<String>) -> Self {
+        let secret = secret.into();
         Self {
             issuer: "agql-auth".to_string(),
             audience: "agql-auth-clients".to_string(),
-            jwt_secret: jwt_secret.into(),
+            jwt_secret: secret.clone(),
+            jwt_signing: JwtSigningConfig::Hs256 { secret },
             access_token_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
+        }
+    }
+
+    pub fn with_rs256_pem(
+        private_key_pem: impl Into<String>,
+        public_key_pem: impl Into<String>,
+        key_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            issuer: "agql-auth".to_string(),
+            audience: "agql-auth-clients".to_string(),
+            jwt_secret: String::new(),
+            jwt_signing: JwtSigningConfig::Rs256 {
+                private_key_pem: private_key_pem.into(),
+                public_key_pem: public_key_pem.into(),
+                key_id: key_id.into(),
+            },
+            access_token_ttl: Duration::minutes(15),
+            refresh_token_ttl: Duration::days(30),
+        }
+    }
+
+    pub fn set_jwt_signing(&mut self, signing: JwtSigningConfig) {
+        self.jwt_secret = match &signing {
+            JwtSigningConfig::Hs256 { secret } => secret.clone(),
+            JwtSigningConfig::Rs256 { .. } => String::new(),
+        };
+        self.jwt_signing = signing;
+    }
+}
+
+#[derive(Clone)]
+pub enum JwtSigningConfig {
+    Hs256 {
+        secret: String,
+    },
+    Rs256 {
+        private_key_pem: String,
+        public_key_pem: String,
+        key_id: String,
+    },
+}
+
+impl fmt::Debug for JwtSigningConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JwtSigningConfig::Hs256 { .. } => f
+                .debug_struct("Hs256")
+                .field("secret", &"[redacted]")
+                .finish(),
+            JwtSigningConfig::Rs256 { key_id, .. } => f
+                .debug_struct("Rs256")
+                .field("private_key_pem", &"[redacted]")
+                .field("public_key_pem", &"[redacted]")
+                .field("key_id", key_id)
+                .finish(),
         }
     }
 }

@@ -1,4 +1,4 @@
-use jsonwebtoken::{Algorithm, Header, decode, encode};
+use jsonwebtoken::decode;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -39,8 +39,7 @@ where
             iat: issued_at.unix_timestamp(),
         };
 
-        let token = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
-            .map_err(|err| AuthError::TokenCreation(err.to_string()))?;
+        let token = self.encode_local_jwt(&claims)?;
 
         Ok(PasswordResetToken {
             user_id,
@@ -70,6 +69,8 @@ where
         &self,
         token: &str,
     ) -> AuthResult<VerifiedPasswordResetToken> {
+        self.validate_local_jwt_header(token)
+            .map_err(|_| AuthError::InvalidPasswordResetToken)?;
         let token_data =
             decode::<PasswordResetTokenClaims>(token, &self.decoding_key, &self.validation)
                 .map_err(map_password_reset_decode_error)?;

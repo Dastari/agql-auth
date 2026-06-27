@@ -9,6 +9,8 @@ This crate provides:
 - Argon2 password hashing and verification
 - short-lived JWT access tokens
 - rotated opaque refresh tokens
+- configurable HS256 or RS256 local JWT signing
+- JWKS export for asymmetric local token validation by routers
 - first-class string scope claims alongside roles
 - structured session-context claims for auth method, MFA state, and active scope
 - database-agnostic storage traits
@@ -24,6 +26,8 @@ This crate provides:
 ## Core Types
 
 - `AuthService<U, R>`
+- `AuthConfig`
+- `JwtSigningConfig`
 - `UserStore`
 - `RefreshTokenStore`
 - `PasswordResetTokenStore`
@@ -60,6 +64,90 @@ This crate provides:
 - `RequireScope`
 - `RequireAnyScope`
 - `RequireAllScopes`
+
+## Local JWT Signing And JWKS
+
+`agql-auth` issues local application access tokens itself. Host applications should configure signing through `AuthConfig`, then use the normal `AuthService` login, refresh, OIDC callback, and verified-session APIs. Do not reimplement token issuance in the host service.
+
+Legacy HS256 remains the default compatibility mode:
+
+```rust
+let auth = AuthService::new(
+    AuthConfig::new(std::env::var("JWT_SECRET")?),
+    std::sync::Arc::new(user_store),
+    std::sync::Arc::new(refresh_token_store),
+)?;
+```
+
+`AuthConfig::new(secret)` is equivalent to `AuthConfig::with_hs256_secret(secret)`. HS256 tokens preserve the existing claim shape:
+
+- `sub`
+- `sid`
+- `roles`
+- `scopes`
+- `ctx`
+- `iss`
+- `aud`
+- `exp`
+- `iat`
+
+For router or external validation, prefer RS256 so consumers can verify tokens from public key material only:
+
+```rust
+let auth = AuthService::new(
+    AuthConfig::with_rs256_pem(
+        std::env::var("JWT_PRIVATE_KEY_PEM")?,
+        std::env::var("JWT_PUBLIC_KEY_PEM")?,
+        "auth-key-2026-06",
+    ),
+    std::sync::Arc::new(user_store),
+    std::sync::Arc::new(refresh_token_store),
+)?;
+```
+
+When RS256 is configured:
+
+- access tokens are signed with `alg = RS256`
+- the JWT header includes the configured `kid`
+- local validation uses the configured public key
+- incoming tokens with the wrong `alg` or `kid` are rejected
+- issuer, audience, expiry, roles, scopes, and session claims are unchanged
+- private key material is not included in debug output or JWKS
+
+Expose the public signing key through your HTTP framework:
+
+```rust
+async fn jwks(auth: &AuthService<AppUserStore, AppRefreshTokenStore>) -> agql_auth::AuthResult<serde_json::Value> {
+    auth.jwks()
+}
+```
+
+For RS256, `jwks()` returns a document shaped like:
+
+```json
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "alg": "RS256",
+      "kid": "auth-key-2026-06",
+      "n": "...",
+      "e": "..."
+    }
+  ]
+}
+```
+
+For HS256, `jwks()` returns `AuthError::JwksUnsupported`; the symmetric secret is never exposed as JWKS.
+
+Production posture:
+
+- use RS256 or stronger asymmetric signing when routers such as Cosmo validate local app tokens
+- keep the private key only in the auth service
+- expose only the public JWKS document
+- treat HS256 as compatibility mode for local/simple deployments, not router validation
+- rotate keys by changing `kid` and publishing both old and new public keys during transition if multi-key support is added later
 
 ## Microsoft Entra ID OIDC
 

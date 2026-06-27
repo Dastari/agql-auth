@@ -9,14 +9,22 @@ use argon2::password_hash::{
     PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
 use async_graphql::Data;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
+};
+use rsa::RsaPublicKey;
+use rsa::pkcs1::DecodeRsaPublicKey;
+use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::AuthResult;
-use crate::config::{AuthConfig, ClientMetadata};
+use crate::config::{AuthConfig, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
 use crate::models::{AuthPayload, AuthUser, RefreshTokenRevocationReason, StoredRefreshToken};
 use crate::session::{AuthMethod, SessionContext};
@@ -60,6 +68,9 @@ pub struct AuthService<U, R> {
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
     pub(super) validation: Validation,
+    signing_algorithm: Algorithm,
+    signing_key_id: Option<String>,
+    jwks: Option<JsonValue>,
 }
 
 impl<U, R> AuthService<U, R>
@@ -68,25 +79,15 @@ where
     R: RefreshTokenStore + 'static,
 {
     pub fn new(config: AuthConfig, user_store: Arc<U>, refresh_store: Arc<R>) -> AuthResult<Self> {
-        if config.jwt_secret.is_empty() {
-            return Err(AuthError::Config(
-                "jwt_secret must not be empty".to_string(),
-            ));
-        }
-
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_issuer(std::slice::from_ref(&config.issuer));
-        validation.set_audience(std::slice::from_ref(&config.audience));
-        validation.required_spec_claims.extend(
-            ["exp", "iat", "iss", "aud", "sub"]
-                .into_iter()
-                .map(str::to_string),
-        );
+        let jwt_keys = JwtKeyMaterial::from_config(&config)?;
 
         Ok(Self {
-            encoding_key: EncodingKey::from_secret(config.jwt_secret.as_bytes()),
-            decoding_key: DecodingKey::from_secret(config.jwt_secret.as_bytes()),
-            validation,
+            encoding_key: jwt_keys.encoding_key,
+            decoding_key: jwt_keys.decoding_key,
+            validation: jwt_keys.validation,
+            signing_algorithm: jwt_keys.algorithm,
+            signing_key_id: jwt_keys.key_id,
+            jwks: jwt_keys.jwks,
             config,
             user_store,
             refresh_store,
@@ -263,6 +264,8 @@ where
     }
 
     pub fn authenticate_access_token(&self, token: &str) -> AuthResult<AuthUser> {
+        self.validate_local_jwt_header(token)
+            .map_err(|_| AuthError::InvalidAccessToken)?;
         let token_data = decode::<AccessTokenClaims>(token, &self.decoding_key, &self.validation)
             .map_err(map_access_token_decode_error)?;
         let claims = token_data.claims;
@@ -283,6 +286,10 @@ where
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
         self.authenticate_access_token(token)
+    }
+
+    pub fn jwks(&self) -> AuthResult<JsonValue> {
+        self.jwks.clone().ok_or(AuthError::JwksUnsupported)
     }
 
     pub async fn issue_verified_user_session(
@@ -450,7 +457,198 @@ where
             iat: issued_at.unix_timestamp(),
         };
 
-        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
+        self.encode_local_jwt(&claims)
+    }
+
+    pub(super) fn encode_local_jwt<T>(&self, claims: &T) -> AuthResult<String>
+    where
+        T: Serialize,
+    {
+        let mut header = Header::new(self.signing_algorithm);
+        header.kid = self.signing_key_id.clone();
+        encode(&header, claims, &self.encoding_key)
             .map_err(|err| AuthError::TokenCreation(err.to_string()))
     }
+
+    pub(super) fn validate_local_jwt_header(&self, token: &str) -> AuthResult<()> {
+        let header = decode_header(token).map_err(|_| AuthError::InvalidAccessToken)?;
+        if header.alg != self.signing_algorithm {
+            return Err(AuthError::InvalidAccessToken);
+        }
+
+        if let Some(expected_kid) = &self.signing_key_id {
+            match header.kid.as_deref() {
+                Some(actual_kid) if actual_kid == expected_kid => {}
+                _ => return Err(AuthError::InvalidAccessToken),
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct JwtKeyMaterial {
+    encoding_key: EncodingKey,
+    decoding_key: DecodingKey,
+    validation: Validation,
+    algorithm: Algorithm,
+    key_id: Option<String>,
+    jwks: Option<JsonValue>,
+}
+
+impl JwtKeyMaterial {
+    fn from_config(config: &AuthConfig) -> AuthResult<Self> {
+        let signing = effective_signing_config(config);
+        let algorithm = signing.algorithm();
+        let (encoding_key, decoding_key, key_id, jwks) = match signing {
+            EffectiveJwtSigningConfig::Hs256 { secret } => {
+                if secret.is_empty() {
+                    return Err(AuthError::Config(
+                        "jwt_secret must not be empty".to_string(),
+                    ));
+                }
+
+                (
+                    EncodingKey::from_secret(secret.as_bytes()),
+                    DecodingKey::from_secret(secret.as_bytes()),
+                    None,
+                    None,
+                )
+            }
+            EffectiveJwtSigningConfig::Rs256 {
+                private_key_pem,
+                public_key_pem,
+                key_id,
+            } => {
+                if key_id.trim().is_empty() {
+                    return Err(AuthError::InvalidConfiguration(
+                        "RS256 key_id must not be empty".to_string(),
+                    ));
+                }
+
+                let encoding_key =
+                    EncodingKey::from_rsa_pem(private_key_pem.as_bytes()).map_err(|_| {
+                        AuthError::InvalidConfiguration("invalid RS256 private key PEM".to_string())
+                    })?;
+                let decoding_key =
+                    DecodingKey::from_rsa_pem(public_key_pem.as_bytes()).map_err(|_| {
+                        AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string())
+                    })?;
+                validate_rs256_key_pair(&encoding_key, &decoding_key)?;
+                let jwks = build_rs256_jwks(public_key_pem, key_id)?;
+
+                (
+                    encoding_key,
+                    decoding_key,
+                    Some(key_id.to_string()),
+                    Some(jwks),
+                )
+            }
+        };
+
+        let mut validation = Validation::new(algorithm);
+        validation.set_issuer(std::slice::from_ref(&config.issuer));
+        validation.set_audience(std::slice::from_ref(&config.audience));
+        validation.required_spec_claims.extend(
+            ["exp", "iat", "iss", "aud", "sub"]
+                .into_iter()
+                .map(str::to_string),
+        );
+
+        Ok(Self {
+            encoding_key,
+            decoding_key,
+            validation,
+            algorithm,
+            key_id,
+            jwks,
+        })
+    }
+}
+
+enum EffectiveJwtSigningConfig<'a> {
+    Hs256 {
+        secret: &'a str,
+    },
+    Rs256 {
+        private_key_pem: &'a str,
+        public_key_pem: &'a str,
+        key_id: &'a str,
+    },
+}
+
+impl EffectiveJwtSigningConfig<'_> {
+    fn algorithm(&self) -> Algorithm {
+        match self {
+            Self::Hs256 { .. } => Algorithm::HS256,
+            Self::Rs256 { .. } => Algorithm::RS256,
+        }
+    }
+}
+
+fn effective_signing_config(config: &AuthConfig) -> EffectiveJwtSigningConfig<'_> {
+    match &config.jwt_signing {
+        JwtSigningConfig::Hs256 { secret } => {
+            let secret = if !config.jwt_secret.is_empty() && config.jwt_secret != *secret {
+                config.jwt_secret.as_str()
+            } else {
+                secret.as_str()
+            };
+            EffectiveJwtSigningConfig::Hs256 { secret }
+        }
+        JwtSigningConfig::Rs256 {
+            private_key_pem,
+            public_key_pem,
+            key_id,
+        } => EffectiveJwtSigningConfig::Rs256 {
+            private_key_pem,
+            public_key_pem,
+            key_id,
+        },
+    }
+}
+
+fn validate_rs256_key_pair(
+    encoding_key: &EncodingKey,
+    decoding_key: &DecodingKey,
+) -> AuthResult<()> {
+    let probe = json!({
+        "sub": "agql-auth-key-validation",
+        "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+    });
+    let token = encode(&Header::new(Algorithm::RS256), &probe, encoding_key).map_err(|_| {
+        AuthError::InvalidConfiguration("invalid RS256 private key PEM".to_string())
+    })?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.required_spec_claims.clear();
+    validation.validate_exp = false;
+    validation.validate_aud = false;
+    decode::<JsonValue>(&token, decoding_key, &validation).map_err(|_| {
+        AuthError::InvalidConfiguration(
+            "RS256 private and public keys do not form a valid key pair".to_string(),
+        )
+    })?;
+    Ok(())
+}
+
+fn build_rs256_jwks(public_key_pem: &str, key_id: &str) -> AuthResult<JsonValue> {
+    let public_key = parse_rsa_public_key(public_key_pem)?;
+    Ok(json!({
+        "keys": [
+            {
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": key_id,
+                "n": URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
+                "e": URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+            }
+        ]
+    }))
+}
+
+fn parse_rsa_public_key(public_key_pem: &str) -> AuthResult<RsaPublicKey> {
+    RsaPublicKey::from_public_key_pem(public_key_pem)
+        .or_else(|_| RsaPublicKey::from_pkcs1_pem(public_key_pem))
+        .map_err(|_| AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string()))
 }

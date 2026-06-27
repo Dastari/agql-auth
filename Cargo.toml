@@ -1,6 +1,6 @@
 [package]
 name = "agql-auth"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Database-agnostic authentication primitives and async-graphql integration helpers."
@@ -21,6 +21,7 @@ hmac = "0.12"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 percent-encoding = "2"
 rand = "0.8"
+rsa = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
