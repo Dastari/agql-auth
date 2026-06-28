@@ -1,2 +1,25 @@
-/target
+# Rust build output
+/target/
+
+# Library crate lockfile policy
 Cargo.lock
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
