@@ -35,6 +35,26 @@ Important refresh-token behavior:
 Use a unique index on the refresh-token hash and indexes on session-family IDs
 to make revocation efficient.
 
+## API Tokens
+
+`ApiTokenStore` persists long-lived opaque API/service tokens. It is independent
+of `UserStore` and `RefreshTokenStore`.
+
+The store must support:
+
+- inserting a `StoredApiToken`
+- finding a token by hash
+- touching last-used metadata
+- revoking a token
+
+Optional trait methods support revoking all tokens for a principal or all
+tokens bound to a generic resource.
+
+Store only `StoredApiToken.token_hash`, never the raw token returned in
+`IssuedApiToken`. Use a unique index on `token_hash`; revoked records should
+still be returned by `find_api_token_by_hash` so the service can distinguish a
+revoked token from an unknown token.
+
 ## Password Reset
 
 `PasswordResetTokenStore` makes password-reset tokens one-time use.

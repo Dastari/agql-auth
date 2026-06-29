@@ -9,8 +9,12 @@
 //! - [`AuthService`] issues and validates local sessions.
 //! - [`AuthConfig`] configures issuer, audience, TTLs, and JWT signing mode.
 //! - [`UserStore`] and [`RefreshTokenStore`] let the host provide persistence.
+//! - [`ApiTokenService`] issues and authenticates opaque service-to-service
+//!   tokens through [`ApiTokenStore`].
 //! - [`AuthUser`] is injected into `async-graphql` request data after
 //!   authentication.
+//! - [`AuthPrincipal`] represents either a user session or an API-token
+//!   principal for handlers that accept both.
 //! - [`RequireAuth`], [`RequireAnyRole`], [`RequireScope`], and related guards
 //!   protect resolvers.
 //!
@@ -20,6 +24,15 @@
 //! roles, scopes, and [`SessionContext`]. Refresh tokens are opaque, hashed
 //! before storage, and rotated on refresh. A replayed refresh token revokes the
 //! token family through the host's [`RefreshTokenStore`].
+//!
+//! ## API And Service Tokens
+//!
+//! [`ApiTokenService`] provides long-lived opaque credentials for
+//! server-to-server calls. Tokens are generated with a non-JWT-like prefix,
+//! returned once, stored only as hashes through [`ApiTokenStore`], and
+//! authenticated to [`ApiTokenPrincipal`]. Use [`AuthPrincipal`] and the
+//! `RequirePrincipal*` guards when a resolver can accept either a user session
+//! or an API token.
 //!
 //! ## JWT Signing And JWKS
 //!
@@ -51,6 +64,7 @@
 //! JWT signing and JWKS, Microsoft Entra OIDC, recovery flows, and MFA
 //! primitives.
 
+mod api_tokens;
 mod config;
 mod errors;
 mod graphql;
@@ -67,21 +81,28 @@ mod util;
 #[cfg(test)]
 mod tests;
 
+pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use config::{
     AuthConfig, ClientMetadata, JwtSigningConfig, MicrosoftEntraConfig, MicrosoftEntraTenant,
     OidcProviderConfig, OidcProviderKind,
 };
 pub use errors::AuthError;
-pub use graphql::{auth_user_from_ctx, auth_user_from_ctx_opt};
+pub use graphql::{
+    auth_user_from_ctx, auth_user_from_ctx_opt, principal_from_ctx, principal_from_ctx_opt,
+};
 pub use guards::{
-    RequireAllRoles, RequireAllScopes, RequireAnyRole, RequireAnyScope, RequireAuth, RequireScope,
+    RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
+    RequireAnyRole, RequireAnyScope, RequireAuth, RequirePrincipal, RequirePrincipalScope,
+    RequireScope,
 };
 pub use models::{
-    AuthPayload, AuthUser, ExternalIdentity, IssuedLoginChallenge, LoginChallengeOptions,
-    MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
-    OidcLoginResult, OidcTokenResponse, PasswordResetToken, RefreshTokenRevocationReason,
-    StoredLoginChallenge, StoredRefreshToken, StoredUser, TotpOptions, TotpProvisioning,
-    TotpSecret, ValidatedOidcClaims, VerifiedLoginChallenge, VerifiedPasswordResetToken,
+    ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
+    AuthPayload, AuthPrincipal, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
+    LoginChallengeOptions, MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest,
+    OidcCallbackInput, OidcLoginResult, OidcTokenResponse, PasswordResetToken,
+    RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
+    StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
+    VerifiedLoginChallenge, VerifiedPasswordResetToken,
 };
 pub use oidc::{
     ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,
@@ -93,7 +114,7 @@ pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;
 pub use session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use stores::{
-    ExternalIdentityStore, LoginChallengeStore, OAuthStateStore, OAuthTokenStore,
+    ApiTokenStore, ExternalIdentityStore, LoginChallengeStore, OAuthStateStore, OAuthTokenStore,
     PasswordResetTokenStore, RefreshTokenStore, UserStore,
 };
 

@@ -114,6 +114,14 @@ pub(crate) fn generate_opaque_token() -> String {
 }
 
 pub(crate) fn hash_refresh_token(token: &str) -> String {
+    hash_opaque_token(token)
+}
+
+pub(crate) fn hash_api_token(token: &str) -> String {
+    hash_opaque_token(token)
+}
+
+fn hash_opaque_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     let digest = hasher.finalize();

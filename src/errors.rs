@@ -25,6 +25,15 @@ pub enum AuthError {
     /// Access token is expired.
     #[error("access token expired")]
     AccessTokenExpired,
+    /// API token failed validation.
+    #[error("invalid api token")]
+    InvalidApiToken,
+    /// API token is expired.
+    #[error("api token expired")]
+    ApiTokenExpired,
+    /// API token has been revoked.
+    #[error("api token revoked")]
+    ApiTokenRevoked,
     /// Refresh token was not found or is invalid.
     #[error("invalid refresh token")]
     InvalidRefreshToken,
@@ -129,6 +138,9 @@ impl ErrorExtensions for AuthError {
                     AuthError::InvalidBearerToken => "INVALID_BEARER_TOKEN",
                     AuthError::InvalidAccessToken => "INVALID_ACCESS_TOKEN",
                     AuthError::AccessTokenExpired => "ACCESS_TOKEN_EXPIRED",
+                    AuthError::InvalidApiToken => "INVALID_API_TOKEN",
+                    AuthError::ApiTokenExpired => "API_TOKEN_EXPIRED",
+                    AuthError::ApiTokenRevoked => "API_TOKEN_REVOKED",
                     AuthError::InvalidRefreshToken => "INVALID_REFRESH_TOKEN",
                     AuthError::RefreshTokenExpired => "REFRESH_TOKEN_EXPIRED",
                     AuthError::RefreshTokenReplayDetected => "REFRESH_TOKEN_REPLAY_DETECTED",

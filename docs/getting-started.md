@@ -134,6 +134,35 @@ let payload = auth
 This still uses the same local access-token and refresh-token model as password
 login.
 
+## Server-To-Server Tokens
+
+Use `ApiTokenService` when another backend service or machine needs long-lived
+access without a user refresh-token session. These tokens are opaque, hashed in
+storage, and authenticate to `ApiTokenPrincipal` instead of `AuthUser`.
+
+```rust
+use std::sync::Arc;
+
+use agql_auth::{ApiTokenIssueRequest, ApiTokenPrincipalKind, ApiTokenService};
+use time::Duration;
+
+let api_tokens = ApiTokenService::new(Arc::new(api_token_store));
+
+let issued = api_tokens
+    .issue_token(
+        ApiTokenIssueRequest::new(
+            "inventory sync",
+            "svc-inventory",
+            ApiTokenPrincipalKind::service(),
+            Duration::days(365),
+        )
+        .with_scopes(["inventory.read"]),
+    )
+    .await?;
+```
+
+See [API and service tokens](api-service-tokens.md).
+
 ## Host Responsibilities
 
 `agql-auth` intentionally does not provide:

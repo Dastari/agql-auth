@@ -8,6 +8,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 - Argon2 password hashing and password login
 - Short-lived JWT access tokens and rotated opaque refresh tokens
+- Long-lived opaque API/service tokens for server-to-server calls
 - HS256 compatibility mode and RS256 signing with JWKS export
 - Roles, scopes, and typed session context in access-token claims
 - Microsoft Entra ID / OIDC authorization-code + PKCE login
@@ -20,7 +21,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 ```toml
 [dependencies]
-agql-auth = "0.4"
+agql-auth = "0.5"
 ```
 
 ## Basic Usage
@@ -116,6 +117,44 @@ async fn jwks(auth: &AuthService<AppUserStore, AppRefreshTokenStore>)
 
 See [JWT signing and JWKS](docs/jwt-signing-and-jwks.md).
 
+## API And Service Tokens
+
+Use `ApiTokenService` for long-lived server-to-server credentials. API tokens
+are opaque, prefixed strings; `agql-auth` stores only their SHA-256 hash and
+returns the raw token once.
+
+```rust
+use std::sync::Arc;
+use agql_auth::{
+    ApiTokenIssueRequest, ApiTokenPrincipalKind, ApiTokenService, ClientMetadata,
+};
+use time::Duration;
+
+let api_tokens = ApiTokenService::new(Arc::new(api_token_store));
+
+let issued = api_tokens
+    .issue_token(
+        ApiTokenIssueRequest::new(
+            "inventory sync",
+            "svc-inventory",
+            ApiTokenPrincipalKind::service(),
+            Duration::days(365),
+        )
+        .with_scopes(["inventory.read", "inventory.write"])
+        .with_audience("graphql-api"),
+    )
+    .await?;
+
+let principal = api_tokens
+    .authenticate_bearer(
+        &format!("Bearer {}", issued.token),
+        ClientMetadata::default(),
+    )
+    .await?;
+```
+
+See [API and service tokens](docs/api-service-tokens.md).
+
 ## Microsoft Login
 
 `agql-auth` supports Microsoft Entra ID login through OIDC authorization-code flow with PKCE. After Microsoft ID-token validation and host-controlled user resolution, the library issues a normal local `AuthPayload`; Microsoft access tokens do not become your app session tokens.
@@ -144,6 +183,7 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [Getting started](docs/getting-started.md)
 - [Storage traits](docs/storage-traits.md)
 - [Authorization, scopes, and guards](docs/authorization.md)
+- [API and service tokens](docs/api-service-tokens.md)
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)

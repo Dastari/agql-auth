@@ -49,6 +49,412 @@ impl AuthUser {
     }
 }
 
+/// Extensible kind for API-token principals.
+///
+/// This is string-backed so host applications can use their own principal
+/// categories while still having common constructors for service, integration,
+/// and machine tokens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ApiTokenPrincipalKind(String);
+
+impl ApiTokenPrincipalKind {
+    /// Creates a custom principal kind.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self(kind.into())
+    }
+
+    /// Principal kind for service-to-service callers.
+    pub fn service() -> Self {
+        Self("service".to_string())
+    }
+
+    /// Principal kind for external integrations.
+    pub fn integration() -> Self {
+        Self("integration".to_string())
+    }
+
+    /// Principal kind for machine callers.
+    pub fn machine() -> Self {
+        Self("machine".to_string())
+    }
+
+    /// Returns the string value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ApiTokenPrincipalKind {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ApiTokenPrincipalKind {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+/// Authenticated API-token principal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiTokenPrincipal {
+    /// API token ID.
+    pub token_id: Uuid,
+    /// Principal subject, such as a service ID or integration ID.
+    pub subject: String,
+    /// Principal kind.
+    pub principal_kind: ApiTokenPrincipalKind,
+    /// Local scopes granted to this token.
+    pub scopes: Vec<String>,
+    /// Optional intended audience.
+    pub audience: Option<String>,
+    /// Optional generic resource type bound to this token.
+    pub resource_type: Option<String>,
+    /// Optional generic resource ID bound to this token.
+    pub resource_id: Option<String>,
+    /// Token expiry time.
+    pub expires_at: OffsetDateTime,
+}
+
+impl ApiTokenPrincipal {
+    /// Returns `true` when the exact required scope is present.
+    pub fn has_scope(&self, required: &str) -> bool {
+        scope_exists(&self.scopes, required)
+    }
+
+    /// Returns `true` when any required scope is present.
+    pub fn has_any_scope<S>(&self, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        scopes_include_any(&self.scopes, required)
+    }
+
+    /// Returns `true` when all required scopes are present.
+    pub fn has_all_scopes<S>(&self, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        scopes_include_all(&self.scopes, required)
+    }
+}
+
+/// Authenticated principal that can represent a user session or an API token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuthPrincipal {
+    /// Existing local user-session principal.
+    User(AuthUser),
+    /// Opaque API/service-token principal.
+    ApiToken(ApiTokenPrincipal),
+}
+
+impl AuthPrincipal {
+    /// Returns the principal subject.
+    pub fn subject(&self) -> &str {
+        match self {
+            Self::User(user) => &user.user_id,
+            Self::ApiToken(token) => &token.subject,
+        }
+    }
+
+    /// Returns local roles. API-token principals have no roles by default.
+    pub fn roles(&self) -> &[String] {
+        match self {
+            Self::User(user) => &user.roles,
+            Self::ApiToken(_) => &[],
+        }
+    }
+
+    /// Returns local scopes.
+    pub fn scopes(&self) -> &[String] {
+        match self {
+            Self::User(user) => &user.scopes,
+            Self::ApiToken(token) => &token.scopes,
+        }
+    }
+
+    /// Returns `true` when the exact required scope is present.
+    pub fn has_scope(&self, required: &str) -> bool {
+        scope_exists(self.scopes(), required)
+    }
+
+    /// Returns `true` when any required scope is present.
+    pub fn has_any_scope<S>(&self, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        scopes_include_any(self.scopes(), required)
+    }
+
+    /// Returns `true` when all required scopes are present.
+    pub fn has_all_scopes<S>(&self, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        scopes_include_all(self.scopes(), required)
+    }
+
+    /// Returns the API-token audience, if this is an API-token principal.
+    pub fn audience(&self) -> Option<&str> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => token.audience.as_deref(),
+        }
+    }
+
+    /// Returns the API-token resource type, if this is an API-token principal.
+    pub fn resource_type(&self) -> Option<&str> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => token.resource_type.as_deref(),
+        }
+    }
+
+    /// Returns the API-token resource ID, if this is an API-token principal.
+    pub fn resource_id(&self) -> Option<&str> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => token.resource_id.as_deref(),
+        }
+    }
+
+    /// Returns the API token ID, if this is an API-token principal.
+    pub fn token_id(&self) -> Option<Uuid> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => Some(token.token_id),
+        }
+    }
+
+    /// Returns the API-token expiry, if this is an API-token principal.
+    pub fn expires_at(&self) -> Option<OffsetDateTime> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => Some(token.expires_at),
+        }
+    }
+
+    /// Returns the API-token principal kind, if this is an API-token principal.
+    pub fn principal_kind(&self) -> Option<&ApiTokenPrincipalKind> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => Some(&token.principal_kind),
+        }
+    }
+
+    /// Returns the contained user principal, if present.
+    pub fn as_user(&self) -> Option<&AuthUser> {
+        match self {
+            Self::User(user) => Some(user),
+            Self::ApiToken(_) => None,
+        }
+    }
+
+    /// Returns the contained API-token principal, if present.
+    pub fn as_api_token(&self) -> Option<&ApiTokenPrincipal> {
+        match self {
+            Self::User(_) => None,
+            Self::ApiToken(token) => Some(token),
+        }
+    }
+}
+
+impl From<AuthUser> for AuthPrincipal {
+    fn from(value: AuthUser) -> Self {
+        Self::User(value)
+    }
+}
+
+impl From<ApiTokenPrincipal> for AuthPrincipal {
+    fn from(value: ApiTokenPrincipal) -> Self {
+        Self::ApiToken(value)
+    }
+}
+
+/// Reason an API token was revoked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ApiTokenRevocationReason {
+    /// Explicit manual revocation.
+    Manual,
+    /// Token expired and was marked revoked.
+    Expired,
+    /// All tokens for a principal were revoked.
+    PrincipalRevoked,
+    /// All tokens for a resource were revoked.
+    ResourceRevoked,
+}
+
+/// Host-persisted API token record.
+///
+/// Stores should persist only `token_hash`; the raw token is returned once in
+/// [`IssuedApiToken`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredApiToken {
+    /// API token ID.
+    pub id: Uuid,
+    /// Hash of the raw opaque token.
+    pub token_hash: String,
+    /// Human-readable token display name.
+    pub display_name: String,
+    /// Principal subject, such as a service ID or integration ID.
+    pub subject: String,
+    /// Principal kind.
+    pub principal_kind: ApiTokenPrincipalKind,
+    /// Local scopes granted to this token.
+    pub scopes: Vec<String>,
+    /// Optional intended audience.
+    pub audience: Option<String>,
+    /// Optional generic resource type bound to this token.
+    pub resource_type: Option<String>,
+    /// Optional generic resource ID bound to this token.
+    pub resource_id: Option<String>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Expiry time.
+    pub expires_at: OffsetDateTime,
+    /// Last successful use time.
+    pub last_used_at: Option<OffsetDateTime>,
+    /// Revocation time, if revoked.
+    pub revoked_at: Option<OffsetDateTime>,
+    /// Last recorded user-agent metadata.
+    pub user_agent: Option<String>,
+    /// Last recorded IP metadata.
+    pub ip_address: Option<String>,
+}
+
+impl StoredApiToken {
+    /// Returns `true` when the token has expired.
+    pub fn is_expired(&self, now: OffsetDateTime) -> bool {
+        self.expires_at <= now
+    }
+
+    /// Returns `true` when the token has been revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
+
+    /// Builds an authenticated principal from this stored token.
+    pub fn to_principal(&self) -> ApiTokenPrincipal {
+        ApiTokenPrincipal {
+            token_id: self.id,
+            subject: self.subject.clone(),
+            principal_kind: self.principal_kind.clone(),
+            scopes: self.scopes.clone(),
+            audience: self.audience.clone(),
+            resource_type: self.resource_type.clone(),
+            resource_id: self.resource_id.clone(),
+            expires_at: self.expires_at,
+        }
+    }
+}
+
+/// API token returned once at issuance time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedApiToken {
+    /// API token ID.
+    pub token_id: Uuid,
+    /// Raw opaque token. Store this only in the caller's secret store.
+    pub token: String,
+    /// Human-readable token display name.
+    pub display_name: String,
+    /// Principal subject.
+    pub subject: String,
+    /// Principal kind.
+    pub principal_kind: ApiTokenPrincipalKind,
+    /// Local scopes granted to this token.
+    pub scopes: Vec<String>,
+    /// Optional intended audience.
+    pub audience: Option<String>,
+    /// Optional generic resource type bound to this token.
+    pub resource_type: Option<String>,
+    /// Optional generic resource ID bound to this token.
+    pub resource_id: Option<String>,
+    /// Token creation time.
+    pub created_at: OffsetDateTime,
+    /// Token expiry time.
+    pub expires_at: OffsetDateTime,
+}
+
+/// Request used to issue an opaque API token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTokenIssueRequest {
+    /// Human-readable token display name.
+    pub display_name: String,
+    /// Principal subject.
+    pub subject: String,
+    /// Principal kind.
+    pub principal_kind: ApiTokenPrincipalKind,
+    /// Local scopes granted to this token.
+    pub scopes: Vec<String>,
+    /// Token lifetime.
+    pub ttl: Duration,
+    /// Optional intended audience.
+    pub audience: Option<String>,
+    /// Optional generic resource type bound to this token.
+    pub resource_type: Option<String>,
+    /// Optional generic resource ID bound to this token.
+    pub resource_id: Option<String>,
+    /// Metadata to store on the initial token record.
+    pub metadata: crate::ClientMetadata,
+}
+
+impl ApiTokenIssueRequest {
+    /// Creates a token issue request with no scopes and no resource binding.
+    pub fn new(
+        display_name: impl Into<String>,
+        subject: impl Into<String>,
+        principal_kind: impl Into<ApiTokenPrincipalKind>,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            display_name: display_name.into(),
+            subject: subject.into(),
+            principal_kind: principal_kind.into(),
+            scopes: Vec::new(),
+            ttl,
+            audience: None,
+            resource_type: None,
+            resource_id: None,
+            metadata: crate::ClientMetadata::default(),
+        }
+    }
+
+    /// Sets local scopes for the issued token.
+    pub fn with_scopes<I, S>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the intended audience for the issued token.
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = Some(audience.into());
+        self
+    }
+
+    /// Sets a generic resource binding for the issued token.
+    pub fn with_resource(
+        mut self,
+        resource_type: impl Into<String>,
+        resource_id: impl Into<String>,
+    ) -> Self {
+        self.resource_type = Some(resource_type.into());
+        self.resource_id = Some(resource_id.into());
+        self
+    }
+
+    /// Sets initial token metadata.
+    pub fn with_metadata(mut self, metadata: crate::ClientMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
 /// User record returned by the host's [`crate::UserStore`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredUser {

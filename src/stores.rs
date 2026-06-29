@@ -3,8 +3,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    AuthResult, ExternalIdentity, OAuthLoginState, OidcTokenResponse, RefreshTokenRevocationReason,
-    StoredLoginChallenge, StoredRefreshToken, StoredUser,
+    ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthResult, ExternalIdentity, OAuthLoginState,
+    OidcTokenResponse, RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge,
+    StoredRefreshToken, StoredUser,
 };
 
 #[async_trait]
@@ -175,4 +176,59 @@ pub trait OAuthTokenStore: Send + Sync {
         token_response: &OidcTokenResponse,
         stored_at: OffsetDateTime,
     ) -> AuthResult<()>;
+}
+
+#[async_trait]
+/// Persists long-lived opaque API/service tokens.
+///
+/// Implementations should store only token hashes. The raw token is returned
+/// once by [`crate::ApiTokenService`] and should not be persisted by hosts.
+pub trait ApiTokenStore: Send + Sync {
+    /// Stores a newly issued API token record.
+    async fn insert_api_token(&self, token: StoredApiToken) -> AuthResult<()>;
+
+    /// Finds an API token by hash.
+    ///
+    /// Revoked records should still be returned so authentication can report
+    /// revocation distinctly from an unknown token.
+    async fn find_api_token_by_hash(&self, token_hash: &str) -> AuthResult<Option<StoredApiToken>>;
+
+    /// Records metadata for a successful API-token use.
+    async fn touch_api_token(
+        &self,
+        token_id: Uuid,
+        used_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AuthResult<()>;
+
+    /// Revokes a single API token.
+    async fn revoke_api_token(
+        &self,
+        token_id: Uuid,
+        revoked_at: OffsetDateTime,
+        reason: ApiTokenRevocationReason,
+    ) -> AuthResult<()>;
+
+    /// Optionally revokes all tokens for a principal.
+    async fn revoke_api_tokens_for_principal(
+        &self,
+        _subject: &str,
+        _principal_kind: &ApiTokenPrincipalKind,
+        _revoked_at: OffsetDateTime,
+        _reason: ApiTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        Ok(0)
+    }
+
+    /// Optionally revokes all tokens bound to a generic resource.
+    async fn revoke_api_tokens_for_resource(
+        &self,
+        _resource_type: &str,
+        _resource_id: &str,
+        _revoked_at: OffsetDateTime,
+        _reason: ApiTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        Ok(0)
+    }
 }

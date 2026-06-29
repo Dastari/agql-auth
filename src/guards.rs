@@ -1,6 +1,6 @@
 use async_graphql::{Context, ErrorExtensions, Guard, Result as GraphqlResult};
 
-use crate::{AuthError, auth_user_from_ctx};
+use crate::{AuthError, auth_user_from_ctx, principal_from_ctx};
 
 /// `async-graphql` guard requiring an authenticated `AuthUser` in request data.
 #[derive(Clone, Copy, Debug, Default)]
@@ -193,6 +193,128 @@ impl Guard for RequireAllRoles {
                 .iter()
                 .all(|role| user.roles.iter().any(|r| r == role))
             {
+                Ok(())
+            } else {
+                Err(AuthError::Forbidden.extend())
+            }
+        });
+        async move { allowed }
+    }
+}
+
+/// `async-graphql` guard requiring any authenticated principal.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RequirePrincipal;
+
+impl RequirePrincipal {
+    /// Creates a generic principal guard.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Guard for RequirePrincipal {
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let result = principal_from_ctx(ctx).map(|_| ());
+        async move { result }
+    }
+}
+
+/// `async-graphql` guard requiring one exact scope on any authenticated principal.
+#[derive(Clone, Debug)]
+pub struct RequirePrincipalScope {
+    scope: String,
+}
+
+impl RequirePrincipalScope {
+    /// Creates a generic principal scope guard.
+    pub fn new(scope: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+        }
+    }
+}
+
+impl Guard for RequirePrincipalScope {
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let allowed = principal_from_ctx(ctx).and_then(|principal| {
+            if principal.has_scope(&self.scope) {
+                Ok(())
+            } else {
+                Err(AuthError::Forbidden.extend())
+            }
+        });
+        async move { allowed }
+    }
+}
+
+/// `async-graphql` guard requiring at least one exact scope on any authenticated principal.
+#[derive(Clone, Debug)]
+pub struct RequireAnyPrincipalScope {
+    scopes: Vec<String>,
+}
+
+impl RequireAnyPrincipalScope {
+    /// Creates a generic principal scope guard from accepted scopes.
+    pub fn new<I, S>(scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            scopes: scopes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Guard for RequireAnyPrincipalScope {
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let allowed = principal_from_ctx(ctx).and_then(|principal| {
+            if principal.has_any_scope(&self.scopes) {
+                Ok(())
+            } else {
+                Err(AuthError::Forbidden.extend())
+            }
+        });
+        async move { allowed }
+    }
+}
+
+/// `async-graphql` guard requiring every configured scope on any authenticated principal.
+#[derive(Clone, Debug)]
+pub struct RequireAllPrincipalScopes {
+    scopes: Vec<String>,
+}
+
+impl RequireAllPrincipalScopes {
+    /// Creates a generic principal scope guard from required scopes.
+    pub fn new<I, S>(scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            scopes: scopes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Guard for RequireAllPrincipalScopes {
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let allowed = principal_from_ctx(ctx).and_then(|principal| {
+            if principal.has_all_scopes(&self.scopes) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())

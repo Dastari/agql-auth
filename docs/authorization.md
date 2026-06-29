@@ -37,6 +37,19 @@ For external login, Microsoft or OIDC tokens are used only to verify the login
 event. The resulting GraphQL request is authorized with local roles, scopes, and
 session context.
 
+## Generic Principals
+
+`AuthUser` remains the user-session type. For code that can accept either user
+sessions or API/service tokens, use `AuthPrincipal`:
+
+- `AuthPrincipal::User(AuthUser)`
+- `AuthPrincipal::ApiToken(ApiTokenPrincipal)`
+
+`AuthPrincipal` exposes `subject()`, `roles()`, `scopes()`, scope helper
+methods, and API-token accessors for audience, resource binding, token ID, and
+expiry. API-token principals return an empty role list unless the host models
+roles separately.
+
 ## Scope Matching
 
 Scope matching is exact string matching. The crate does not interpret wildcard
@@ -94,6 +107,29 @@ impl Query {
 Use resolver code when authorization depends on object ownership, tenant
 membership, or other dynamic data.
 
+For resolvers that accept either a user session or an API token, use the generic
+principal guards:
+
+```rust
+use agql_auth::{
+    RequireAllPrincipalScopes, RequireAnyPrincipalScope, RequirePrincipal,
+    RequirePrincipalScope,
+};
+
+#[Object]
+impl Query {
+    #[graphql(guard = "RequirePrincipal::new()")]
+    async fn viewer(&self) -> Viewer {
+        // ...
+    }
+
+    #[graphql(guard = "RequirePrincipalScope::new(\"inventory.read\")")]
+    async fn inventory(&self) -> Vec<Item> {
+        // ...
+    }
+}
+```
+
 ## Reading The Authenticated User
 
 `inject_http_auth` and `authenticate_connection_init_value` attach `AuthUser` to
@@ -107,3 +143,12 @@ let optional_user = auth_user_from_ctx_opt(ctx);
 ```
 
 `auth_user_from_ctx` returns an authentication error when no user is present.
+
+For generic user-or-token access, use:
+
+```rust
+use agql_auth::{principal_from_ctx, principal_from_ctx_opt};
+
+let principal = principal_from_ctx(ctx)?;
+let optional_principal = principal_from_ctx_opt(ctx);
+```

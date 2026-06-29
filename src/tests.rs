@@ -1,3 +1,4 @@
+mod api_tokens;
 mod auth_lifecycle;
 mod challenges;
 mod jwt_signing;
@@ -14,6 +15,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::prelude::*;
+use crate::util::hash_api_token;
 
 #[derive(Clone, Default)]
 pub(super) struct MemoryUserStore {
@@ -135,6 +137,114 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
             token.user_agent = user_agent;
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct MemoryApiTokenStore {
+    pub(super) tokens_by_id: Arc<Mutex<HashMap<Uuid, StoredApiToken>>>,
+    token_hash_to_id: Arc<Mutex<HashMap<String, Uuid>>>,
+}
+
+impl MemoryApiTokenStore {
+    pub(super) fn get_by_hash(&self, token_hash: &str) -> Option<StoredApiToken> {
+        let token_id = self
+            .token_hash_to_id
+            .lock()
+            .unwrap()
+            .get(token_hash)
+            .copied()?;
+        self.tokens_by_id.lock().unwrap().get(&token_id).cloned()
+    }
+
+    pub(super) fn get_by_raw_token(&self, token: &str) -> Option<StoredApiToken> {
+        self.get_by_hash(&hash_api_token(token))
+    }
+}
+
+#[async_trait]
+impl ApiTokenStore for MemoryApiTokenStore {
+    async fn insert_api_token(&self, token: StoredApiToken) -> crate::AuthResult<()> {
+        self.token_hash_to_id
+            .lock()
+            .unwrap()
+            .insert(token.token_hash.clone(), token.id);
+        self.tokens_by_id.lock().unwrap().insert(token.id, token);
+        Ok(())
+    }
+
+    async fn find_api_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> crate::AuthResult<Option<StoredApiToken>> {
+        Ok(self.get_by_hash(token_hash))
+    }
+
+    async fn touch_api_token(
+        &self,
+        token_id: Uuid,
+        used_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> crate::AuthResult<()> {
+        if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id) {
+            token.last_used_at = Some(used_at);
+            token.ip_address = ip_address;
+            token.user_agent = user_agent;
+        }
+        Ok(())
+    }
+
+    async fn revoke_api_token(
+        &self,
+        token_id: Uuid,
+        revoked_at: OffsetDateTime,
+        _reason: ApiTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id) {
+            token.revoked_at = Some(revoked_at);
+        }
+        Ok(())
+    }
+
+    async fn revoke_api_tokens_for_principal(
+        &self,
+        subject: &str,
+        principal_kind: &ApiTokenPrincipalKind,
+        revoked_at: OffsetDateTime,
+        _reason: ApiTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        let mut revoked = 0;
+        for token in self.tokens_by_id.lock().unwrap().values_mut() {
+            if token.subject == subject
+                && token.principal_kind == *principal_kind
+                && token.revoked_at.is_none()
+            {
+                token.revoked_at = Some(revoked_at);
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
+    }
+
+    async fn revoke_api_tokens_for_resource(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+        revoked_at: OffsetDateTime,
+        _reason: ApiTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        let mut revoked = 0;
+        for token in self.tokens_by_id.lock().unwrap().values_mut() {
+            if token.resource_type.as_deref() == Some(resource_type)
+                && token.resource_id.as_deref() == Some(resource_id)
+                && token.revoked_at.is_none()
+            {
+                token.revoked_at = Some(revoked_at);
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
     }
 }
 
