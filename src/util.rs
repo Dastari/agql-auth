@@ -15,15 +15,27 @@ type HmacSha1 = Hmac<Sha1>;
 
 pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {
     let trimmed = input.trim();
-    if let Some(rest) = trimmed.strip_prefix("Bearer ") {
-        Ok(rest.trim())
-    } else if let Some(rest) = trimmed.strip_prefix("bearer ") {
-        Ok(rest.trim())
-    } else if trimmed.is_empty() {
-        Err(AuthError::InvalidBearerToken)
-    } else {
-        Ok(trimmed)
+    if trimmed.is_empty() {
+        return Err(AuthError::InvalidBearerToken);
     }
+    if trimmed.eq_ignore_ascii_case("Bearer") {
+        return Err(AuthError::InvalidBearerToken);
+    }
+
+    let Some((scheme, rest)) = trimmed.split_once(char::is_whitespace) else {
+        return Ok(trimmed);
+    };
+
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(AuthError::InvalidBearerToken);
+    }
+
+    let token = rest.trim();
+    if token.is_empty() || token.split_whitespace().count() != 1 {
+        return Err(AuthError::InvalidBearerToken);
+    }
+
+    Ok(token)
 }
 
 pub(crate) fn extract_connection_init_token(value: &JsonValue) -> AuthResult<String> {
@@ -98,11 +110,18 @@ pub(crate) fn validate_totp_options(options: &TotpOptions) -> AuthResult<()> {
 }
 
 pub(crate) fn generate_numeric_code(length: usize) -> String {
-    let mut bytes = vec![0u8; length];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
     let mut out = String::with_capacity(length);
-    for byte in bytes {
-        out.push(char::from(b'0' + (byte % 10)));
+    while out.len() < length {
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        for byte in bytes {
+            if byte < 250 {
+                out.push(char::from(b'0' + (byte % 10)));
+                if out.len() == length {
+                    break;
+                }
+            }
+        }
     }
     out
 }

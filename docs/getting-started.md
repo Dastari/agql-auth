@@ -28,7 +28,8 @@ let auth = AuthService::new(
 
 `AuthConfig::new(secret)` preserves the legacy HS256 signing behavior. For new
 deployments where other services or routers need to validate tokens, prefer
-RS256. See [JWT signing and JWKS](jwt-signing-and-jwks.md).
+RS256. HS256 secrets must be at least 32 bytes. See
+[JWT signing and JWKS](jwt-signing-and-jwks.md).
 
 ## Password Login
 
@@ -66,7 +67,8 @@ for example in an HTTP-only cookie.
 
 Refresh tokens are rotated on every successful refresh. The host store should
 persist only the token hash from `StoredRefreshToken`, never the raw refresh
-token.
+token. `RefreshTokenStore::rotate_refresh_token` must make rotation atomic so
+two concurrent refreshes cannot both succeed.
 
 ```rust
 let next_payload = auth.refresh(refresh_token, metadata).await?;
@@ -81,6 +83,10 @@ Logout revokes either one refresh token or the whole family:
 auth.logout(refresh_token, false).await?; // one token
 auth.logout(refresh_token, true).await?;  // token family
 ```
+
+Logout does not revoke already-issued stateless access tokens. They remain
+valid until `exp`, so keep access-token lifetimes short and add host-side
+session checks for high-risk operations if immediate revocation is required.
 
 ## Authenticating Requests
 

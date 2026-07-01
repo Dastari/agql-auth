@@ -56,6 +56,7 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
 #[derive(Clone)]
 struct MockOidcHttpClient {
     get_responses: Arc<Mutex<HashMap<String, JsonValue>>>,
+    gets: Arc<Mutex<Vec<String>>>,
     post_response: Arc<Mutex<JsonValue>>,
     posts: Arc<Mutex<Vec<RecordedPost>>>,
 }
@@ -68,6 +69,7 @@ impl MockOidcHttpClient {
 
         Self {
             get_responses: Arc::new(Mutex::new(get_responses)),
+            gets: Arc::new(Mutex::new(Vec::new())),
             post_response: Arc::new(Mutex::new(json!({}))),
             posts: Arc::new(Mutex::new(Vec::new())),
         }
@@ -82,11 +84,21 @@ impl MockOidcHttpClient {
             "id_token": token
         });
     }
+
+    fn get_count(&self, url: &str) -> usize {
+        self.gets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.as_str() == url)
+            .count()
+    }
 }
 
 #[async_trait]
 impl OidcHttpClient for MockOidcHttpClient {
     async fn get_json(&self, url: &str) -> crate::AuthResult<JsonValue> {
+        self.gets.lock().unwrap().push(url.to_string());
         self.get_responses
             .lock()
             .unwrap()
@@ -301,6 +313,54 @@ async fn state_nonce_and_authorization_url_are_generated_and_consumed_once() {
     assert!(matches!(replay, AuthError::InvalidOAuthState));
 }
 
+#[tokio::test]
+async fn oauth_state_store_contract_returns_pre_consumption_snapshot() {
+    let store = MemoryOAuthStateStore::default();
+    let state = OAuthLoginState {
+        provider_name: "microsoft".to_string(),
+        state_hash: hash_oauth_state("state-value"),
+        nonce: "nonce".to_string(),
+        code_verifier: "code-verifier".to_string(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scopes: vec!["openid".to_string()],
+        created_at: OffsetDateTime::now_utc(),
+        expires_at: OffsetDateTime::now_utc() + Duration::minutes(10),
+        consumed_at: None,
+    };
+    store.insert_oauth_state(state.clone()).await.unwrap();
+
+    let consumed = store
+        .consume_oauth_state(
+            &state.provider_name,
+            &state.state_hash,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(consumed.consumed_at.is_none());
+    assert!(
+        store
+            .states
+            .lock()
+            .unwrap()
+            .get(&(state.provider_name.clone(), state.state_hash.clone()))
+            .unwrap()
+            .consumed_at
+            .is_some()
+    );
+
+    let replay = store
+        .consume_oauth_state(
+            &state.provider_name,
+            &state.state_hash,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert!(replay.is_none());
+}
+
 #[test]
 fn stable_identity_key_prefers_microsoft_tid_and_oid() {
     assert_eq!(
@@ -349,7 +409,7 @@ async fn microsoft_claim_mapper_maps_roles_groups_tenant_and_object_id() {
         subject: SUBJECT.to_string(),
         external_subject: format!("{TENANT_ID}:{OBJECT_ID}"),
         expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
-        not_before: OffsetDateTime::now_utc() - Duration::minutes(1),
+        not_before: Some(OffsetDateTime::now_utc() - Duration::minutes(1)),
         issued_at: OffsetDateTime::now_utc(),
         nonce: "nonce".to_string(),
         tenant_id: Some(TENANT_ID.to_string()),
@@ -435,6 +495,88 @@ async fn mocked_callback_validates_id_token_and_issues_local_session() {
 }
 
 #[tokio::test]
+async fn generic_oidc_accepts_id_token_without_nbf() {
+    let (provider, client) = generic_provider_and_client();
+    let state_store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request(&state_store)
+        .await
+        .unwrap();
+    let mut claims = valid_claims(&request.nonce);
+    claims.as_object_mut().unwrap().remove("nbf");
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+
+    let outcome = provider
+        .handle_callback(
+            &state_store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
+        .unwrap();
+    assert!(outcome.claims.not_before.is_none());
+}
+
+#[tokio::test]
+async fn generic_oidc_rejects_future_nbf_when_present() {
+    let err = run_generic_validation_case(|claims, _nonce| {
+        claims["nbf"] = json!((OffsetDateTime::now_utc() + Duration::hours(1)).unix_timestamp());
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AuthError::OidcTokenValidation(_)));
+}
+
+#[tokio::test]
+async fn oidc_rejects_multi_audience_without_azp() {
+    let err = run_generic_validation_case(|claims, _nonce| {
+        claims["aud"] = json!([CLIENT_ID, "api://extra"]);
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AuthError::OidcTokenValidation(_)));
+}
+
+#[tokio::test]
+async fn oidc_accepts_multi_audience_with_trusted_extra_audience_and_azp() {
+    let client = MockOidcHttpClient::new();
+    let mut config = OidcProviderConfig::new("generic", DISCOVERY_URL, CLIENT_ID, REDIRECT_URI);
+    config.allowed_additional_audiences = vec!["api://extra".to_string()];
+    let provider = OidcProvider::new(config, Arc::new(client.clone())).unwrap();
+    let state_store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request(&state_store)
+        .await
+        .unwrap();
+    let mut claims = valid_claims(&request.nonce);
+    claims["aud"] = json!([CLIENT_ID, "api://extra"]);
+    claims["azp"] = json!(CLIENT_ID);
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+
+    let outcome = provider
+        .handle_callback(
+            &state_store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.claims.audiences,
+        vec![CLIENT_ID.to_string(), "api://extra".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn oidc_rejects_untrusted_extra_audience() {
+    let err = run_generic_validation_case(|claims, _nonce| {
+        claims["aud"] = json!([CLIENT_ID, "api://untrusted"]);
+        claims["azp"] = json!(CLIENT_ID);
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AuthError::OidcTokenValidation(_)));
+}
+
+#[tokio::test]
 async fn callback_rejects_invalid_nonce() {
     let err = run_validation_case(|claims, _nonce| {
         claims["nonce"] = json!("wrong-nonce");
@@ -495,6 +637,48 @@ async fn callback_rejects_unknown_key_id() {
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::OidcTokenValidation(_)));
+}
+
+#[tokio::test]
+async fn unknown_kid_uses_forced_refresh_cooldown() {
+    let (provider, client) = provider_and_client();
+    let state_store = MemoryOAuthStateStore::default();
+
+    for _ in 0..2 {
+        let request = provider
+            .create_authorization_request(&state_store)
+            .await
+            .unwrap();
+        client.set_token_response(signed_id_token(valid_claims(&request.nonce), "missing"));
+        let err = provider
+            .handle_callback(
+                &state_store,
+                OidcCallbackInput::code_and_state("auth-code", request.state),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::OidcTokenValidation(_)));
+    }
+
+    assert_eq!(client.get_count(JWKS_URI), 2);
+}
+
+#[tokio::test]
+async fn discovery_cache_respects_ttl() {
+    let client = MockOidcHttpClient::new();
+    let mut config = MicrosoftEntraConfig::single_tenant(TENANT_ID, CLIENT_ID, REDIRECT_URI)
+        .into_oidc_provider_config()
+        .unwrap();
+    config.discovery_cache_ttl = Duration::milliseconds(1);
+    let provider = OidcProvider::new(config, Arc::new(client.clone())).unwrap();
+
+    provider.discover().await.unwrap();
+    provider.discover().await.unwrap();
+    assert_eq!(client.get_count(DISCOVERY_URL), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    provider.discover().await.unwrap();
+    assert_eq!(client.get_count(DISCOVERY_URL), 2);
 }
 
 #[tokio::test]
@@ -591,6 +775,30 @@ async fn callback_rejects_replayed_state() {
     assert!(matches!(err, AuthError::InvalidOAuthState));
 }
 
+#[test]
+fn oidc_token_response_debug_redacts_provider_tokens_and_raw_response() {
+    let response = OidcTokenResponse {
+        access_token: Some("provider-access-token".to_string()),
+        refresh_token: Some("provider-refresh-token".to_string()),
+        id_token: "provider-id-token".to_string(),
+        token_type: Some("Bearer".to_string()),
+        expires_in: Some(3600),
+        scope: Some("openid profile".to_string()),
+        raw: json!({
+            "access_token": "provider-access-token",
+            "refresh_token": "provider-refresh-token",
+            "id_token": "provider-id-token"
+        }),
+    };
+
+    let debug = format!("{response:?}");
+    assert!(!debug.contains("provider-access-token"));
+    assert!(!debug.contains("provider-refresh-token"));
+    assert!(!debug.contains("provider-id-token"));
+    assert!(debug.contains("Bearer"));
+    assert!(debug.contains("openid profile"));
+}
+
 async fn run_validation_case(
     mutate_claims: impl FnOnce(&mut JsonValue, &str),
 ) -> crate::AuthResult<OidcCallbackOutcome> {
@@ -621,6 +829,36 @@ fn provider_and_client() -> (OidcProvider, MockOidcHttpClient) {
     )
     .unwrap();
     (provider, client)
+}
+
+fn generic_provider_and_client() -> (OidcProvider, MockOidcHttpClient) {
+    let client = MockOidcHttpClient::new();
+    let provider = OidcProvider::new(
+        OidcProviderConfig::new("generic", DISCOVERY_URL, CLIENT_ID, REDIRECT_URI),
+        Arc::new(client.clone()),
+    )
+    .unwrap();
+    (provider, client)
+}
+
+async fn run_generic_validation_case(
+    mutate_claims: impl FnOnce(&mut JsonValue, &str),
+) -> crate::AuthResult<OidcCallbackOutcome> {
+    let (provider, client) = generic_provider_and_client();
+    let state_store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request(&state_store)
+        .await
+        .unwrap();
+    let mut claims = valid_claims(&request.nonce);
+    mutate_claims(&mut claims, &request.nonce);
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+    provider
+        .handle_callback(
+            &state_store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
 }
 
 fn discovery_document() -> JsonValue {

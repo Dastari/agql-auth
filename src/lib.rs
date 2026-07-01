@@ -115,7 +115,7 @@ pub use service::AuthService;
 pub use session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use stores::{
     ApiTokenStore, ExternalIdentityStore, LoginChallengeStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, UserStore,
+    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
 };
 
 pub type AuthResult<T> = Result<T, AuthError>;

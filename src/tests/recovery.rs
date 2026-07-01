@@ -15,6 +15,9 @@ async fn password_reset_tokens_support_success_expiry_and_replay() {
         .issue_password_reset_token_with_store(&store, "user-1", Duration::hours(1))
         .await
         .unwrap();
+    let debug = format!("{issued:?}");
+    assert!(!debug.contains(&issued.token));
+    assert!(debug.contains("user-1"));
 
     let verified = auth
         .consume_password_reset_token(&store, &issued.token)

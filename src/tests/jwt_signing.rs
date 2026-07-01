@@ -8,7 +8,7 @@ use serde_json::{Value as JsonValue, json};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{MemoryRefreshTokenStore, MemoryUserStore, metadata, stored_user};
+use super::{MemoryRefreshTokenStore, MemoryUserStore, TEST_HS256_SECRET, metadata, stored_user};
 use crate::prelude::*;
 
 const RSA_PRIVATE_KEY_A: &str = r#"-----BEGIN RSA PRIVATE KEY-----
@@ -86,6 +86,8 @@ V6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9
 MwIDAQAB
 -----END PUBLIC KEY-----"#;
 
+const OTHER_HS256_SECRET: &str = "different-test-secret-with-32-bytes";
+
 struct GuardedQuery;
 
 #[Object]
@@ -103,7 +105,7 @@ impl GuardedQuery {
 
 #[tokio::test]
 async fn hs256_auth_config_new_keeps_existing_token_shape() {
-    let auth = auth_service(AuthConfig::new("test-secret"));
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
     let payload = auth
         .issue_verified_user_session_with_scopes(
             "user-1",
@@ -130,6 +132,96 @@ async fn hs256_auth_config_new_keeps_existing_token_shape() {
         .unwrap();
     assert_eq!(decoded.user_id, "user-1");
     assert!(matches!(auth.jwks(), Err(AuthError::JwksUnsupported)));
+}
+
+#[test]
+fn hs256_rejects_secret_shorter_than_32_bytes() {
+    let result = AuthService::new(
+        AuthConfig::new("short-secret"),
+        Arc::new(MemoryUserStore::default()),
+        Arc::new(MemoryRefreshTokenStore::default()),
+    );
+    let err = match result {
+        Ok(_) => panic!("short HS256 secret should fail construction"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, AuthError::InvalidConfiguration(_)));
+}
+
+#[test]
+fn hs256_accepts_32_byte_secret() {
+    let secret = "12345678901234567890123456789012";
+    let result = AuthService::new(
+        AuthConfig::new(secret),
+        Arc::new(MemoryUserStore::default()),
+        Arc::new(MemoryRefreshTokenStore::default()),
+    );
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn legacy_jwt_secret_field_no_longer_overrides_signing_config() {
+    let mut config = AuthConfig::with_hs256_secret(TEST_HS256_SECRET);
+    config.jwt_secret = OTHER_HS256_SECRET.to_string();
+    let auth = auth_service(config);
+    let payload = auth
+        .issue_verified_user_session("user-1", vec![], AuthMethod::Password, metadata())
+        .await
+        .unwrap();
+
+    let expected_secret_verifier = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    expected_secret_verifier
+        .authenticate_access_token(&payload.access_token)
+        .unwrap();
+
+    let legacy_field_verifier = auth_service(AuthConfig::new(OTHER_HS256_SECRET));
+    assert!(matches!(
+        legacy_field_verifier
+            .authenticate_access_token(&payload.access_token)
+            .unwrap_err(),
+        AuthError::InvalidAccessToken
+    ));
+}
+
+#[tokio::test]
+async fn issued_access_tokens_include_purpose() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    let payload = auth
+        .issue_verified_user_session("user-1", vec![], AuthMethod::Password, metadata())
+        .await
+        .unwrap();
+    let claims = decode_payload(&payload.access_token);
+    assert_eq!(claims["purpose"], "access_token");
+}
+
+#[test]
+fn legacy_access_tokens_without_purpose_still_decode() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    let claims = access_token_claims_json(None);
+    let token = encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(TEST_HS256_SECRET.as_bytes()),
+    )
+    .unwrap();
+
+    let decoded = auth.authenticate_access_token(&token).unwrap();
+    assert_eq!(decoded.user_id, "user-1");
+}
+
+#[test]
+fn access_token_rejects_wrong_purpose() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    let claims = access_token_claims_json(Some("password_reset"));
+    let token = encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(TEST_HS256_SECRET.as_bytes()),
+    )
+    .unwrap();
+
+    let err = auth.authenticate_access_token(&token).unwrap_err();
+    assert!(matches!(err, AuthError::InvalidAccessToken));
 }
 
 #[tokio::test]
@@ -274,7 +366,7 @@ async fn rs256_rejects_algorithm_confusion_and_wrong_kid() {
     let hs_token = encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret("test-secret".as_bytes()),
+        &EncodingKey::from_secret(TEST_HS256_SECRET.as_bytes()),
     )
     .unwrap();
     assert!(matches!(
@@ -379,4 +471,23 @@ fn assert_claim_shape(claims: &JsonValue) {
     ] {
         assert!(claims.get(key).is_some(), "missing claim {key}");
     }
+}
+
+fn access_token_claims_json(purpose: Option<&str>) -> JsonValue {
+    let issued_at = OffsetDateTime::now_utc();
+    let mut claims = json!({
+        "sub": "user-1",
+        "sid": Uuid::new_v4().to_string(),
+        "roles": [],
+        "scopes": [],
+        "ctx": SessionContext::for_auth_method(AuthMethod::Password),
+        "iss": "agql-auth",
+        "aud": "agql-auth-clients",
+        "exp": (issued_at + Duration::minutes(15)).unix_timestamp(),
+        "iat": issued_at.unix_timestamp(),
+    });
+    if let Some(purpose) = purpose {
+        claims["purpose"] = json!(purpose);
+    }
+    claims
 }

@@ -54,6 +54,11 @@ async fn issuing_api_token_stores_hash_and_returns_raw_token_once() {
     assert_eq!(stored.resource_id.as_deref(), Some("inventory"));
     assert!(stored.last_used_at.is_none());
     assert!(stored.revoked_at.is_none());
+
+    let debug = format!("{issued:?}");
+    assert!(!debug.contains(&issued.token));
+    assert!(debug.contains("inventory sync"));
+    assert!(debug.contains("svc-inventory"));
 }
 
 #[tokio::test]

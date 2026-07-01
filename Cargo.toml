@@ -1,6 +1,6 @@
 [package]
 name = "agql-auth"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Database-agnostic authentication primitives and async-graphql integration helpers."
@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
+subtle = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 uuid = { version = "1", features = ["serde", "v4"] }

@@ -73,6 +73,9 @@ pub enum AuthError {
     /// TOTP code did not match.
     #[error("invalid totp code")]
     InvalidTotpCode,
+    /// TOTP code was already accepted for this principal/factor.
+    #[error("totp code replay detected")]
+    TotpCodeReplayed,
     /// TOTP secret could not be decoded or used.
     #[error("invalid totp secret")]
     InvalidTotpSecret,
@@ -156,6 +159,7 @@ impl ErrorExtensions for AuthError {
                     }
                     AuthError::InvalidLoginCode => "INVALID_LOGIN_CODE",
                     AuthError::InvalidTotpCode => "INVALID_TOTP_CODE",
+                    AuthError::TotpCodeReplayed => "TOTP_CODE_REPLAYED",
                     AuthError::InvalidTotpSecret => "INVALID_TOTP_SECRET",
                     AuthError::InvalidOAuthState => "INVALID_OAUTH_STATE",
                     AuthError::OAuthStateExpired => "OAUTH_STATE_EXPIRED",

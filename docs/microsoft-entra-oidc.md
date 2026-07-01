@@ -94,7 +94,8 @@ async fn microsoft_start(state: AppState) -> Result<Redirect, AppError> {
 
 `create_authorization_request` stores hashed state, nonce, and PKCE verifier
 through `OAuthStateStore`. The store must consume state exactly once during the
-callback.
+callback and return the pre-consumption snapshot. A callback using an already
+consumed state is rejected.
 
 ## Callback Route
 
@@ -176,12 +177,33 @@ Microsoft ID-token validation covers:
 - issuer
 - audience
 - expiry
-- not-before
+- not-before, when the provider supplies `nbf`
 - issued-at
 - nonce
 - tenant ID
 - object ID or subject-derived fallback
+- `azp` for multi-audience tokens
 
 Consumer accounts are rejected unless explicitly enabled. Disallowed tenants,
 unknown key IDs, invalid nonce, invalid issuer, invalid audience, expired
 tokens, and replayed states are rejected.
+
+For generic OIDC providers, `nbf` is optional. If present, it is validated with
+the configured clock skew. If an ID token has multiple audiences, `azp` must be
+present and equal to the configured `client_id`; additional audiences must be
+listed in `allowed_additional_audiences`.
+
+## Cache And Audience Controls
+
+`OidcProviderConfig` and `MicrosoftEntraConfig` include:
+
+- `jwks_cache_ttl`
+- `discovery_cache_ttl`
+- `jwks_forced_refresh_cooldown`
+- `allowed_additional_audiences`
+- `clock_skew`
+
+Unknown `kid` values can trigger one forced JWKS refresh, but repeated unknown
+keys are throttled by `jwks_forced_refresh_cooldown` to avoid hammering the
+identity provider. Set the cooldown to zero only in tests or when another layer
+already rate-limits callbacks.

@@ -8,7 +8,8 @@ use crate::errors::AuthError;
 /// Runtime configuration for [`crate::AuthService`].
 ///
 /// `AuthConfig::new(secret)` and [`AuthConfig::with_hs256_secret`] preserve the
-/// legacy HS256 behavior. Use [`AuthConfig::with_rs256_pem`] when local
+/// legacy HS256 behavior with a minimum 32-byte secret. Use
+/// [`AuthConfig::with_rs256_pem`] when local
 /// `agql-auth` tokens need to be validated by routers or services that should
 /// only receive public key material.
 #[derive(Clone)]
@@ -19,7 +20,9 @@ pub struct AuthConfig {
     pub audience: String,
     /// Legacy HS256 secret field retained for backward compatibility.
     ///
-    /// New code should prefer [`AuthConfig::jwt_signing`].
+    /// New code should prefer [`AuthConfig::jwt_signing`] and
+    /// [`AuthConfig::set_jwt_signing`]. This field is a legacy mirror and is
+    /// not authoritative when it differs from `jwt_signing`.
     pub jwt_secret: String,
     /// Configured local JWT signing mode.
     pub jwt_signing: JwtSigningConfig,
@@ -44,11 +47,17 @@ impl fmt::Debug for AuthConfig {
 
 impl AuthConfig {
     /// Creates a legacy HS256 configuration from a symmetric secret.
+    ///
+    /// The secret is validated by [`crate::AuthService::new`] and must be at
+    /// least 32 bytes.
     pub fn new(jwt_secret: impl Into<String>) -> Self {
         Self::with_hs256_secret(jwt_secret)
     }
 
     /// Creates an explicit HS256 configuration from a symmetric secret.
+    ///
+    /// The secret is validated by [`crate::AuthService::new`] and must be at
+    /// least 32 bytes.
     pub fn with_hs256_secret(secret: impl Into<String>) -> Self {
         let secret = secret.into();
         Self {
@@ -101,7 +110,7 @@ impl AuthConfig {
 pub enum JwtSigningConfig {
     /// HS256 signing with a shared symmetric secret.
     Hs256 {
-        /// Shared signing and validation secret.
+        /// Shared signing and validation secret. Must be at least 32 bytes.
         secret: String,
     },
     /// RS256 signing with private key material and public-key validation.
@@ -177,6 +186,12 @@ pub struct OidcProviderConfig {
     pub allow_consumer_accounts: bool,
     /// Time to keep fetched JWKS documents in memory.
     pub jwks_cache_ttl: Duration,
+    /// Time to keep fetched discovery documents in memory.
+    pub discovery_cache_ttl: Duration,
+    /// Minimum delay between forced JWKS refreshes for unknown key IDs.
+    pub jwks_forced_refresh_cooldown: Duration,
+    /// Extra trusted audiences accepted in multi-audience ID tokens.
+    pub allowed_additional_audiences: Vec<String>,
     /// Permitted clock skew for token validation.
     pub clock_skew: Duration,
     /// Lifetime for OAuth state records.
@@ -210,6 +225,9 @@ impl OidcProviderConfig {
             allowed_issuers: Vec::new(),
             allow_consumer_accounts: false,
             jwks_cache_ttl: Duration::hours(1),
+            discovery_cache_ttl: Duration::hours(1),
+            jwks_forced_refresh_cooldown: Duration::seconds(60),
+            allowed_additional_audiences: Vec::new(),
             clock_skew: Duration::seconds(60),
             state_ttl: Duration::minutes(10),
             allowed_id_token_algs: vec!["RS256".to_string()],
@@ -251,6 +269,28 @@ impl OidcProviderConfig {
         if self.jwks_cache_ttl <= Duration::ZERO {
             return Err(AuthError::InvalidConfiguration(
                 "OIDC jwks_cache_ttl must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.discovery_cache_ttl <= Duration::ZERO {
+            return Err(AuthError::InvalidConfiguration(
+                "OIDC discovery_cache_ttl must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.jwks_forced_refresh_cooldown < Duration::ZERO {
+            return Err(AuthError::InvalidConfiguration(
+                "OIDC jwks_forced_refresh_cooldown must not be negative".to_string(),
+            ));
+        }
+
+        if self
+            .allowed_additional_audiences
+            .iter()
+            .any(|audience| audience.trim().is_empty())
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "OIDC allowed_additional_audiences must not contain empty values".to_string(),
             ));
         }
 
@@ -333,6 +373,12 @@ pub struct MicrosoftEntraConfig {
     pub request_offline_access: bool,
     /// Time to keep fetched JWKS documents in memory.
     pub jwks_cache_ttl: Duration,
+    /// Time to keep fetched discovery documents in memory.
+    pub discovery_cache_ttl: Duration,
+    /// Minimum delay between forced JWKS refreshes for unknown key IDs.
+    pub jwks_forced_refresh_cooldown: Duration,
+    /// Extra trusted audiences accepted in multi-audience ID tokens.
+    pub allowed_additional_audiences: Vec<String>,
     /// Permitted clock skew for token validation.
     pub clock_skew: Duration,
     /// Lifetime for OAuth state records.
@@ -364,6 +410,9 @@ impl MicrosoftEntraConfig {
             ],
             request_offline_access: false,
             jwks_cache_ttl: Duration::hours(1),
+            discovery_cache_ttl: Duration::hours(1),
+            jwks_forced_refresh_cooldown: Duration::seconds(60),
+            allowed_additional_audiences: Vec::new(),
             clock_skew: Duration::seconds(60),
             state_ttl: Duration::minutes(10),
             allow_consumers: false,
@@ -408,6 +457,9 @@ impl MicrosoftEntraConfig {
             ],
             request_offline_access: false,
             jwks_cache_ttl: Duration::hours(1),
+            discovery_cache_ttl: Duration::hours(1),
+            jwks_forced_refresh_cooldown: Duration::seconds(60),
+            allowed_additional_audiences: Vec::new(),
             clock_skew: Duration::seconds(60),
             state_ttl: Duration::minutes(10),
             allow_consumers: false,
@@ -439,6 +491,9 @@ impl MicrosoftEntraConfig {
         config.requested_scopes = self.requested_scopes;
         config.request_offline_access = self.request_offline_access;
         config.jwks_cache_ttl = self.jwks_cache_ttl;
+        config.discovery_cache_ttl = self.discovery_cache_ttl;
+        config.jwks_forced_refresh_cooldown = self.jwks_forced_refresh_cooldown;
+        config.allowed_additional_audiences = self.allowed_additional_audiences;
         config.clock_skew = self.clock_skew;
         config.state_ttl = self.state_ttl;
         config.validate()?;

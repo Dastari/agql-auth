@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
@@ -351,7 +353,7 @@ impl StoredApiToken {
 }
 
 /// API token returned once at issuance time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IssuedApiToken {
     /// API token ID.
     pub token_id: Uuid,
@@ -375,6 +377,24 @@ pub struct IssuedApiToken {
     pub created_at: OffsetDateTime,
     /// Token expiry time.
     pub expires_at: OffsetDateTime,
+}
+
+impl fmt::Debug for IssuedApiToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuedApiToken")
+            .field("token_id", &self.token_id)
+            .field("token", &"[redacted]")
+            .field("display_name", &self.display_name)
+            .field("subject", &self.subject)
+            .field("principal_kind", &self.principal_kind)
+            .field("scopes", &self.scopes)
+            .field("audience", &self.audience)
+            .field("resource_type", &self.resource_type)
+            .field("resource_id", &self.resource_id)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Request used to issue an opaque API token.
@@ -539,7 +559,7 @@ impl StoredRefreshToken {
 }
 
 /// Local session payload returned after login, refresh, or verified-session issuance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthPayload {
     /// Authenticated local user.
     pub user: AuthUser,
@@ -553,8 +573,20 @@ pub struct AuthPayload {
     pub refresh_token_expires_at: OffsetDateTime,
 }
 
+impl fmt::Debug for AuthPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthPayload")
+            .field("user", &self.user)
+            .field("access_token", &"[redacted]")
+            .field("access_token_expires_at", &self.access_token_expires_at)
+            .field("refresh_token", &"[redacted]")
+            .field("refresh_token_expires_at", &self.refresh_token_expires_at)
+            .finish()
+    }
+}
+
 /// Password-reset token issued by [`crate::AuthService`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PasswordResetToken {
     /// Local user ID.
     pub user_id: String,
@@ -564,6 +596,17 @@ pub struct PasswordResetToken {
     pub token: String,
     /// Expiry time.
     pub expires_at: OffsetDateTime,
+}
+
+impl fmt::Debug for PasswordResetToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasswordResetToken")
+            .field("user_id", &self.user_id)
+            .field("token_id", &self.token_id)
+            .field("token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Verified password-reset token claims.
@@ -674,7 +717,7 @@ pub struct VerifiedLoginChallenge {
 }
 
 /// Generated TOTP secret.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpSecret {
     /// Raw random secret bytes.
     pub raw_secret: Vec<u8>,
@@ -682,8 +725,17 @@ pub struct TotpSecret {
     pub base32_secret: String,
 }
 
+impl fmt::Debug for TotpSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TotpSecret")
+            .field("raw_secret", &"[redacted]")
+            .field("base32_secret", &"[redacted]")
+            .finish()
+    }
+}
+
 /// TOTP provisioning details for authenticator apps.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpProvisioning {
     /// Issuer displayed by authenticator apps.
     pub issuer: String,
@@ -693,6 +745,17 @@ pub struct TotpProvisioning {
     pub secret: String,
     /// `otpauth://` provisioning URI.
     pub uri: String,
+}
+
+impl fmt::Debug for TotpProvisioning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TotpProvisioning")
+            .field("issuer", &self.issuer)
+            .field("account_name", &self.account_name)
+            .field("secret", &"[redacted]")
+            .field("uri", &"[redacted]")
+            .finish()
+    }
 }
 
 /// TOTP generation and validation options.
@@ -761,7 +824,7 @@ impl OidcCallbackInput {
 }
 
 /// OIDC token endpoint response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OidcTokenResponse {
     /// Provider access token, if returned.
     pub access_token: Option<String>,
@@ -780,6 +843,26 @@ pub struct OidcTokenResponse {
     pub raw: JsonValue,
 }
 
+impl fmt::Debug for OidcTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcTokenResponse")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("id_token", &"[redacted]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .field("raw", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Claims accepted after OIDC ID-token validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatedOidcClaims {
@@ -795,8 +878,8 @@ pub struct ValidatedOidcClaims {
     pub external_subject: String,
     /// Expiry time.
     pub expires_at: OffsetDateTime,
-    /// Not-before time.
-    pub not_before: OffsetDateTime,
+    /// Not-before time, when the provider supplied one.
+    pub not_before: Option<OffsetDateTime>,
     /// Issued-at time.
     pub issued_at: OffsetDateTime,
     /// Validated nonce.

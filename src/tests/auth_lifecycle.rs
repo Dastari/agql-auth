@@ -1,6 +1,13 @@
-use time::{Duration, OffsetDateTime};
+use std::sync::Arc;
 
-use super::{MemoryRefreshTokenStore, MemoryUserStore, metadata, stored_user, test_auth_service};
+use async_trait::async_trait;
+use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
+
+use super::{
+    MemoryRefreshTokenStore, MemoryUserStore, TEST_HS256_SECRET, metadata, stored_user,
+    test_auth_service,
+};
 use crate::prelude::*;
 use crate::util::hash_refresh_token;
 
@@ -51,6 +58,11 @@ async fn login_issues_tokens_and_authenticates_access_token() {
     assert_eq!(authenticated.session_id, payload.user.session_id);
     assert_eq!(authenticated.scopes, payload.user.scopes);
     assert_eq!(authenticated.session, payload.user.session);
+
+    let debug = format!("{payload:?}");
+    assert!(!debug.contains(&payload.access_token));
+    assert!(!debug.contains(&payload.refresh_token));
+    assert!(debug.contains("user-1"));
 }
 
 #[tokio::test]
@@ -67,6 +79,16 @@ async fn login_rejects_disabled_users() {
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::UserDisabled));
+}
+
+#[tokio::test]
+async fn login_unknown_principal_still_returns_invalid_credentials() {
+    let auth = test_auth_service(Default::default(), Default::default());
+    let err = auth
+        .login("missing@example.com", "password123", metadata())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidCredentials));
 }
 
 #[tokio::test]
@@ -113,6 +135,7 @@ async fn refresh_rotates_tokens_and_tracks_usage_metadata() {
     let new_record = refresh_store
         .get_by_hash(&hash_refresh_token(&refreshed.refresh_token))
         .unwrap();
+    assert_eq!(*refresh_store.rotations.lock().unwrap(), 1);
     assert_eq!(rotated_original.replaced_by_token_id, Some(new_record.id));
     assert_eq!(
         new_record.session_family_id,
@@ -123,6 +146,212 @@ async fn refresh_rotates_tokens_and_tracks_usage_metadata() {
     assert_eq!(new_record.session, original_record.session);
     assert_eq!(refreshed.user.scopes, login_payload.user.scopes);
     assert_eq!(refreshed.user.session, login_payload.user.session);
+}
+
+#[tokio::test]
+async fn refresh_lost_rotation_race_revokes_family_and_returns_replay() {
+    let user_store = MemoryUserStore::default();
+    let inner_store = MemoryRefreshTokenStore::default();
+    let refresh_store = RotationRaceRefreshTokenStore {
+        inner: inner_store.clone(),
+    };
+    let auth = AuthService::new(
+        AuthConfig::new(TEST_HS256_SECRET),
+        Arc::new(user_store.clone()),
+        Arc::new(refresh_store),
+    )
+    .unwrap();
+    user_store.insert(StoredUser {
+        id: "user-1".to_string(),
+        principal: "alice@example.com".to_string(),
+        password_hash: auth.hash_password("password123").unwrap(),
+        roles: vec!["CatalogEditor".to_string()],
+        scopes: vec!["users.read".to_string()],
+        disabled: false,
+    });
+
+    let login_payload = auth
+        .login("alice@example.com", "password123", metadata())
+        .await
+        .unwrap();
+
+    let err = auth
+        .refresh(&login_payload.refresh_token, metadata())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::RefreshTokenReplayDetected));
+    assert_eq!(inner_store.family_revocations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn refresh_rotation_error_does_not_revoke_current_token() {
+    let user_store = MemoryUserStore::default();
+    let inner_store = MemoryRefreshTokenStore::default();
+    let refresh_store = FailingRotationRefreshTokenStore {
+        inner: inner_store.clone(),
+    };
+    let auth = AuthService::new(
+        AuthConfig::new(TEST_HS256_SECRET),
+        Arc::new(user_store.clone()),
+        Arc::new(refresh_store),
+    )
+    .unwrap();
+    user_store.insert(StoredUser {
+        id: "user-1".to_string(),
+        principal: "alice@example.com".to_string(),
+        password_hash: auth.hash_password("password123").unwrap(),
+        roles: vec!["CatalogEditor".to_string()],
+        scopes: vec!["users.read".to_string()],
+        disabled: false,
+    });
+
+    let login_payload = auth
+        .login("alice@example.com", "password123", metadata())
+        .await
+        .unwrap();
+    let original_hash = hash_refresh_token(&login_payload.refresh_token);
+    let token_id = inner_store.get_by_hash(&original_hash).unwrap().id;
+
+    let err = auth
+        .refresh(&login_payload.refresh_token, metadata())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::Store(_)));
+    assert!(
+        inner_store.tokens_by_id.lock().unwrap()[&token_id]
+            .revoked_at
+            .is_none()
+    );
+}
+
+#[derive(Clone)]
+struct RotationRaceRefreshTokenStore {
+    inner: MemoryRefreshTokenStore,
+}
+
+#[async_trait]
+impl RefreshTokenStore for RotationRaceRefreshTokenStore {
+    async fn insert_refresh_token(&self, token: StoredRefreshToken) -> crate::AuthResult<()> {
+        self.inner.insert_refresh_token(token).await
+    }
+
+    async fn find_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> crate::AuthResult<Option<StoredRefreshToken>> {
+        self.inner.find_refresh_token_by_hash(token_hash).await
+    }
+
+    async fn revoke_refresh_token(
+        &self,
+        token_id: Uuid,
+        revoked_at: OffsetDateTime,
+        replaced_by_token_id: Option<Uuid>,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .revoke_refresh_token(token_id, revoked_at, replaced_by_token_id, reason)
+            .await
+    }
+
+    async fn revoke_refresh_token_family(
+        &self,
+        session_family_id: Uuid,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .revoke_refresh_token_family(session_family_id, revoked_at, reason)
+            .await
+    }
+
+    async fn touch_refresh_token(
+        &self,
+        token_id: Uuid,
+        used_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .touch_refresh_token(token_id, used_at, ip_address, user_agent)
+            .await
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        _current_token_id: Uuid,
+        _replacement: StoredRefreshToken,
+        _rotated_at: OffsetDateTime,
+        _ip_address: Option<String>,
+        _user_agent: Option<String>,
+    ) -> crate::AuthResult<bool> {
+        Ok(false)
+    }
+}
+
+#[derive(Clone)]
+struct FailingRotationRefreshTokenStore {
+    inner: MemoryRefreshTokenStore,
+}
+
+#[async_trait]
+impl RefreshTokenStore for FailingRotationRefreshTokenStore {
+    async fn insert_refresh_token(&self, token: StoredRefreshToken) -> crate::AuthResult<()> {
+        self.inner.insert_refresh_token(token).await
+    }
+
+    async fn find_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> crate::AuthResult<Option<StoredRefreshToken>> {
+        self.inner.find_refresh_token_by_hash(token_hash).await
+    }
+
+    async fn revoke_refresh_token(
+        &self,
+        token_id: Uuid,
+        revoked_at: OffsetDateTime,
+        replaced_by_token_id: Option<Uuid>,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .revoke_refresh_token(token_id, revoked_at, replaced_by_token_id, reason)
+            .await
+    }
+
+    async fn revoke_refresh_token_family(
+        &self,
+        session_family_id: Uuid,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .revoke_refresh_token_family(session_family_id, revoked_at, reason)
+            .await
+    }
+
+    async fn touch_refresh_token(
+        &self,
+        token_id: Uuid,
+        used_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .touch_refresh_token(token_id, used_at, ip_address, user_agent)
+            .await
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        _current_token_id: Uuid,
+        _replacement: StoredRefreshToken,
+        _rotated_at: OffsetDateTime,
+        _ip_address: Option<String>,
+        _user_agent: Option<String>,
+    ) -> crate::AuthResult<bool> {
+        Err(AuthError::Store("rotation failed".to_string()))
+    }
 }
 
 #[tokio::test]
@@ -250,6 +479,32 @@ async fn bearer_and_connection_init_authentication_work() {
         .authenticate_bearer(&format!("Bearer {}", payload.access_token))
         .unwrap();
     assert_eq!(bearer_user.user_id, "user-1");
+    assert_eq!(
+        auth.authenticate_bearer(&format!("bearer {}", payload.access_token))
+            .unwrap()
+            .user_id,
+        "user-1"
+    );
+    assert_eq!(
+        auth.authenticate_bearer(&format!("BEARER {}", payload.access_token))
+            .unwrap()
+            .user_id,
+        "user-1"
+    );
+    assert_eq!(
+        auth.authenticate_bearer(&payload.access_token)
+            .unwrap()
+            .user_id,
+        "user-1"
+    );
+    assert!(matches!(
+        auth.authenticate_bearer("Basic abc").unwrap_err(),
+        AuthError::InvalidBearerToken
+    ));
+    assert!(matches!(
+        auth.authenticate_bearer("Bearer").unwrap_err(),
+        AuthError::InvalidBearerToken
+    ));
 
     let data = auth
         .authenticate_connection_init_value(serde_json::json!({

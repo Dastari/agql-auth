@@ -81,3 +81,24 @@ async fn login_challenges_reject_expired_codes() {
         .unwrap_err();
     assert!(matches!(err, AuthError::LoginChallengeExpired));
 }
+
+#[tokio::test]
+async fn numeric_login_codes_are_ascii_digits_and_requested_length() {
+    let auth = test_auth_service(Default::default(), Default::default());
+    let store = MemoryLoginChallengeStore::default();
+    for length in [1, 6, 12] {
+        let issued = auth
+            .create_login_challenge(
+                &store,
+                "alice@example.com",
+                LoginChallengeOptions {
+                    code_length: length,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(issued.code.len(), length);
+        assert!(issued.code.chars().all(|ch| ch.is_ascii_digit()));
+    }
+}

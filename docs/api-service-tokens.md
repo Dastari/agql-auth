@@ -74,6 +74,9 @@ let issued = api_tokens
 // Show issued.token once. Persist only the StoredApiToken written by the store.
 ```
 
+`IssuedApiToken` redacts the raw token in `Debug` output, but serialization
+still contains the raw token so the host can intentionally return it once.
+
 ## Authenticating A Bearer Header
 
 ```rust

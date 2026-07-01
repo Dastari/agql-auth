@@ -21,7 +21,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 ```toml
 [dependencies]
-agql-auth = "0.5"
+agql-auth = "0.6"
 ```
 
 ## Basic Usage
@@ -38,6 +38,9 @@ let auth = AuthService::new(
     Arc::new(refresh_token_store),
 )?;
 ```
+
+HS256 secrets must be at least 32 bytes in `0.6.0`. Use a random secret from a
+secret manager; prefer RS256 when routers or other services validate tokens.
 
 Issue a local session with password login:
 
@@ -187,6 +190,21 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
+
+## 0.6.0 Migration Notes
+
+- `RefreshTokenStore` implementers must add atomic `rotate_refresh_token`.
+- HS256 secrets shorter than 32 bytes are rejected at `AuthService::new`.
+- `ValidatedOidcClaims.not_before` is now `Option<OffsetDateTime>`.
+- OIDC config includes discovery-cache TTL, forced-JWKS-refresh cooldown, and
+  additional trusted audiences for multi-audience ID tokens.
+- `AuthConfig.jwt_signing` is authoritative; `jwt_secret` remains a legacy
+  mirror field and should not be mutated directly.
+- Access tokens now include `purpose = "access_token"`; `0.6.x` still accepts
+  legacy access tokens without that claim.
+- TOTP replay protection is available through `TotpReplayStore`.
+- Unsupported authorization schemes such as `Basic abc` are rejected by bearer
+  parsing. Raw token strings are still accepted.
 
 ## Design Boundaries
 

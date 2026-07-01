@@ -1,10 +1,11 @@
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use rand::RngCore;
+use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 
 use super::AuthService;
 use crate::models::{TotpOptions, TotpProvisioning, TotpSecret};
-use crate::stores::{RefreshTokenStore, UserStore};
+use crate::stores::{RefreshTokenStore, TotpReplayStore, UserStore};
 use crate::util::{
     decode_base32_secret, generate_totp_code_for_step, totp_step, validate_totp_options,
 };
@@ -62,6 +63,10 @@ where
     }
 
     /// Verifies a TOTP code for the supplied secret and time.
+    ///
+    /// This method is stateless and can accept the same valid code more than
+    /// once within the configured skew window. Production MFA flows should
+    /// prefer [`AuthService::verify_totp_code_with_replay_store`].
     pub fn verify_totp_code(
         &self,
         secret_base32: &str,
@@ -69,6 +74,46 @@ where
         options: TotpOptions,
         now: OffsetDateTime,
     ) -> AuthResult<()> {
+        self.verify_totp_code_step(secret_base32, code, options, now)
+            .map(|_| ())
+    }
+
+    /// Verifies a TOTP code and consumes the accepted time step once.
+    ///
+    /// `store.consume_totp_step` must atomically return `true` only for the
+    /// first use of `(principal_id, factor_id, step)`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn verify_totp_code_with_replay_store<S>(
+        &self,
+        store: &S,
+        principal_id: &str,
+        factor_id: Option<&str>,
+        secret_base32: &str,
+        code: &str,
+        options: TotpOptions,
+        now: OffsetDateTime,
+    ) -> AuthResult<()>
+    where
+        S: TotpReplayStore,
+    {
+        let step = self.verify_totp_code_step(secret_base32, code, options, now)?;
+        let consumed = store
+            .consume_totp_step(principal_id, factor_id, step, now)
+            .await?;
+        if consumed {
+            Ok(())
+        } else {
+            Err(AuthError::TotpCodeReplayed)
+        }
+    }
+
+    fn verify_totp_code_step(
+        &self,
+        secret_base32: &str,
+        code: &str,
+        options: TotpOptions,
+        now: OffsetDateTime,
+    ) -> AuthResult<i64> {
         validate_totp_options(&options)?;
         if !code.chars().all(|ch| ch.is_ascii_digit()) {
             return Err(AuthError::InvalidTotpCode);
@@ -91,8 +136,8 @@ where
                 })?,
                 options.digits,
             )?;
-            if expected == code {
-                return Ok(());
+            if expected.as_bytes().ct_eq(code.as_bytes()).into() {
+                return Ok(step);
             }
         }
 

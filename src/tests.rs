@@ -59,6 +59,7 @@ pub(super) struct MemoryRefreshTokenStore {
     token_hash_to_id: Arc<Mutex<HashMap<String, Uuid>>>,
     pub(super) family_revocations:
         Arc<Mutex<Vec<(Uuid, OffsetDateTime, RefreshTokenRevocationReason)>>>,
+    pub(super) rotations: Arc<Mutex<u32>>,
 }
 
 impl MemoryRefreshTokenStore {
@@ -138,7 +139,38 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
         }
         Ok(())
     }
+
+    async fn rotate_refresh_token(
+        &self,
+        current_token_id: Uuid,
+        replacement: StoredRefreshToken,
+        rotated_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> crate::AuthResult<bool> {
+        let mut token_hash_to_id = self.token_hash_to_id.lock().unwrap();
+        let mut tokens = self.tokens_by_id.lock().unwrap();
+        let Some(current) = tokens.get_mut(&current_token_id) else {
+            return Ok(false);
+        };
+        if current.revoked_at.is_some() {
+            return Ok(false);
+        }
+
+        *self.rotations.lock().unwrap() += 1;
+        current.last_used_at = Some(rotated_at);
+        current.ip_address = ip_address;
+        current.user_agent = user_agent;
+        current.revoked_at = Some(rotated_at);
+        current.replaced_by_token_id = Some(replacement.id);
+
+        token_hash_to_id.insert(replacement.token_hash.clone(), replacement.id);
+        tokens.insert(replacement.id, replacement);
+        Ok(true)
+    }
 }
+
+pub(super) const TEST_HS256_SECRET: &str = "test-secret-must-be-at-least-32-bytes";
 
 #[derive(Clone, Default)]
 pub(super) struct MemoryApiTokenStore {
@@ -338,7 +370,7 @@ pub(super) fn test_auth_service(
     refresh_store: MemoryRefreshTokenStore,
 ) -> AuthService<MemoryUserStore, MemoryRefreshTokenStore> {
     AuthService::new(
-        AuthConfig::new("test-secret"),
+        AuthConfig::new(TEST_HS256_SECRET),
         Arc::new(user_store),
         Arc::new(refresh_store),
     )

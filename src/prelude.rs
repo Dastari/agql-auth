@@ -37,5 +37,5 @@ pub use crate::service::AuthService;
 pub use crate::session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use crate::stores::{
     ApiTokenStore, ExternalIdentityStore, LoginChallengeStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, UserStore,
+    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
 };

@@ -2,7 +2,10 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use super::{MemoryRefreshTokenStore, MemoryUserStore, metadata, stored_user, test_auth_service};
+use super::{
+    MemoryRefreshTokenStore, MemoryUserStore, TEST_HS256_SECRET, metadata, stored_user,
+    test_auth_service,
+};
 use crate::prelude::*;
 
 #[derive(Serialize)]
@@ -61,7 +64,7 @@ fn legacy_access_tokens_without_scopes_decode_to_empty_scopes() {
             exp: expires_at.unix_timestamp(),
             iat: issued_at.unix_timestamp(),
         },
-        &EncodingKey::from_secret("test-secret".as_bytes()),
+        &EncodingKey::from_secret(TEST_HS256_SECRET.as_bytes()),
     )
     .unwrap();
 

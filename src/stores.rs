@@ -22,7 +22,10 @@ pub trait UserStore: Send + Sync {
 /// Persists rotated opaque refresh tokens.
 ///
 /// Implementations should store only token hashes and should make revocation
-/// operations durable before returning.
+/// operations durable before returning. Refresh-token rotation must be atomic:
+/// [`AuthService::refresh`](crate::AuthService::refresh) relies on
+/// [`RefreshTokenStore::rotate_refresh_token`] to ensure only one concurrent
+/// refresh can replace a token.
 pub trait RefreshTokenStore: Send + Sync {
     /// Stores a newly issued refresh token record.
     async fn insert_refresh_token(&self, token: StoredRefreshToken) -> AuthResult<()>;
@@ -52,7 +55,10 @@ pub trait RefreshTokenStore: Send + Sync {
         reason: RefreshTokenRevocationReason,
     ) -> AuthResult<()>;
 
-    /// Records metadata for a refresh-token use before rotation.
+    /// Records metadata for a refresh-token use outside the rotation path.
+    ///
+    /// [`RefreshTokenStore::rotate_refresh_token`] handles use metadata during
+    /// refresh rotation.
     async fn touch_refresh_token(
         &self,
         token_id: Uuid,
@@ -60,6 +66,25 @@ pub trait RefreshTokenStore: Send + Sync {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AuthResult<()>;
+
+    /// Atomically replaces one refresh token with a new token record.
+    ///
+    /// Implementations must perform the full operation as one all-or-nothing
+    /// store transaction. Return `Ok(true)` only if `current_token_id` existed,
+    /// was not revoked, was marked used/revoked for
+    /// [`RefreshTokenRevocationReason::Rotation`], had
+    /// `replaced_by_token_id = Some(replacement.id)`, and `replacement` was
+    /// inserted durably. Return `Ok(false)` when the current token is missing or
+    /// already revoked. If the replacement cannot be inserted, return `Err`
+    /// and leave the current token unmodified.
+    async fn rotate_refresh_token(
+        &self,
+        current_token_id: Uuid,
+        replacement: StoredRefreshToken,
+        rotated_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AuthResult<bool>;
 }
 
 #[async_trait]
@@ -120,8 +145,23 @@ pub trait OAuthStateStore: Send + Sync {
 
     /// Consumes an OAuth state record exactly once.
     ///
-    /// Implementations should match on provider name and hashed state, set
-    /// `consumed_at`, and return the record atomically.
+    /// Implementations must atomically find an unconsumed state record by
+    /// `(provider_name, state_hash)`, set `consumed_at` in the same operation,
+    /// and return the pre-consumption snapshot with `consumed_at == None`.
+    /// Return `Ok(None)` when no unconsumed record exists. Do not return the
+    /// post-update record with `consumed_at = Some(...)`.
+    ///
+    /// SQL-style shape:
+    ///
+    /// ```sql
+    /// UPDATE oauth_states
+    /// SET consumed_at = ?
+    /// WHERE provider_name = ?
+    ///   AND state_hash = ?
+    ///   AND consumed_at IS NULL
+    /// RETURNING provider_name, state_hash, nonce, code_verifier, redirect_uri,
+    ///           scopes, created_at, expires_at, NULL AS consumed_at;
+    /// ```
     async fn consume_oauth_state(
         &self,
         provider_name: &str,
@@ -135,6 +175,25 @@ pub trait OAuthStateStore: Send + Sync {
         older_than: OffsetDateTime,
         expired_at: OffsetDateTime,
     ) -> AuthResult<u64>;
+}
+
+#[async_trait]
+/// Persists consumed TOTP time steps to prevent code replay.
+///
+/// Production MFA flows should prefer
+/// [`AuthService::verify_totp_code_with_replay_store`](crate::AuthService::verify_totp_code_with_replay_store)
+/// over stateless verification. Implementations should atomically insert the
+/// `(principal_id, factor_id, step)` tuple and return `Ok(true)` only for the
+/// first successful consume operation.
+pub trait TotpReplayStore: Send + Sync {
+    /// Consumes a valid TOTP time step once for a principal/factor.
+    async fn consume_totp_step(
+        &self,
+        principal_id: &str,
+        factor_id: Option<&str>,
+        step: i64,
+        consumed_at: OffsetDateTime,
+    ) -> AuthResult<bool>;
 }
 
 #[async_trait]

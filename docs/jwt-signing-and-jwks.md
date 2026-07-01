@@ -6,7 +6,8 @@ password-reset token validation.
 
 ## HS256 Compatibility
 
-Existing users can keep using `AuthConfig::new(secret)`.
+Existing users can keep using `AuthConfig::new(secret)`, but `0.6.0` requires
+the HS256 secret to be at least 32 bytes.
 
 ```rust
 use std::sync::Arc;
@@ -26,6 +27,10 @@ with multiple systems increases blast radius.
 
 `AuthConfig::with_hs256_secret(secret)` is equivalent and can be used when the
 signing mode should be explicit.
+
+`AuthConfig.jwt_secret` remains public for source compatibility, but it is now a
+legacy mirror. `AuthConfig.jwt_signing` is authoritative; use
+`set_jwt_signing` instead of mutating `jwt_secret` directly.
 
 ## RS256
 
@@ -121,3 +126,24 @@ Changing signing modes does not rename or remove access-token claims:
 - `aud`
 - `exp`
 - `iat`
+
+`0.6.0` also adds `purpose = "access_token"` to newly issued access tokens.
+Validation accepts legacy `0.5.x` access tokens that do not contain `purpose`,
+but rejects any token whose purpose is present and not `access_token`.
+
+Access tokens are stateless and remain valid until `exp`, even after logout or
+refresh-token-family revocation. Keep access-token TTLs short, and use the
+embedded `sid` for host-side session checks on high-risk resolvers if your app
+needs immediate session revocation.
+
+## RSA Advisory Note
+
+This crate currently depends on `rsa` to parse RSA public keys for JWKS
+modulus/exponent extraction. The known Marvin advisory for `rsa 0.9` is about
+private-key timing side channels; `agql-auth` directly uses it for public-key
+parsing/JWKS export, while signing and verification are handled by
+`jsonwebtoken`.
+
+Downstream `cargo audit` may still flag the dependency. Future work is to
+evaluate replacing the direct `rsa` usage with lower-level DER/SPKI parsing or
+a patched alternative.

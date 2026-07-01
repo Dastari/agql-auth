@@ -102,6 +102,22 @@ auth.verify_totp_code(
 )?;
 ```
 
+`verify_totp_code` is stateless and is kept for compatibility. Production flows
+should prefer `verify_totp_code_with_replay_store`, which records the accepted
+time step through `TotpReplayStore` and rejects the same step on reuse:
+
+```rust
+auth.verify_totp_code_with_replay_store(
+    &totp_replay_store,
+    user_id,
+    Some("primary"),
+    &secret.base32_secret,
+    submitted_code,
+    TotpOptions::default(),
+    OffsetDateTime::now_utc(),
+).await?;
+```
+
 After a successful step-up challenge, the host can issue a new local session
 with `SessionContext` showing `AuthMethod::TotpStepUp` or update local session
 state according to its own policy.
@@ -116,3 +132,8 @@ enrollment records. Host services should:
 - expire unused records
 - avoid logging reset tokens or login codes
 - revoke existing sessions when local policy requires it
+
+`Debug` output for issued reset tokens, TOTP secrets/provisioning URIs, local
+auth payloads, OIDC token responses, and issued API tokens redacts raw secret
+material. Serialization still contains the actual values when those structs are
+intentionally returned by the host.

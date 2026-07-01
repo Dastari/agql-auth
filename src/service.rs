@@ -34,6 +34,10 @@ use crate::util::{
     map_access_token_decode_error, strip_bearer_prefix,
 };
 
+const MIN_HS256_SECRET_BYTES: usize = 32;
+const ACCESS_TOKEN_PURPOSE: &str = "access_token";
+const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWdxbC1hdXRoLWR1bW15LXNsdA$8ClNuSX6M3l/dalOcz8a117s1wLv/AbzbJiKA7dS4Ak";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AccessTokenClaims {
     sub: String,
@@ -47,6 +51,8 @@ struct AccessTokenClaims {
     aud: String,
     exp: i64,
     iat: i64,
+    #[serde(default)]
+    purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,11 +139,10 @@ where
         password: &str,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
-        let user = self
-            .user_store
-            .find_user_by_principal(principal)
-            .await?
-            .ok_or(AuthError::InvalidCredentials)?;
+        let Some(user) = self.user_store.find_user_by_principal(principal).await? else {
+            let _ = self.verify_password(password, DUMMY_PASSWORD_HASH);
+            return Err(AuthError::InvalidCredentials);
+        };
 
         if user.disabled {
             return Err(AuthError::UserDisabled);
@@ -209,15 +214,6 @@ where
             return Err(AuthError::UserDisabled);
         }
 
-        self.refresh_store
-            .touch_refresh_token(
-                existing.id,
-                now,
-                metadata.ip_address.clone(),
-                metadata.user_agent.clone(),
-            )
-            .await?;
-
         let auth_user = AuthUser {
             user_id: user.id,
             session_id: existing.session_id,
@@ -235,18 +231,27 @@ where
             )
             .await?;
 
-        self.refresh_store
-            .revoke_refresh_token(
+        let rotated = self
+            .refresh_store
+            .rotate_refresh_token(
                 existing.id,
+                new_record.clone(),
                 now,
-                Some(new_record.id),
-                RefreshTokenRevocationReason::Rotation,
+                metadata.ip_address,
+                metadata.user_agent,
             )
             .await?;
 
-        self.refresh_store
-            .insert_refresh_token(new_record.clone())
-            .await?;
+        if !rotated {
+            self.refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::ReplayDetected,
+                )
+                .await?;
+            return Err(AuthError::RefreshTokenReplayDetected);
+        }
 
         Ok(AuthPayload {
             user: auth_user,
@@ -293,6 +298,9 @@ where
         let claims = token_data.claims;
         if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
             return Err(AuthError::AccessTokenExpired);
+        }
+        if !matches!(claims.purpose.as_deref(), None | Some(ACCESS_TOKEN_PURPOSE)) {
+            return Err(AuthError::InvalidAccessToken);
         }
         let session_id = Uuid::parse_str(&claims.sid).map_err(|_| AuthError::InvalidAccessToken)?;
 
@@ -489,6 +497,7 @@ where
             aud: self.config.audience.clone(),
             exp: expires_at.unix_timestamp(),
             iat: issued_at.unix_timestamp(),
+            purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
         };
 
         self.encode_local_jwt(&claims)
@@ -536,9 +545,9 @@ impl JwtKeyMaterial {
         let algorithm = signing.algorithm();
         let (encoding_key, decoding_key, key_id, jwks) = match signing {
             EffectiveJwtSigningConfig::Hs256 { secret } => {
-                if secret.is_empty() {
-                    return Err(AuthError::Config(
-                        "jwt_secret must not be empty".to_string(),
+                if secret.len() < MIN_HS256_SECRET_BYTES {
+                    return Err(AuthError::InvalidConfiguration(
+                        "HS256 secret must be at least 32 bytes".to_string(),
                     ));
                 }
 
@@ -622,14 +631,7 @@ impl EffectiveJwtSigningConfig<'_> {
 
 fn effective_signing_config(config: &AuthConfig) -> EffectiveJwtSigningConfig<'_> {
     match &config.jwt_signing {
-        JwtSigningConfig::Hs256 { secret } => {
-            let secret = if !config.jwt_secret.is_empty() && config.jwt_secret != *secret {
-                config.jwt_secret.as_str()
-            } else {
-                secret.as_str()
-            };
-            EffectiveJwtSigningConfig::Hs256 { secret }
-        }
+        JwtSigningConfig::Hs256 { secret } => EffectiveJwtSigningConfig::Hs256 { secret },
         JwtSigningConfig::Rs256 {
             private_key_pem,
             public_key_pem,

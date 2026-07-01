@@ -387,8 +387,9 @@ fn push_mapped(values: Option<&Vec<String>>, output: &mut Vec<String>, seen: &mu
 pub struct OidcProvider {
     config: OidcProviderConfig,
     http_client: Arc<dyn OidcHttpClient>,
-    discovery_cache: Arc<Mutex<Option<OidcDiscoveryDocument>>>,
+    discovery_cache: Arc<Mutex<Option<CachedDiscovery>>>,
     jwks_cache: Arc<Mutex<Option<CachedJwks>>>,
+    last_forced_jwks_refresh: Arc<Mutex<Option<OffsetDateTime>>>,
 }
 
 impl OidcProvider {
@@ -403,6 +404,7 @@ impl OidcProvider {
             http_client,
             discovery_cache: Arc::new(Mutex::new(None)),
             jwks_cache: Arc::new(Mutex::new(None)),
+            last_forced_jwks_refresh: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -413,13 +415,16 @@ impl OidcProvider {
 
     /// Fetches and caches the OIDC discovery document.
     pub async fn discover(&self) -> AuthResult<OidcDiscoveryDocument> {
-        if let Some(document) = self
+        let now = OffsetDateTime::now_utc();
+        if let Some(cache) = self
             .discovery_cache
             .lock()
             .map_err(|_| AuthError::OidcDiscovery("discovery cache lock poisoned".to_string()))?
-            .clone()
+            .as_ref()
+            .cloned()
+            && cache.expires_at > now
         {
-            return Ok(document);
+            return Ok(cache.document);
         }
 
         let raw = self
@@ -430,12 +435,16 @@ impl OidcProvider {
         let mut document: OidcDiscoveryDocument = serde_json::from_value(raw.clone())
             .map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
         document.raw = raw;
+        let expires_at = now + self.config.discovery_cache_ttl;
 
         *self
             .discovery_cache
             .lock()
             .map_err(|_| AuthError::OidcDiscovery("discovery cache lock poisoned".to_string()))? =
-            Some(document.clone());
+            Some(CachedDiscovery {
+                document: document.clone(),
+                expires_at,
+            });
 
         Ok(document)
     }
@@ -715,13 +724,13 @@ impl OidcProvider {
             )));
         }
 
-        let jwk = self.jwk_for_kid(&kid, false).await?;
-        let jwk = match jwk {
+        let jwk = match self.jwk_for_kid(&kid, false).await? {
             Some(jwk) => jwk,
-            None => self
+            None if self.allow_forced_jwks_refresh()? => self
                 .jwk_for_kid(&kid, true)
                 .await?
                 .ok_or_else(|| AuthError::OidcTokenValidation("unknown key ID".to_string()))?,
+            None => return Err(AuthError::OidcTokenValidation("unknown key ID".to_string())),
         };
 
         validate_jwk_for_header(&jwk, header.alg)?;
@@ -731,7 +740,7 @@ impl OidcProvider {
         let mut validation = Validation::new(header.alg);
         validation.algorithms = allowed_algorithms;
         validation.set_audience(std::slice::from_ref(&self.config.client_id));
-        validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud", "sub"]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "iat"]);
         validation.validate_nbf = true;
         validation.leeway = self.clock_skew_seconds()?;
 
@@ -782,6 +791,26 @@ impl OidcProvider {
         Ok(jwks)
     }
 
+    fn allow_forced_jwks_refresh(&self) -> AuthResult<bool> {
+        if self.config.jwks_forced_refresh_cooldown == time::Duration::ZERO {
+            return Ok(true);
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let mut last_refresh = self.last_forced_jwks_refresh.lock().map_err(|_| {
+            AuthError::OidcDiscovery("forced JWKS refresh lock poisoned".to_string())
+        })?;
+
+        let allowed = last_refresh
+            .map(|last| now >= last + self.config.jwks_forced_refresh_cooldown)
+            .unwrap_or(true);
+        if allowed {
+            *last_refresh = Some(now);
+        }
+
+        Ok(allowed)
+    }
+
     fn validate_claims(
         &self,
         claims: RawOidcIdTokenClaims,
@@ -796,6 +825,9 @@ impl OidcProvider {
                 "ID token nonce does not match authorization state".to_string(),
             ));
         }
+
+        let audiences = claims.aud.clone().into_vec();
+        self.validate_audiences(&audiences, claims.azp.as_deref())?;
 
         let tenant_id = claims.tid.clone();
         if !self.issuer_allowed(&claims.iss, tenant_id.as_deref(), discovery) {
@@ -847,8 +879,6 @@ impl OidcProvider {
 
         let raw = serde_json::to_value(&claims)
             .map_err(|err| AuthError::OidcTokenValidation(err.to_string()))?;
-        let audiences = claims.aud.into_vec();
-
         Ok(ValidatedOidcClaims {
             provider_name: self.config.provider_name.clone(),
             issuer: claims.iss,
@@ -856,7 +886,7 @@ impl OidcProvider {
             subject: claims.sub,
             external_subject,
             expires_at: unix_timestamp_to_datetime(claims.exp)?,
-            not_before: unix_timestamp_to_datetime(claims.nbf)?,
+            not_before: claims.nbf.map(unix_timestamp_to_datetime).transpose()?,
             issued_at: unix_timestamp_to_datetime(claims.iat)?,
             nonce,
             tenant_id,
@@ -868,6 +898,41 @@ impl OidcProvider {
             groups: claims.groups,
             raw,
         })
+    }
+
+    fn validate_audiences(&self, audiences: &[String], azp: Option<&str>) -> AuthResult<()> {
+        if let Some(authorized_party) = azp
+            && authorized_party != self.config.client_id
+        {
+            return Err(AuthError::OidcTokenValidation(
+                "ID token azp does not match client_id".to_string(),
+            ));
+        }
+
+        if audiences.len() <= 1 {
+            return Ok(());
+        }
+
+        if azp != Some(self.config.client_id.as_str()) {
+            return Err(AuthError::OidcTokenValidation(
+                "multi-audience ID token is missing matching azp".to_string(),
+            ));
+        }
+
+        if audiences.iter().any(|audience| {
+            audience != &self.config.client_id
+                && !self
+                    .config
+                    .allowed_additional_audiences
+                    .iter()
+                    .any(|allowed| allowed == audience)
+        }) {
+            return Err(AuthError::OidcTokenValidation(
+                "ID token contains an untrusted audience".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     fn issuer_allowed(
@@ -909,6 +974,12 @@ impl OidcProvider {
 }
 
 #[derive(Clone)]
+struct CachedDiscovery {
+    document: OidcDiscoveryDocument,
+    expires_at: OffsetDateTime,
+}
+
+#[derive(Clone)]
 struct CachedJwks {
     jwks: JwkSet,
     expires_at: OffsetDateTime,
@@ -920,9 +991,10 @@ struct RawOidcIdTokenClaims {
     aud: OneOrMany,
     sub: String,
     exp: i64,
-    nbf: i64,
+    nbf: Option<i64>,
     iat: i64,
     nonce: Option<String>,
+    azp: Option<String>,
     tid: Option<String>,
     oid: Option<String>,
     email: Option<String>,
