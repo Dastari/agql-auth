@@ -88,7 +88,9 @@ pub use config::{
 };
 pub use errors::AuthError;
 pub use graphql::{
-    auth_user_from_ctx, auth_user_from_ctx_opt, principal_from_ctx, principal_from_ctx_opt,
+    GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
+    auth_user_from_ctx, auth_user_from_ctx_opt, graphql_refresh_cookie_directive,
+    principal_from_ctx, principal_from_ctx_opt,
 };
 pub use guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
