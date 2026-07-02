@@ -70,6 +70,45 @@ COMMIT;
 Use a unique index on the refresh-token hash and indexes on session-family IDs
 to make revocation efficient.
 
+## Abuse Protection
+
+`AuthRateLimitStore` persists counters for rate limiting, exponential backoff,
+and temporary lockout. `AuthService::new` uses `MemoryAuthRateLimitStore`, which
+is useful for tests and single-process development. Production deployments with
+multiple app instances should implement `AuthRateLimitStore` and construct the
+service with `AuthService::new_with_rate_limit_store`.
+
+The store receives opaque keys:
+
+- `flow`, such as `password_login`, `login_code_verification`,
+  `totp_verification`, `password_reset_token_consumption`,
+  `password_reset_request`, or `login_code_request`
+- `bucket`, either `principal` or `client`
+- `value_hash`, a SHA-256 hash of the normalized principal/user/client value
+
+The store should persist `AuthRateLimitState` fields durably, upsert by the full
+key, and delete records only after `expires_at`. For multi-instance safety,
+protect updates with the database's normal transaction, row lock, or upsert
+mechanism so concurrent attempts do not lose increments.
+
+`AuthConfig.rate_limits.credential` controls password login, login-code
+verification, TOTP verification, and password-reset token consumption.
+`AuthConfig.rate_limits.request` controls password-reset and login-code request
+initiation. Each `AuthRateLimitPolicy` exposes:
+
+- `enabled`
+- `window`
+- `backoff_after_attempts`
+- `max_attempts_before_lockout`
+- `base_backoff`
+- `max_backoff`
+- `lockout_duration`
+- `state_ttl`
+
+Throttled credential checks return `AuthError::AuthThrottled`; lockouts return
+`AuthError::AuthLocked`. Both map to GraphQL extension codes and include
+`retryAfterSeconds`.
+
 ## API Tokens
 
 `ApiTokenStore` persists long-lived opaque API/service tokens. It is independent

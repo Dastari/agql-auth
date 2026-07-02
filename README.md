@@ -14,6 +14,8 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 - Microsoft Entra ID / OIDC authorization-code + PKCE login
 - Host-controlled external user provisioning and account linking
 - Password reset tokens, one-time login challenges, and TOTP primitives
+- Rate limiting, exponential backoff, and temporary lockout for auth flows
+- Short-lived typed purpose JWTs with explicit audience validation
 - `async-graphql` request injection and guards
 - Storage traits instead of built-in database assumptions
 
@@ -36,6 +38,18 @@ let auth = AuthService::new(
     AuthConfig::new(std::env::var("JWT_SECRET")?),
     Arc::new(user_store),
     Arc::new(refresh_token_store),
+)?;
+```
+
+`AuthService::new` uses an in-memory abuse-protection store. Production
+multi-instance apps should provide a durable `AuthRateLimitStore`:
+
+```rust
+let auth = AuthService::new_with_rate_limit_store(
+    config,
+    Arc::new(user_store),
+    Arc::new(refresh_token_store),
+    Arc::new(rate_limit_store),
 )?;
 ```
 
@@ -120,6 +134,30 @@ async fn jwks(auth: &AuthService<AppUserStore, AppRefreshTokenStore>)
 
 See [JWT signing and JWKS](docs/jwt-signing-and-jwks.md).
 
+Use purpose tokens for short-lived, non-session grants:
+
+```rust
+use agql_auth::{PurposeTokenIssueRequest, PurposeTokenValidation};
+use serde_json::json;
+use time::Duration;
+
+let issued = auth.issue_purpose_token(
+    PurposeTokenIssueRequest::new(
+        user_id,
+        "mobile_capture",
+        "digitise-mobile-capture",
+        Duration::minutes(15),
+    )
+    .with_session_id(session_id)
+    .with_claim("collectionId", json!(collection_id)),
+)?;
+
+let grant = auth.authenticate_purpose_token(
+    &issued.token,
+    PurposeTokenValidation::new("mobile_capture", "digitise-mobile-capture"),
+)?;
+```
+
 ## API And Service Tokens
 
 Use `ApiTokenService` for long-lived server-to-server credentials. API tokens
@@ -194,15 +232,21 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 ## 0.6.0 Migration Notes
 
 - `RefreshTokenStore` implementers must add atomic `rotate_refresh_token`.
+- Production apps should implement `AuthRateLimitStore` and construct services
+  with `AuthService::new_with_rate_limit_store`.
 - HS256 secrets shorter than 32 bytes are rejected at `AuthService::new`.
 - `ValidatedOidcClaims.not_before` is now `Option<OffsetDateTime>`.
 - OIDC config includes discovery-cache TTL, forced-JWKS-refresh cooldown, and
   additional trusted audiences for multi-audience ID tokens.
 - `AuthConfig.jwt_signing` is authoritative; `jwt_secret` remains a legacy
   mirror field and should not be mutated directly.
-- Access tokens now include `purpose = "access_token"`; `0.6.x` still accepts
-  legacy access tokens without that claim.
+- Access tokens now include `typ = "access"` and `purpose = "access_token"`;
+  `0.6.x` still accepts legacy access tokens without those claims.
+- Purpose tokens use `typ = "purpose_token"`, exact `purpose`, and exact
+  audience validation.
 - TOTP replay protection is available through `TotpReplayStore`.
+- Auth throttling returns `AuthError::AuthThrottled`; temporary lockout returns
+  `AuthError::AuthLocked`. GraphQL extensions include `retryAfterSeconds`.
 - Unsupported authorization schemes such as `Basic abc` are rejected by bearer
   parsing. Raw token strings are still accepted.
 

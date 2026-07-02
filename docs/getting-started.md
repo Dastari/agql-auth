@@ -26,6 +26,19 @@ let auth = AuthService::new(
 )?;
 ```
 
+`AuthService::new` uses an in-memory abuse-protection store. That is fine for
+tests and single-process development. Production services should implement
+`AuthRateLimitStore` and pass it to `AuthService::new_with_rate_limit_store`:
+
+```rust
+let auth = AuthService::new_with_rate_limit_store(
+    config,
+    Arc::new(user_store),
+    Arc::new(refresh_token_store),
+    Arc::new(rate_limit_store),
+)?;
+```
+
 `AuthConfig::new(secret)` preserves the legacy HS256 signing behavior. For new
 deployments where other services or routers need to validate tokens, prefer
 RS256. HS256 secrets must be at least 32 bytes. See
@@ -116,6 +129,37 @@ let data = auth.authenticate_connection_init_value(connection_init_json)?;
 
 Attach the returned `async_graphql::Data` to the subscription connection using
 the transport framework you own.
+
+If your GraphQL auth mutations return refresh tokens in payloads and your HTTP
+layer moves those tokens into cookies, use
+`graphql_refresh_cookie_directive` with selected schema field names rather than
+client-chosen operation names:
+
+```rust
+use agql_auth::{
+    GraphqlRefreshCookieConfig, GraphqlTopLevelField,
+    graphql_refresh_cookie_directive,
+};
+
+let config = GraphqlRefreshCookieConfig::new(
+    ["authLogin", "authLoginWithCode", "authRefreshSession"],
+    ["authLogout", "authLogoutAllSessions"],
+);
+let fields = [GraphqlTopLevelField::with_response_key(
+    "authLogin",
+    "CustomLoginAlias",
+)];
+
+if let Some(directive) =
+    graphql_refresh_cookie_directive(&mut graphql_response, &fields, &config)
+{
+    apply_cookie_policy(directive)?;
+}
+```
+
+The helper extracts `refreshToken` and `refreshTokenExpiresAt`, optionally
+blanks `refreshToken` in the GraphQL response, and leaves cookie name/path,
+SameSite, Secure, and Max-Age formatting to the host.
 
 ## Issuing Sessions For Verified Users
 

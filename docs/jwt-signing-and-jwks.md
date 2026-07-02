@@ -1,8 +1,9 @@
 # JWT Signing And JWKS
 
-`agql-auth` issues local JWT access tokens. The signing mode is configured on
-`AuthConfig` and is enforced by local validation, GraphQL request injection, and
-password-reset token validation.
+`agql-auth` issues local JWT access tokens and short-lived purpose tokens. The
+signing mode is configured on `AuthConfig` and is enforced by local validation,
+GraphQL request injection, password-reset token validation, and purpose-token
+validation.
 
 ## HS256 Compatibility
 
@@ -117,6 +118,7 @@ still be valid.
 
 Changing signing modes does not rename or remove access-token claims:
 
+- `typ`
 - `sub`
 - `sid`
 - `roles`
@@ -127,14 +129,54 @@ Changing signing modes does not rename or remove access-token claims:
 - `exp`
 - `iat`
 
-`0.6.0` also adds `purpose = "access_token"` to newly issued access tokens.
-Validation accepts legacy `0.5.x` access tokens that do not contain `purpose`,
-but rejects any token whose purpose is present and not `access_token`.
+`0.6.0` adds `typ = "access"` and `purpose = "access_token"` to newly issued
+access tokens. Validation accepts legacy `0.5.x` access tokens that do not
+contain those claims, but rejects any token whose `typ` or `purpose` is present
+and not the access-token value.
 
 Access tokens are stateless and remain valid until `exp`, even after logout or
 refresh-token-family revocation. Keep access-token TTLs short, and use the
 embedded `sid` for host-side session checks on high-risk resolvers if your app
 needs immediate session revocation.
+
+## Purpose Tokens
+
+Purpose tokens are short-lived JWTs for narrow non-session grants, such as a
+mobile upload grant or a one-off capture grant. They are signed with the same
+configured HS256 or RS256 key material but are structurally separated from
+access tokens:
+
+- `typ = "purpose_token"`
+- exact `purpose` validation
+- exact `aud` validation chosen by the caller
+- optional `sid`, `scopes`, and custom flattened claims
+
+```rust
+use agql_auth::{PurposeTokenIssueRequest, PurposeTokenValidation};
+use serde_json::json;
+use time::Duration;
+
+let issued = auth.issue_purpose_token(
+    PurposeTokenIssueRequest::new(
+        user_id,
+        "mobile_capture",
+        "digitise-mobile-capture",
+        Duration::minutes(15),
+    )
+    .with_session_id(session_id)
+    .with_scopes(["collection.collection-1.records.create"])
+    .with_claim("collectionId", json!(collection_id)),
+)?;
+
+let verified = auth.authenticate_purpose_token(
+    &issued.token,
+    PurposeTokenValidation::new("mobile_capture", "digitise-mobile-capture"),
+)?;
+```
+
+Do not validate purpose tokens with `authenticate_access_token`; access-token
+validation rejects `typ = "purpose_token"`. Custom claims may not use reserved
+claim names such as `sub`, `aud`, `exp`, `typ`, or `purpose`.
 
 ## RSA Advisory Note
 

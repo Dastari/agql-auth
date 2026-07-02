@@ -26,7 +26,11 @@ When the token is submitted:
 
 ```rust
 let verified = auth
-    .consume_password_reset_token(&reset_store, submitted_token)
+    .consume_password_reset_token_with_metadata(
+        &reset_store,
+        submitted_token,
+        client_metadata,
+    )
     .await?;
 ```
 
@@ -57,7 +61,12 @@ Verification consumes the challenge:
 
 ```rust
 let verified = auth
-    .verify_login_challenge(&challenge_store, challenge_id, submitted_code)
+    .verify_login_challenge_with_metadata(
+        &challenge_store,
+        challenge_id,
+        submitted_code,
+        client_metadata,
+    )
     .await?;
 ```
 
@@ -94,20 +103,23 @@ let provisioning = auth.build_totp_provisioning(
     TotpOptions::default(),
 )?;
 
-auth.verify_totp_code(
+auth.verify_totp_code_for_principal(
+    user_id,
     &secret.base32_secret,
     submitted_code,
     TotpOptions::default(),
     OffsetDateTime::now_utc(),
-)?;
+    client_metadata,
+).await?;
 ```
 
 `verify_totp_code` is stateless and is kept for compatibility. Production flows
-should prefer `verify_totp_code_with_replay_store`, which records the accepted
-time step through `TotpReplayStore` and rejects the same step on reuse:
+should prefer `verify_totp_code_with_replay_store_and_metadata`, which records
+the accepted time step through `TotpReplayStore`, rejects the same step on
+reuse, and applies per-principal/per-client abuse protection:
 
 ```rust
-auth.verify_totp_code_with_replay_store(
+auth.verify_totp_code_with_replay_store_and_metadata(
     &totp_replay_store,
     user_id,
     Some("primary"),
@@ -115,6 +127,7 @@ auth.verify_totp_code_with_replay_store(
     submitted_code,
     TotpOptions::default(),
     OffsetDateTime::now_utc(),
+    client_metadata,
 ).await?;
 ```
 
@@ -127,11 +140,19 @@ state according to its own policy.
 The crate intentionally does not send email or SMS and does not store MFA
 enrollment records. Host services should:
 
-- rate-limit challenge creation and verification
+- call `should_process_password_reset_request` and
+  `should_process_login_code_request` before user lookup or email delivery;
+  `Ok(false)` means preserve silent-success semantics but do not send email
+- pass `ClientMetadata` to verification/consumption helpers when possible
 - keep one-time consume operations atomic
 - expire unused records
 - avoid logging reset tokens or login codes
 - revoke existing sessions when local policy requires it
+
+Credential throttling returns `AuthError::AuthThrottled` during exponential
+backoff and `AuthError::AuthLocked` during temporary lockout. Password-reset
+and login-code request helpers suppress those errors and return `Ok(false)` so
+the host can avoid revealing whether the principal exists.
 
 `Debug` output for issued reset tokens, TOTP secrets/provisioning URIs, local
 auth payloads, OIDC token responses, and issued API tokens redacts raw secret
