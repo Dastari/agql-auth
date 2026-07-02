@@ -196,6 +196,51 @@ async fn totp_verification_locks_after_repeated_invalid_codes() {
     assert!(matches!(locked, AuthError::AuthLocked { .. }));
 }
 
+#[tokio::test]
+async fn password_reset_requests_return_false_when_principal_is_locked() {
+    let auth = request_throttled_auth_service(lockout_policy());
+
+    assert!(
+        auth.should_process_password_reset_request(
+            "alice@example.com",
+            client_metadata("192.0.2.60")
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        auth.should_process_password_reset_request(
+            "alice@example.com",
+            client_metadata("192.0.2.61")
+        )
+        .await
+        .unwrap()
+    );
+
+    let allowed = auth
+        .should_process_password_reset_request("alice@example.com", client_metadata("192.0.2.62"))
+        .await
+        .unwrap();
+    assert!(!allowed);
+}
+
+#[tokio::test]
+async fn login_code_requests_return_false_when_client_is_throttled() {
+    let auth = request_throttled_auth_service(backoff_policy());
+
+    assert!(
+        auth.should_process_login_code_request("alice@example.com", client_metadata("192.0.2.70"))
+            .await
+            .unwrap()
+    );
+
+    let allowed = auth
+        .should_process_login_code_request("bob@example.com", client_metadata("192.0.2.70"))
+        .await
+        .unwrap();
+    assert!(!allowed);
+}
+
 async fn assert_password_login_sequence(
     auth: &AuthService<MemoryUserStore, MemoryRefreshTokenStore>,
     principal: &str,
@@ -229,6 +274,21 @@ fn throttled_auth_service(
         Arc::new(user_store),
         Arc::new(refresh_store),
         rate_store,
+    )
+    .unwrap()
+}
+
+fn request_throttled_auth_service(
+    request_policy: AuthRateLimitPolicy,
+) -> AuthService<MemoryUserStore, MemoryRefreshTokenStore> {
+    let mut config = AuthConfig::new(TEST_HS256_SECRET);
+    config.rate_limits.credential = AuthRateLimitPolicy::disabled();
+    config.rate_limits.request = request_policy;
+    AuthService::new_with_rate_limit_store(
+        config,
+        Arc::new(MemoryUserStore::default()),
+        Arc::new(MemoryRefreshTokenStore::default()),
+        Arc::new(MemoryAuthRateLimitStore::default()),
     )
     .unwrap()
 }

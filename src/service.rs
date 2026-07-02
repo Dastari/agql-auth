@@ -570,6 +570,56 @@ where
         Ok(())
     }
 
+    /// Records a password-reset request and returns whether the host should
+    /// process it.
+    ///
+    /// `Ok(false)` means the request was throttled or locked and the host
+    /// should preserve silent-success semantics without sending email.
+    pub async fn should_process_password_reset_request(
+        &self,
+        principal: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<bool> {
+        self.record_request_rate_limit(AuthRateLimitFlow::PasswordResetRequest, principal, metadata)
+            .await
+    }
+
+    /// Records a login-code request and returns whether the host should process it.
+    ///
+    /// `Ok(false)` means the request was throttled or locked and the host
+    /// should preserve silent-success semantics without sending email.
+    pub async fn should_process_login_code_request(
+        &self,
+        principal: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<bool> {
+        self.record_request_rate_limit(AuthRateLimitFlow::LoginCodeRequest, principal, metadata)
+            .await
+    }
+
+    async fn record_request_rate_limit(
+        &self,
+        flow: AuthRateLimitFlow,
+        principal: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<bool> {
+        let rate_limit_keys = self.rate_limit_keys(flow, Some(principal), &metadata);
+        match self
+            .reject_if_rate_limited(&self.config.rate_limits.request, &rate_limit_keys)
+            .await
+        {
+            Ok(()) => {}
+            Err(AuthError::AuthThrottled { .. } | AuthError::AuthLocked { .. }) => {
+                return Ok(false);
+            }
+            Err(err) => return Err(err),
+        }
+
+        self.record_rate_limit_attempt(&self.config.rate_limits.request, &rate_limit_keys)
+            .await?;
+        Ok(true)
+    }
+
     pub(super) fn rate_limit_keys(
         &self,
         flow: AuthRateLimitFlow,
