@@ -370,17 +370,30 @@ async fn refresh_detects_replay_for_revoked_tokens() {
         .login("alice@example.com", "password123", metadata())
         .await
         .unwrap();
-    let _ = auth
+    let refreshed = auth
         .refresh(&login_payload.refresh_token, metadata())
         .await
         .unwrap();
-
-    let err = auth
+    let replay = auth
         .refresh(&login_payload.refresh_token, metadata())
         .await
         .unwrap_err();
-    assert!(matches!(err, AuthError::RefreshTokenReplayDetected));
+    assert!(matches!(replay, AuthError::RefreshTokenReplayDetected));
     assert_eq!(refresh_store.family_revocations.lock().unwrap().len(), 1);
+
+    let replacement = refresh_store
+        .get_by_hash(&hash_refresh_token(&refreshed.refresh_token))
+        .expect("replacement refresh token stored");
+    assert!(
+        replacement.revoked_at.is_some(),
+        "replay should revoke the whole refresh-token family"
+    );
+
+    let err = auth
+        .refresh(&refreshed.refresh_token, metadata())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::RefreshTokenReplayDetected));
 }
 
 #[tokio::test]
