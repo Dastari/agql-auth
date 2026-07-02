@@ -4,6 +4,8 @@ use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 
 use super::AuthService;
+use crate::config::ClientMetadata;
+use crate::models::AuthRateLimitFlow;
 use crate::models::{TotpOptions, TotpProvisioning, TotpSecret};
 use crate::stores::{RefreshTokenStore, TotpReplayStore, UserStore};
 use crate::util::{
@@ -78,6 +80,46 @@ where
             .map(|_| ())
     }
 
+    /// Verifies a TOTP code for a principal with abuse protection.
+    pub async fn verify_totp_code_for_principal(
+        &self,
+        principal_id: &str,
+        secret_base32: &str,
+        code: &str,
+        options: TotpOptions,
+        now: OffsetDateTime,
+        metadata: ClientMetadata,
+    ) -> AuthResult<()> {
+        let rate_limit_keys = self.rate_limit_keys(
+            AuthRateLimitFlow::TotpVerification,
+            Some(principal_id),
+            &metadata,
+        );
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
+
+        match self.verify_totp_code_step(secret_base32, code, options, now) {
+            Ok(_) => {
+                self.clear_rate_limit_attempts(
+                    &self.config.rate_limits.credential,
+                    &rate_limit_keys,
+                )
+                .await?;
+                Ok(())
+            }
+            Err(err) => {
+                if matches!(err, AuthError::InvalidTotpCode) {
+                    self.record_rate_limit_attempt(
+                        &self.config.rate_limits.credential,
+                        &rate_limit_keys,
+                    )
+                    .await?;
+                }
+                Err(err)
+            }
+        }
+    }
+
     /// Verifies a TOTP code and consumes the accepted time step once.
     ///
     /// `store.consume_totp_step` must atomically return `true` only for the
@@ -96,13 +138,67 @@ where
     where
         S: TotpReplayStore,
     {
-        let step = self.verify_totp_code_step(secret_base32, code, options, now)?;
+        self.verify_totp_code_with_replay_store_and_metadata(
+            store,
+            principal_id,
+            factor_id,
+            secret_base32,
+            code,
+            options,
+            now,
+            ClientMetadata::default(),
+        )
+        .await
+    }
+
+    /// Verifies a TOTP code, consumes the accepted time step once, and applies
+    /// abuse protection using principal and client metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn verify_totp_code_with_replay_store_and_metadata<S>(
+        &self,
+        store: &S,
+        principal_id: &str,
+        factor_id: Option<&str>,
+        secret_base32: &str,
+        code: &str,
+        options: TotpOptions,
+        now: OffsetDateTime,
+        metadata: ClientMetadata,
+    ) -> AuthResult<()>
+    where
+        S: TotpReplayStore,
+    {
+        let rate_limit_keys = self.rate_limit_keys(
+            AuthRateLimitFlow::TotpVerification,
+            Some(principal_id),
+            &metadata,
+        );
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
+
+        let step = match self.verify_totp_code_step(secret_base32, code, options, now) {
+            Ok(step) => step,
+            Err(err) => {
+                if matches!(err, AuthError::InvalidTotpCode) {
+                    self.record_rate_limit_attempt(
+                        &self.config.rate_limits.credential,
+                        &rate_limit_keys,
+                    )
+                    .await?;
+                }
+                return Err(err);
+            }
+        };
         let consumed = store
             .consume_totp_step(principal_id, factor_id, step, now)
             .await?;
         if consumed {
+            self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             Ok(())
         } else {
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             Err(AuthError::TotpCodeReplayed)
         }
     }

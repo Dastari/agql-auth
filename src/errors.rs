@@ -46,6 +46,18 @@ pub enum AuthError {
     /// User exists but is disabled.
     #[error("user is disabled")]
     UserDisabled,
+    /// Authentication flow is temporarily throttled by exponential backoff.
+    #[error("authentication flow is temporarily throttled")]
+    AuthThrottled {
+        /// Seconds until the caller may retry.
+        retry_after_seconds: i64,
+    },
+    /// Authentication flow is temporarily locked.
+    #[error("authentication flow is temporarily locked")]
+    AuthLocked {
+        /// Seconds until the caller may retry.
+        retry_after_seconds: i64,
+    },
     /// Password-reset token failed validation.
     #[error("invalid password reset token")]
     InvalidPasswordResetToken,
@@ -148,6 +160,8 @@ impl ErrorExtensions for AuthError {
                     AuthError::RefreshTokenExpired => "REFRESH_TOKEN_EXPIRED",
                     AuthError::RefreshTokenReplayDetected => "REFRESH_TOKEN_REPLAY_DETECTED",
                     AuthError::UserDisabled => "USER_DISABLED",
+                    AuthError::AuthThrottled { .. } => "AUTH_THROTTLED",
+                    AuthError::AuthLocked { .. } => "AUTH_LOCKED",
                     AuthError::InvalidPasswordResetToken => "INVALID_PASSWORD_RESET_TOKEN",
                     AuthError::PasswordResetTokenExpired => "PASSWORD_RESET_TOKEN_EXPIRED",
                     AuthError::PasswordResetTokenReplayed => "PASSWORD_RESET_TOKEN_REPLAYED",
@@ -179,6 +193,17 @@ impl ErrorExtensions for AuthError {
                     AuthError::Config(_) => "CONFIG_ERROR",
                 },
             );
+            match self {
+                AuthError::AuthThrottled {
+                    retry_after_seconds,
+                }
+                | AuthError::AuthLocked {
+                    retry_after_seconds,
+                } => {
+                    e.set("retryAfterSeconds", *retry_after_seconds);
+                }
+                _ => {}
+            }
         })
     }
 }

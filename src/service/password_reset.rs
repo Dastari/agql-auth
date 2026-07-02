@@ -3,6 +3,8 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{AuthService, PasswordResetTokenClaims};
+use crate::config::ClientMetadata;
+use crate::models::AuthRateLimitFlow;
 use crate::models::{PasswordResetToken, VerifiedPasswordResetToken};
 use crate::stores::{PasswordResetTokenStore, RefreshTokenStore, UserStore};
 use crate::util::map_password_reset_decode_error;
@@ -110,13 +112,54 @@ where
     where
         S: PasswordResetTokenStore,
     {
-        let verified = self.authenticate_password_reset_token(token)?;
+        self.consume_password_reset_token_with_metadata(store, token, ClientMetadata::default())
+            .await
+    }
+
+    /// Validates and consumes a password-reset token with abuse protection.
+    pub async fn consume_password_reset_token_with_metadata<S>(
+        &self,
+        store: &S,
+        token: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedPasswordResetToken>
+    where
+        S: PasswordResetTokenStore,
+    {
+        let client_keys = self.rate_limit_keys(
+            AuthRateLimitFlow::PasswordResetTokenConsumption,
+            None,
+            &metadata,
+        );
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &client_keys)
+            .await?;
+
+        let verified = match self.authenticate_password_reset_token(token) {
+            Ok(verified) => verified,
+            Err(err) => {
+                self.record_rate_limit_attempt(&self.config.rate_limits.credential, &client_keys)
+                    .await?;
+                return Err(err);
+            }
+        };
+        let rate_limit_keys = self.rate_limit_keys(
+            AuthRateLimitFlow::PasswordResetTokenConsumption,
+            Some(&verified.user_id),
+            &metadata,
+        );
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
+
         let consumed = store
             .consume_password_reset_token(verified.token_id, OffsetDateTime::now_utc())
             .await?;
         if !consumed {
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             return Err(AuthError::PasswordResetTokenReplayed);
         }
+        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
         Ok(verified)
     }
 }

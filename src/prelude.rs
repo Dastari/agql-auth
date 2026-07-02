@@ -5,8 +5,8 @@
 
 pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use crate::config::{
-    AuthConfig, ClientMetadata, JwtSigningConfig, MicrosoftEntraConfig, MicrosoftEntraTenant,
-    OidcProviderConfig, OidcProviderKind,
+    AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
+    MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::errors::AuthError;
 pub use crate::graphql::{
@@ -19,7 +19,8 @@ pub use crate::guards::{
 };
 pub use crate::models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
-    AuthPayload, AuthPrincipal, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
+    AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
+    AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
     LoginChallengeOptions, MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest,
     OidcCallbackInput, OidcLoginResult, OidcTokenResponse, PasswordResetToken,
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
@@ -36,6 +37,7 @@ pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use crate::service::AuthService;
 pub use crate::session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use crate::stores::{
-    ApiTokenStore, ExternalIdentityStore, LoginChallengeStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
+    ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
+    MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
+    RefreshTokenStore, TotpReplayStore, UserStore,
 };

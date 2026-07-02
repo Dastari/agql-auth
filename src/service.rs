@@ -20,18 +20,21 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::AuthResult;
-use crate::config::{AuthConfig, ClientMetadata, JwtSigningConfig};
+use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
-use crate::models::{AuthPayload, AuthUser, RefreshTokenRevocationReason, StoredRefreshToken};
+use crate::models::{
+    AuthPayload, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitState,
+    AuthUser, RefreshTokenRevocationReason, StoredRefreshToken,
+};
 use crate::session::{AuthMethod, SessionContext};
-use crate::stores::{RefreshTokenStore, UserStore};
+use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
 use crate::util::{
-    extract_connection_init_token, generate_opaque_token, hash_refresh_token,
-    map_access_token_decode_error, strip_bearer_prefix,
+    extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
+    hash_refresh_token, map_access_token_decode_error, strip_bearer_prefix,
 };
 
 const MIN_HS256_SECRET_BYTES: usize = 32;
@@ -77,6 +80,7 @@ pub struct AuthService<U, R> {
     pub(super) config: AuthConfig,
     pub(super) user_store: Arc<U>,
     pub(super) refresh_store: Arc<R>,
+    pub(super) rate_limit_store: Arc<dyn AuthRateLimitStore>,
     pub(super) argon2: Argon2<'static>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
@@ -95,7 +99,30 @@ where
     ///
     /// RS256 PEM keys are parsed and checked during construction.
     pub fn new(config: AuthConfig, user_store: Arc<U>, refresh_store: Arc<R>) -> AuthResult<Self> {
+        Self::new_with_rate_limit_store(
+            config,
+            user_store,
+            refresh_store,
+            Arc::new(MemoryAuthRateLimitStore::default()),
+        )
+    }
+
+    /// Creates an authentication service with a durable abuse-protection store.
+    ///
+    /// Use this in multi-process or multi-instance applications so throttling
+    /// and lockout state survives restarts and is shared by all instances.
+    pub fn new_with_rate_limit_store<S>(
+        config: AuthConfig,
+        user_store: Arc<U>,
+        refresh_store: Arc<R>,
+        rate_limit_store: Arc<S>,
+    ) -> AuthResult<Self>
+    where
+        S: AuthRateLimitStore + 'static,
+    {
+        config.rate_limits.validate()?;
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
+        let rate_limit_store: Arc<dyn AuthRateLimitStore> = rate_limit_store;
 
         Ok(Self {
             encoding_key: jwt_keys.encoding_key,
@@ -107,6 +134,7 @@ where
             config,
             user_store,
             refresh_store,
+            rate_limit_store,
             argon2: Argon2::default(),
         })
     }
@@ -139,8 +167,15 @@ where
         password: &str,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
+        let rate_limit_keys =
+            self.rate_limit_keys(AuthRateLimitFlow::PasswordLogin, Some(principal), &metadata);
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
+
         let Some(user) = self.user_store.find_user_by_principal(principal).await? else {
             let _ = self.verify_password(password, DUMMY_PASSWORD_HASH);
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             return Err(AuthError::InvalidCredentials);
         };
 
@@ -148,7 +183,13 @@ where
             return Err(AuthError::UserDisabled);
         }
 
-        self.verify_password(password, &user.password_hash)?;
+        if let Err(err) = self.verify_password(password, &user.password_hash) {
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
+            return Err(err);
+        }
+        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
 
         let session_id = Uuid::new_v4();
         let session_family_id = Uuid::new_v4();
@@ -528,6 +569,228 @@ where
 
         Ok(())
     }
+
+    pub(super) fn rate_limit_keys(
+        &self,
+        flow: AuthRateLimitFlow,
+        principal: Option<&str>,
+        metadata: &ClientMetadata,
+    ) -> Vec<AuthRateLimitKey> {
+        let mut keys = Vec::with_capacity(2);
+        if let Some(principal) = principal.and_then(normalize_principal_bucket) {
+            keys.push(rate_limit_key(
+                flow.clone(),
+                AuthRateLimitBucket::Principal,
+                &principal,
+            ));
+        }
+        if let Some(client) = metadata
+            .ip_address
+            .as_deref()
+            .and_then(normalize_client_bucket)
+        {
+            keys.push(rate_limit_key(flow, AuthRateLimitBucket::Client, &client));
+        }
+        keys
+    }
+
+    pub(super) async fn reject_if_rate_limited(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<()> {
+        if !policy.enabled || keys.is_empty() {
+            return Ok(());
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let mut locked_until = None;
+        let mut backoff_until = None;
+
+        for key in keys {
+            let Some(state) = self
+                .rate_limit_store
+                .find_auth_rate_limit_state(key)
+                .await?
+            else {
+                continue;
+            };
+
+            if state.expires_at <= now {
+                self.rate_limit_store
+                    .clear_auth_rate_limit_state(key)
+                    .await?;
+                continue;
+            }
+
+            if let Some(until) = state.locked_until.filter(|until| *until > now) {
+                locked_until = Some(max_time(locked_until, until));
+            } else if let Some(until) = state.backoff_until.filter(|until| *until > now) {
+                backoff_until = Some(max_time(backoff_until, until));
+            }
+        }
+
+        if let Some(until) = locked_until {
+            return Err(AuthError::AuthLocked {
+                retry_after_seconds: retry_after_seconds(now, until),
+            });
+        }
+        if let Some(until) = backoff_until {
+            return Err(AuthError::AuthThrottled {
+                retry_after_seconds: retry_after_seconds(now, until),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn record_rate_limit_attempt(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<()> {
+        if !policy.enabled || keys.is_empty() {
+            return Ok(());
+        }
+
+        let now = OffsetDateTime::now_utc();
+        for key in keys {
+            let current = self
+                .rate_limit_store
+                .find_auth_rate_limit_state(key)
+                .await?;
+            let next = next_rate_limit_state(key.clone(), current, policy, now);
+            self.rate_limit_store
+                .save_auth_rate_limit_state(next)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn clear_rate_limit_attempts(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<()> {
+        if !policy.enabled || keys.is_empty() {
+            return Ok(());
+        }
+
+        for key in keys {
+            self.rate_limit_store
+                .clear_auth_rate_limit_state(key)
+                .await?;
+        }
+
+        Ok(())
+    }
+}
+
+fn normalize_principal_bucket(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_client_bucket(value: &str) -> Option<String> {
+    let normalized = value.trim().to_string();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn rate_limit_key(
+    flow: AuthRateLimitFlow,
+    bucket: AuthRateLimitBucket,
+    normalized_value: &str,
+) -> AuthRateLimitKey {
+    AuthRateLimitKey {
+        value_hash: hash_rate_limit_value(&format!(
+            "{}:{}:{}",
+            flow.as_str(),
+            bucket.as_str(),
+            normalized_value
+        )),
+        flow,
+        bucket,
+    }
+}
+
+fn next_rate_limit_state(
+    key: AuthRateLimitKey,
+    current: Option<AuthRateLimitState>,
+    policy: &AuthRateLimitPolicy,
+    now: OffsetDateTime,
+) -> AuthRateLimitState {
+    let reset_window = current.as_ref().is_none_or(|state| {
+        state.expires_at <= now || state.first_attempt_at + policy.window <= now
+    });
+    let (attempts, first_attempt_at) = if reset_window {
+        (1, now)
+    } else {
+        let state = current.as_ref().expect("checked above");
+        (state.attempts.saturating_add(1), state.first_attempt_at)
+    };
+
+    let (backoff_until, locked_until) = if attempts >= policy.max_attempts_before_lockout {
+        (None, Some(now + policy.lockout_duration))
+    } else if attempts >= policy.backoff_after_attempts {
+        (Some(now + backoff_duration(policy, attempts)), None)
+    } else {
+        (None, None)
+    };
+
+    let mut expires_at = now + policy.state_ttl;
+    expires_at = max_time(Some(expires_at), first_attempt_at + policy.window);
+    if let Some(until) = backoff_until {
+        expires_at = max_time(Some(expires_at), until);
+    }
+    if let Some(until) = locked_until {
+        expires_at = max_time(Some(expires_at), until);
+    }
+
+    AuthRateLimitState {
+        key,
+        attempts,
+        first_attempt_at,
+        last_attempt_at: now,
+        backoff_until,
+        locked_until,
+        expires_at,
+    }
+}
+
+fn backoff_duration(policy: &AuthRateLimitPolicy, attempts: u32) -> Duration {
+    if policy.base_backoff == Duration::ZERO {
+        return Duration::ZERO;
+    }
+
+    let exponent = attempts.saturating_sub(policy.backoff_after_attempts);
+    let mut multiplier = 1_i32;
+    for _ in 0..exponent.min(30) {
+        multiplier = multiplier.saturating_mul(2);
+        let Some(candidate) = policy.base_backoff.checked_mul(multiplier) else {
+            return policy.max_backoff;
+        };
+        if candidate >= policy.max_backoff {
+            return policy.max_backoff;
+        }
+    }
+
+    policy
+        .base_backoff
+        .checked_mul(multiplier)
+        .unwrap_or(policy.max_backoff)
+        .min(policy.max_backoff)
+}
+
+fn max_time(current: Option<OffsetDateTime>, candidate: OffsetDateTime) -> OffsetDateTime {
+    match current {
+        Some(current) if current >= candidate => current,
+        _ => candidate,
+    }
+}
+
+fn retry_after_seconds(now: OffsetDateTime, until: OffsetDateTime) -> i64 {
+    (until - now).whole_seconds().max(1)
 }
 
 struct JwtKeyMaterial {

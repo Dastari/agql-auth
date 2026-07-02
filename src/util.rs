@@ -140,6 +140,10 @@ pub(crate) fn hash_api_token(token: &str) -> String {
     hash_opaque_token(token)
 }
 
+pub(crate) fn hash_rate_limit_value(value: &str) -> String {
+    hash_opaque_token(value)
+}
+
 fn hash_opaque_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());

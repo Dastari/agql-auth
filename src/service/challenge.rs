@@ -2,6 +2,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::AuthService;
+use crate::config::ClientMetadata;
+use crate::models::AuthRateLimitFlow;
 use crate::models::{
     IssuedLoginChallenge, LoginChallengeOptions, StoredLoginChallenge, VerifiedLoginChallenge,
 };
@@ -61,11 +63,43 @@ where
     where
         S: LoginChallengeStore,
     {
+        self.verify_login_challenge_with_metadata(
+            store,
+            challenge_id,
+            code,
+            ClientMetadata::default(),
+        )
+        .await
+    }
+
+    /// Verifies and consumes a one-time login challenge with abuse protection.
+    pub async fn verify_login_challenge_with_metadata<S>(
+        &self,
+        store: &S,
+        challenge_id: Uuid,
+        code: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedLoginChallenge>
+    where
+        S: LoginChallengeStore,
+    {
         let now = OffsetDateTime::now_utc();
+        let client_keys =
+            self.rate_limit_keys(AuthRateLimitFlow::LoginCodeVerification, None, &metadata);
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &client_keys)
+            .await?;
+
         let challenge = store
             .find_login_challenge(challenge_id)
             .await?
             .ok_or(AuthError::InvalidLoginChallenge)?;
+        let rate_limit_keys = self.rate_limit_keys(
+            AuthRateLimitFlow::LoginCodeVerification,
+            Some(&challenge.principal),
+            &metadata,
+        );
+        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
 
         if challenge.is_consumed() {
             return Err(AuthError::LoginChallengeReplayed);
@@ -80,6 +114,8 @@ where
         }
 
         if self.verify_password(code, &challenge.code_hash).is_err() {
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             let attempts = store
                 .increment_login_challenge_attempts(challenge_id, now)
                 .await?;
@@ -91,8 +127,12 @@ where
 
         let consumed = store.consume_login_challenge(challenge_id, now).await?;
         if !consumed {
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             return Err(AuthError::LoginChallengeReplayed);
         }
+        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+            .await?;
 
         Ok(VerifiedLoginChallenge {
             challenge_id,

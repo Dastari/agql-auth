@@ -1,11 +1,14 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthResult, ExternalIdentity, OAuthLoginState,
-    OidcTokenResponse, RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge,
-    StoredRefreshToken, StoredUser,
+    ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthRateLimitKey, AuthRateLimitState,
+    AuthResult, ExternalIdentity, OAuthLoginState, OidcTokenResponse, RefreshTokenRevocationReason,
+    StoredApiToken, StoredLoginChallenge, StoredRefreshToken, StoredUser,
 };
 
 #[async_trait]
@@ -85,6 +88,64 @@ pub trait RefreshTokenStore: Send + Sync {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AuthResult<bool>;
+}
+
+#[async_trait]
+/// Persists abuse-protection counters and lockout state.
+///
+/// Implementations should upsert [`AuthRateLimitState`] durably and may delete
+/// records after `expires_at`. For multi-instance deployments, writes should be
+/// protected by the store's normal transaction or row-locking mechanism so a
+/// burst of concurrent attempts cannot lose updates.
+pub trait AuthRateLimitStore: Send + Sync {
+    /// Finds the current state for a flow/bucket key.
+    async fn find_auth_rate_limit_state(
+        &self,
+        key: &AuthRateLimitKey,
+    ) -> AuthResult<Option<AuthRateLimitState>>;
+
+    /// Inserts or replaces the current state for a flow/bucket key.
+    async fn save_auth_rate_limit_state(&self, state: AuthRateLimitState) -> AuthResult<()>;
+
+    /// Clears state after a successful credential flow.
+    async fn clear_auth_rate_limit_state(&self, key: &AuthRateLimitKey) -> AuthResult<()>;
+}
+
+/// In-memory abuse-protection store.
+///
+/// This is useful for tests, local development, and single-process consumers.
+/// Production multi-instance applications should implement
+/// [`AuthRateLimitStore`] with durable storage.
+#[derive(Clone, Default)]
+pub struct MemoryAuthRateLimitStore {
+    states: Arc<Mutex<HashMap<AuthRateLimitKey, AuthRateLimitState>>>,
+}
+
+impl MemoryAuthRateLimitStore {
+    /// Returns the stored state for tests and diagnostics.
+    pub fn get(&self, key: &AuthRateLimitKey) -> Option<AuthRateLimitState> {
+        self.states.lock().unwrap().get(key).cloned()
+    }
+}
+
+#[async_trait]
+impl AuthRateLimitStore for MemoryAuthRateLimitStore {
+    async fn find_auth_rate_limit_state(
+        &self,
+        key: &AuthRateLimitKey,
+    ) -> AuthResult<Option<AuthRateLimitState>> {
+        Ok(self.states.lock().unwrap().get(key).cloned())
+    }
+
+    async fn save_auth_rate_limit_state(&self, state: AuthRateLimitState) -> AuthResult<()> {
+        self.states.lock().unwrap().insert(state.key.clone(), state);
+        Ok(())
+    }
+
+    async fn clear_auth_rate_limit_state(&self, key: &AuthRateLimitKey) -> AuthResult<()> {
+        self.states.lock().unwrap().remove(key);
+        Ok(())
+    }
 }
 
 #[async_trait]

@@ -3,6 +3,7 @@ mod auth_lifecycle;
 mod challenges;
 mod jwt_signing;
 mod oidc;
+mod rate_limits;
 mod recovery;
 mod scopes;
 mod totp;

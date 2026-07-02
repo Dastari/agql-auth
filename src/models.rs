@@ -275,6 +275,88 @@ impl From<ApiTokenPrincipal> for AuthPrincipal {
     }
 }
 
+/// Authentication flow tracked by the abuse-protection store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthRateLimitFlow {
+    /// Username/password login.
+    PasswordLogin,
+    /// One-time login code verification.
+    LoginCodeVerification,
+    /// TOTP code verification.
+    TotpVerification,
+    /// Password-reset token consumption.
+    PasswordResetTokenConsumption,
+    /// Password-reset email request.
+    PasswordResetRequest,
+    /// Login-code email request.
+    LoginCodeRequest,
+}
+
+impl AuthRateLimitFlow {
+    /// Stable store value for this flow.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PasswordLogin => "password_login",
+            Self::LoginCodeVerification => "login_code_verification",
+            Self::TotpVerification => "totp_verification",
+            Self::PasswordResetTokenConsumption => "password_reset_token_consumption",
+            Self::PasswordResetRequest => "password_reset_request",
+            Self::LoginCodeRequest => "login_code_request",
+        }
+    }
+}
+
+/// Abuse-protection bucket type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthRateLimitBucket {
+    /// Bucket keyed by normalized principal or local user ID.
+    Principal,
+    /// Bucket keyed by client IP address.
+    Client,
+}
+
+impl AuthRateLimitBucket {
+    /// Stable store value for this bucket.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Principal => "principal",
+            Self::Client => "client",
+        }
+    }
+}
+
+/// Opaque key for a persisted abuse-protection bucket.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct AuthRateLimitKey {
+    /// Flow being protected.
+    pub flow: AuthRateLimitFlow,
+    /// Bucket type being protected.
+    pub bucket: AuthRateLimitBucket,
+    /// SHA-256 hash of the normalized bucket value.
+    pub value_hash: String,
+}
+
+/// Persisted abuse-protection state for one flow/bucket key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthRateLimitState {
+    /// Store key.
+    pub key: AuthRateLimitKey,
+    /// Attempts recorded in the current rolling window.
+    pub attempts: u32,
+    /// First attempt in the current rolling window.
+    pub first_attempt_at: OffsetDateTime,
+    /// Latest recorded attempt.
+    pub last_attempt_at: OffsetDateTime,
+    /// Backoff expiry, if exponential backoff is active.
+    pub backoff_until: Option<OffsetDateTime>,
+    /// Lockout expiry, if temporary lockout is active.
+    pub locked_until: Option<OffsetDateTime>,
+    /// Time after which stores may delete this state.
+    pub expires_at: OffsetDateTime,
+}
+
 /// Reason an API token was revoked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApiTokenRevocationReason {

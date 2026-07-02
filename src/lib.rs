@@ -83,8 +83,8 @@ mod tests;
 
 pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use config::{
-    AuthConfig, ClientMetadata, JwtSigningConfig, MicrosoftEntraConfig, MicrosoftEntraTenant,
-    OidcProviderConfig, OidcProviderKind,
+    AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
+    MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use errors::AuthError;
 pub use graphql::{
@@ -97,7 +97,8 @@ pub use guards::{
 };
 pub use models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
-    AuthPayload, AuthPrincipal, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
+    AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
+    AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
     LoginChallengeOptions, MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest,
     OidcCallbackInput, OidcLoginResult, OidcTokenResponse, PasswordResetToken,
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
@@ -114,8 +115,9 @@ pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;
 pub use session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
 pub use stores::{
-    ApiTokenStore, ExternalIdentityStore, LoginChallengeStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
+    ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
+    MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
+    RefreshTokenStore, TotpReplayStore, UserStore,
 };
 
 pub type AuthResult<T> = Result<T, AuthError>;

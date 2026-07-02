@@ -30,6 +30,8 @@ pub struct AuthConfig {
     pub access_token_ttl: Duration,
     /// Refresh-token lifetime.
     pub refresh_token_ttl: Duration,
+    /// Abuse-protection settings for credential and request flows.
+    pub rate_limits: AuthRateLimitConfig,
 }
 
 impl fmt::Debug for AuthConfig {
@@ -41,6 +43,7 @@ impl fmt::Debug for AuthConfig {
             .field("jwt_signing", &self.jwt_signing)
             .field("access_token_ttl", &self.access_token_ttl)
             .field("refresh_token_ttl", &self.refresh_token_ttl)
+            .field("rate_limits", &self.rate_limits)
             .finish()
     }
 }
@@ -67,6 +70,7 @@ impl AuthConfig {
             jwt_signing: JwtSigningConfig::Hs256 { secret },
             access_token_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
+            rate_limits: AuthRateLimitConfig::default(),
         }
     }
 
@@ -90,6 +94,7 @@ impl AuthConfig {
             },
             access_token_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
+            rate_limits: AuthRateLimitConfig::default(),
         }
     }
 
@@ -102,6 +107,133 @@ impl AuthConfig {
             JwtSigningConfig::Rs256 { .. } => String::new(),
         };
         self.jwt_signing = signing;
+    }
+}
+
+/// Abuse-protection configuration for authentication flows.
+#[derive(Debug, Clone)]
+pub struct AuthRateLimitConfig {
+    /// Policy for credential verification failures.
+    pub credential: AuthRateLimitPolicy,
+    /// Policy for email/request initiation flows.
+    pub request: AuthRateLimitPolicy,
+}
+
+impl Default for AuthRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            credential: AuthRateLimitPolicy {
+                enabled: true,
+                window: Duration::minutes(15),
+                backoff_after_attempts: 3,
+                max_attempts_before_lockout: 10,
+                base_backoff: Duration::seconds(1),
+                max_backoff: Duration::minutes(5),
+                lockout_duration: Duration::minutes(15),
+                state_ttl: Duration::hours(1),
+            },
+            request: AuthRateLimitPolicy {
+                enabled: true,
+                window: Duration::hours(1),
+                backoff_after_attempts: 1,
+                max_attempts_before_lockout: 5,
+                base_backoff: Duration::minutes(1),
+                max_backoff: Duration::hours(1),
+                lockout_duration: Duration::hours(1),
+                state_ttl: Duration::hours(6),
+            },
+        }
+    }
+}
+
+impl AuthRateLimitConfig {
+    pub(crate) fn validate(&self) -> crate::AuthResult<()> {
+        self.credential.validate("credential rate limit")?;
+        self.request.validate("request rate limit")
+    }
+}
+
+/// Exponential-backoff and lockout policy for a family of auth flows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthRateLimitPolicy {
+    /// Disables checks and recording when `false`.
+    pub enabled: bool,
+    /// Rolling window used to count attempts.
+    pub window: Duration,
+    /// First attempt count that starts exponential backoff.
+    pub backoff_after_attempts: u32,
+    /// First attempt count that starts a temporary lockout.
+    pub max_attempts_before_lockout: u32,
+    /// Initial backoff duration.
+    pub base_backoff: Duration,
+    /// Maximum exponential-backoff duration.
+    pub max_backoff: Duration,
+    /// Lockout duration once `max_attempts_before_lockout` is reached.
+    pub lockout_duration: Duration,
+    /// Expiry for persisted state after the latest recorded attempt.
+    pub state_ttl: Duration,
+}
+
+impl AuthRateLimitPolicy {
+    /// Returns a disabled policy.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            window: Duration::minutes(1),
+            backoff_after_attempts: 1,
+            max_attempts_before_lockout: 1,
+            base_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            lockout_duration: Duration::ZERO,
+            state_ttl: Duration::minutes(1),
+        }
+    }
+
+    fn validate(&self, name: &str) -> crate::AuthResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        if self.window <= Duration::ZERO {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} window must be greater than zero"
+            )));
+        }
+        if self.backoff_after_attempts == 0 {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} backoff_after_attempts must be greater than zero"
+            )));
+        }
+        if self.max_attempts_before_lockout == 0 {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} max_attempts_before_lockout must be greater than zero"
+            )));
+        }
+        if self.backoff_after_attempts > self.max_attempts_before_lockout {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} backoff_after_attempts must not exceed max_attempts_before_lockout"
+            )));
+        }
+        if self.base_backoff < Duration::ZERO
+            || self.max_backoff < Duration::ZERO
+            || self.lockout_duration < Duration::ZERO
+        {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} durations must not be negative"
+            )));
+        }
+        if self.max_backoff < self.base_backoff {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} max_backoff must not be less than base_backoff"
+            )));
+        }
+        if self.state_ttl <= Duration::ZERO {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "{name} state_ttl must be greater than zero"
+            )));
+        }
+
+        Ok(())
     }
 }
 
