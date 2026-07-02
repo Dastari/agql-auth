@@ -21,11 +21,12 @@ pub use crate::models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
     AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
     AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
-    LoginChallengeOptions, MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest,
-    OidcCallbackInput, OidcLoginResult, OidcTokenResponse, PasswordResetToken,
+    IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims, OAuthLoginState,
+    OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult, OidcTokenResponse,
+    PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
     StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
-    VerifiedLoginChallenge, VerifiedPasswordResetToken,
+    VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use crate::oidc::{
     ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,

@@ -25,6 +25,12 @@ pub enum AuthError {
     /// Access token is expired.
     #[error("access token expired")]
     AccessTokenExpired,
+    /// Purpose token failed validation.
+    #[error("invalid purpose token")]
+    InvalidPurposeToken,
+    /// Purpose token is expired.
+    #[error("purpose token expired")]
+    PurposeTokenExpired,
     /// API token failed validation.
     #[error("invalid api token")]
     InvalidApiToken,
@@ -153,6 +159,8 @@ impl ErrorExtensions for AuthError {
                     AuthError::InvalidBearerToken => "INVALID_BEARER_TOKEN",
                     AuthError::InvalidAccessToken => "INVALID_ACCESS_TOKEN",
                     AuthError::AccessTokenExpired => "ACCESS_TOKEN_EXPIRED",
+                    AuthError::InvalidPurposeToken => "INVALID_PURPOSE_TOKEN",
+                    AuthError::PurposeTokenExpired => "PURPOSE_TOKEN_EXPIRED",
                     AuthError::InvalidApiToken => "INVALID_API_TOKEN",
                     AuthError::ApiTokenExpired => "API_TOKEN_EXPIRED",
                     AuthError::ApiTokenRevoked => "API_TOKEN_REVOKED",

@@ -191,7 +191,86 @@ async fn issued_access_tokens_include_purpose() {
         .await
         .unwrap();
     let claims = decode_payload(&payload.access_token);
+    assert_eq!(claims["typ"], "access");
     assert_eq!(claims["purpose"], "access_token");
+}
+
+#[test]
+fn purpose_tokens_validate_exact_purpose_and_audience() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    let session_id = Uuid::new_v4();
+    let issued = auth
+        .issue_purpose_token(
+            PurposeTokenIssueRequest::new(
+                "user-1",
+                "mobile_capture",
+                "digitise-mobile-capture",
+                Duration::minutes(15),
+            )
+            .with_session_id(session_id)
+            .with_scopes(["collection.collection-1.records.create"])
+            .with_claim("col", json!("collection-1"))
+            .with_claim("acc", json!(null)),
+        )
+        .unwrap();
+
+    let claims = decode_payload(&issued.token);
+    assert_eq!(claims["typ"], "purpose_token");
+    assert_eq!(claims["purpose"], "mobile_capture");
+    assert_eq!(claims["aud"], "digitise-mobile-capture");
+    assert_eq!(claims["col"], "collection-1");
+
+    let verified = auth
+        .authenticate_purpose_token(
+            &issued.token,
+            PurposeTokenValidation::new("mobile_capture", "digitise-mobile-capture"),
+        )
+        .unwrap();
+    assert_eq!(verified.subject, "user-1");
+    assert_eq!(verified.session_id, Some(session_id));
+    assert_eq!(
+        verified.scopes,
+        vec!["collection.collection-1.records.create".to_string()]
+    );
+    assert_eq!(verified.claims["col"], json!("collection-1"));
+
+    assert!(matches!(
+        auth.authenticate_access_token(&issued.token).unwrap_err(),
+        AuthError::InvalidAccessToken
+    ));
+    assert!(matches!(
+        auth.authenticate_purpose_token(
+            &issued.token,
+            PurposeTokenValidation::new("access_token", "digitise-mobile-capture"),
+        )
+        .unwrap_err(),
+        AuthError::InvalidPurposeToken
+    ));
+    assert!(matches!(
+        auth.authenticate_purpose_token(
+            &issued.token,
+            PurposeTokenValidation::new("mobile_capture", "other-audience"),
+        )
+        .unwrap_err(),
+        AuthError::InvalidPurposeToken
+    ));
+}
+
+#[test]
+fn purpose_tokens_reject_reserved_custom_claims() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    let err = auth
+        .issue_purpose_token(
+            PurposeTokenIssueRequest::new(
+                "user-1",
+                "mobile_capture",
+                "digitise-mobile-capture",
+                Duration::minutes(15),
+            )
+            .with_claim("aud", json!("other-audience")),
+        )
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidConfiguration(_)));
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -665,6 +666,145 @@ impl fmt::Debug for AuthPayload {
             .field("refresh_token_expires_at", &self.refresh_token_expires_at)
             .finish()
     }
+}
+
+/// Request used to issue a short-lived JWT for one narrow purpose.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurposeTokenIssueRequest {
+    /// Token subject.
+    pub subject: String,
+    /// Purpose expected by validators, such as `mobile_capture`.
+    pub purpose: String,
+    /// Intended audience for this token.
+    pub audience: String,
+    /// Token lifetime.
+    pub ttl: Duration,
+    /// Optional local session ID bound to the token.
+    pub session_id: Option<Uuid>,
+    /// Optional scopes carried by the token.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Additional custom JWT claims.
+    #[serde(default)]
+    pub claims: BTreeMap<String, JsonValue>,
+}
+
+impl PurposeTokenIssueRequest {
+    /// Creates a purpose-token issue request.
+    pub fn new(
+        subject: impl Into<String>,
+        purpose: impl Into<String>,
+        audience: impl Into<String>,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            subject: subject.into(),
+            purpose: purpose.into(),
+            audience: audience.into(),
+            ttl,
+            session_id: None,
+            scopes: Vec::new(),
+            claims: BTreeMap::new(),
+        }
+    }
+
+    /// Binds the token to a local session ID.
+    pub fn with_session_id(mut self, session_id: Uuid) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    /// Sets scopes carried by the token.
+    pub fn with_scopes<I, S>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds a custom JWT claim.
+    pub fn with_claim(mut self, name: impl Into<String>, value: JsonValue) -> Self {
+        self.claims.insert(name.into(), value);
+        self
+    }
+}
+
+/// Purpose-token validation requirements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurposeTokenValidation {
+    /// Required purpose claim.
+    pub purpose: String,
+    /// Required audience claim.
+    pub audience: String,
+}
+
+impl PurposeTokenValidation {
+    /// Creates purpose-token validation requirements.
+    pub fn new(purpose: impl Into<String>, audience: impl Into<String>) -> Self {
+        Self {
+            purpose: purpose.into(),
+            audience: audience.into(),
+        }
+    }
+}
+
+/// Purpose token returned at issuance time.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IssuedPurposeToken {
+    /// Raw signed JWT.
+    pub token: String,
+    /// Token subject.
+    pub subject: String,
+    /// Purpose claim.
+    pub purpose: String,
+    /// Audience claim.
+    pub audience: String,
+    /// Optional bound local session ID.
+    pub session_id: Option<Uuid>,
+    /// Token scopes.
+    pub scopes: Vec<String>,
+    /// Custom claims.
+    pub claims: BTreeMap<String, JsonValue>,
+    /// Token expiry time.
+    pub expires_at: OffsetDateTime,
+}
+
+impl fmt::Debug for IssuedPurposeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuedPurposeToken")
+            .field("token", &"[redacted]")
+            .field("subject", &self.subject)
+            .field("purpose", &self.purpose)
+            .field("audience", &self.audience)
+            .field("session_id", &self.session_id)
+            .field("scopes", &self.scopes)
+            .field("claims", &self.claims)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Validated short-lived purpose token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerifiedPurposeToken {
+    /// Token subject.
+    pub subject: String,
+    /// Purpose claim.
+    pub purpose: String,
+    /// Audience claim.
+    pub audience: String,
+    /// Optional bound local session ID.
+    pub session_id: Option<Uuid>,
+    /// Token scopes.
+    pub scopes: Vec<String>,
+    /// Custom claims.
+    pub claims: BTreeMap<String, JsonValue>,
+    /// Issued-at time.
+    pub issued_at: OffsetDateTime,
+    /// Expiry time.
+    pub expires_at: OffsetDateTime,
 }
 
 /// Password-reset token issued by [`crate::AuthService`].

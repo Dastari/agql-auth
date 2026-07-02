@@ -2,7 +2,9 @@ use jsonwebtoken::decode;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{AuthService, PasswordResetTokenClaims};
+use super::{
+    AuthService, PASSWORD_RESET_TOKEN_PURPOSE, PASSWORD_RESET_TOKEN_TYPE, PasswordResetTokenClaims,
+};
 use crate::config::ClientMetadata;
 use crate::models::AuthRateLimitFlow;
 use crate::models::{PasswordResetToken, VerifiedPasswordResetToken};
@@ -36,7 +38,8 @@ where
         let claims = PasswordResetTokenClaims {
             sub: user_id.clone(),
             jti: token_id.to_string(),
-            purpose: "password_reset".to_string(),
+            typ: Some(PASSWORD_RESET_TOKEN_TYPE.to_string()),
+            purpose: PASSWORD_RESET_TOKEN_PURPOSE.to_string(),
             iss: self.config.issuer.clone(),
             aud: self.config.audience.clone(),
             exp: expires_at.unix_timestamp(),
@@ -81,7 +84,11 @@ where
             decode::<PasswordResetTokenClaims>(token, &self.decoding_key, &self.validation)
                 .map_err(map_password_reset_decode_error)?;
         let claims = token_data.claims;
-        if claims.purpose != "password_reset" {
+        if !matches!(
+            claims.typ.as_deref(),
+            None | Some(PASSWORD_RESET_TOKEN_TYPE)
+        ) || claims.purpose != PASSWORD_RESET_TOKEN_PURPOSE
+        {
             return Err(AuthError::InvalidPasswordResetToken);
         }
 

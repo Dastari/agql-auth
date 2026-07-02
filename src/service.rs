@@ -2,6 +2,7 @@ mod challenge;
 mod password_reset;
 mod totp;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use argon2::Argon2;
@@ -28,21 +29,29 @@ use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningC
 use crate::errors::AuthError;
 use crate::models::{
     AuthPayload, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitState,
-    AuthUser, RefreshTokenRevocationReason, StoredRefreshToken,
+    AuthUser, IssuedPurposeToken, PurposeTokenIssueRequest, PurposeTokenValidation,
+    RefreshTokenRevocationReason, StoredRefreshToken, VerifiedPurposeToken,
 };
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
 use crate::util::{
     extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
-    hash_refresh_token, map_access_token_decode_error, strip_bearer_prefix,
+    hash_refresh_token, map_access_token_decode_error, map_purpose_token_decode_error,
+    strip_bearer_prefix,
 };
 
 const MIN_HS256_SECRET_BYTES: usize = 32;
+const ACCESS_TOKEN_TYPE: &str = "access";
 const ACCESS_TOKEN_PURPOSE: &str = "access_token";
+const PASSWORD_RESET_TOKEN_TYPE: &str = "password_reset";
+const PASSWORD_RESET_TOKEN_PURPOSE: &str = "password_reset";
+const PURPOSE_TOKEN_TYPE: &str = "purpose_token";
 const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWdxbC1hdXRoLWR1bW15LXNsdA$8ClNuSX6M3l/dalOcz8a117s1wLv/AbzbJiKA7dS4Ak";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AccessTokenClaims {
+    #[serde(default)]
+    typ: Option<String>,
     sub: String,
     sid: String,
     roles: Vec<String>,
@@ -62,11 +71,30 @@ struct AccessTokenClaims {
 pub(super) struct PasswordResetTokenClaims {
     pub(super) sub: String,
     pub(super) jti: String,
+    #[serde(default)]
+    pub(super) typ: Option<String>,
     pub(super) purpose: String,
     pub(super) iss: String,
     pub(super) aud: String,
     pub(super) exp: i64,
     pub(super) iat: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PurposeTokenClaims {
+    typ: String,
+    sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sid: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    purpose: String,
+    iss: String,
+    aud: String,
+    exp: i64,
+    iat: i64,
+    #[serde(flatten)]
+    custom: BTreeMap<String, JsonValue>,
 }
 
 /// Main authentication service.
@@ -340,6 +368,9 @@ where
         if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
             return Err(AuthError::AccessTokenExpired);
         }
+        if !matches!(claims.typ.as_deref(), None | Some(ACCESS_TOKEN_TYPE)) {
+            return Err(AuthError::InvalidAccessToken);
+        }
         if !matches!(claims.purpose.as_deref(), None | Some(ACCESS_TOKEN_PURPOSE)) {
             return Err(AuthError::InvalidAccessToken);
         }
@@ -365,6 +396,95 @@ where
     /// HS256 configurations return [`AuthError::JwksUnsupported`].
     pub fn jwks(&self) -> AuthResult<JsonValue> {
         self.jwks.clone().ok_or(AuthError::JwksUnsupported)
+    }
+
+    /// Issues a short-lived JWT for a specific non-session purpose.
+    ///
+    /// Purpose tokens are signed with the same configured local key material as
+    /// access tokens but carry a distinct `typ`, exact `purpose`, and caller
+    /// supplied `aud` claim. Validate them with
+    /// [`AuthService::authenticate_purpose_token`], not
+    /// [`AuthService::authenticate_access_token`].
+    pub fn issue_purpose_token(
+        &self,
+        request: PurposeTokenIssueRequest,
+    ) -> AuthResult<IssuedPurposeToken> {
+        validate_purpose_token_issue_request(&request)?;
+        let issued_at = OffsetDateTime::now_utc();
+        let expires_at = issued_at + request.ttl;
+        let claims = PurposeTokenClaims {
+            typ: PURPOSE_TOKEN_TYPE.to_string(),
+            sub: request.subject.clone(),
+            sid: request.session_id.map(|session_id| session_id.to_string()),
+            scopes: request.scopes.clone(),
+            purpose: request.purpose.clone(),
+            iss: self.config.issuer.clone(),
+            aud: request.audience.clone(),
+            exp: expires_at.unix_timestamp(),
+            iat: issued_at.unix_timestamp(),
+            custom: request.claims.clone(),
+        };
+        let token = self.encode_local_jwt(&claims)?;
+
+        Ok(IssuedPurposeToken {
+            token,
+            subject: request.subject,
+            purpose: request.purpose,
+            audience: request.audience,
+            session_id: request.session_id,
+            scopes: request.scopes,
+            claims: request.claims,
+            expires_at,
+        })
+    }
+
+    /// Validates a short-lived purpose token with exact purpose and audience.
+    pub fn authenticate_purpose_token(
+        &self,
+        token: &str,
+        expected: PurposeTokenValidation,
+    ) -> AuthResult<VerifiedPurposeToken> {
+        if expected.purpose.trim().is_empty() || expected.audience.trim().is_empty() {
+            return Err(AuthError::InvalidPurposeToken);
+        }
+
+        self.validate_local_jwt_header(token)
+            .map_err(|_| AuthError::InvalidPurposeToken)?;
+        let validation = self.validation_for_audience(&expected.audience);
+        let token_data = decode::<PurposeTokenClaims>(token, &self.decoding_key, &validation)
+            .map_err(map_purpose_token_decode_error)?;
+        let claims = token_data.claims;
+        if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
+            return Err(AuthError::PurposeTokenExpired);
+        }
+        if claims.typ != PURPOSE_TOKEN_TYPE
+            || claims.purpose != expected.purpose
+            || claims.aud != expected.audience
+        {
+            return Err(AuthError::InvalidPurposeToken);
+        }
+
+        let session_id = claims
+            .sid
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| AuthError::InvalidPurposeToken)?;
+        let issued_at = OffsetDateTime::from_unix_timestamp(claims.iat)
+            .map_err(|_| AuthError::InvalidPurposeToken)?;
+        let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
+            .map_err(|_| AuthError::InvalidPurposeToken)?;
+
+        Ok(VerifiedPurposeToken {
+            subject: claims.sub,
+            purpose: claims.purpose,
+            audience: claims.aud,
+            session_id,
+            scopes: claims.scopes,
+            claims: claims.custom,
+            issued_at,
+            expires_at,
+        })
     }
 
     /// Issues a local session for a user already verified by the host.
@@ -529,6 +649,7 @@ where
         expires_at: OffsetDateTime,
     ) -> AuthResult<String> {
         let claims = AccessTokenClaims {
+            typ: Some(ACCESS_TOKEN_TYPE.to_string()),
             sub: auth_user.user_id.clone(),
             sid: auth_user.session_id.to_string(),
             roles: auth_user.roles.clone(),
@@ -568,6 +689,18 @@ where
         }
 
         Ok(())
+    }
+
+    fn validation_for_audience(&self, audience: &str) -> Validation {
+        let mut validation = Validation::new(self.signing_algorithm);
+        validation.set_issuer(std::slice::from_ref(&self.config.issuer));
+        validation.set_audience(&[audience]);
+        validation.required_spec_claims.extend(
+            ["exp", "iat", "iss", "aud", "sub"]
+                .into_iter()
+                .map(str::to_string),
+        );
+        validation
     }
 
     /// Records a password-reset request and returns whether the host should
@@ -842,6 +975,48 @@ fn max_time(current: Option<OffsetDateTime>, candidate: OffsetDateTime) -> Offse
 fn retry_after_seconds(now: OffsetDateTime, until: OffsetDateTime) -> i64 {
     (until - now).whole_seconds().max(1)
 }
+
+fn validate_purpose_token_issue_request(request: &PurposeTokenIssueRequest) -> AuthResult<()> {
+    if request.subject.trim().is_empty() {
+        return Err(AuthError::InvalidConfiguration(
+            "purpose token subject must not be empty".to_string(),
+        ));
+    }
+    if request.purpose.trim().is_empty() {
+        return Err(AuthError::InvalidConfiguration(
+            "purpose token purpose must not be empty".to_string(),
+        ));
+    }
+    if request.audience.trim().is_empty() {
+        return Err(AuthError::InvalidConfiguration(
+            "purpose token audience must not be empty".to_string(),
+        ));
+    }
+    if request.ttl <= Duration::ZERO {
+        return Err(AuthError::InvalidConfiguration(
+            "purpose token ttl must be greater than zero".to_string(),
+        ));
+    }
+
+    for key in request.claims.keys() {
+        if key.trim().is_empty() {
+            return Err(AuthError::InvalidConfiguration(
+                "purpose token custom claim name must not be empty".to_string(),
+            ));
+        }
+        if RESERVED_PURPOSE_TOKEN_CLAIMS.contains(&key.as_str()) {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "purpose token custom claim '{key}' is reserved"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+const RESERVED_PURPOSE_TOKEN_CLAIMS: &[&str] = &[
+    "typ", "sub", "sid", "scopes", "purpose", "iss", "aud", "exp", "iat",
+];
 
 struct JwtKeyMaterial {
     encoding_key: EncodingKey,

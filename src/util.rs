@@ -71,6 +71,13 @@ pub(crate) fn map_password_reset_decode_error(err: jsonwebtoken::errors::Error) 
     }
 }
 
+pub(crate) fn map_purpose_token_decode_error(err: jsonwebtoken::errors::Error) -> AuthError {
+    match err.kind() {
+        JwtErrorKind::ExpiredSignature => AuthError::PurposeTokenExpired,
+        _ => AuthError::InvalidPurposeToken,
+    }
+}
+
 pub(crate) fn validate_login_challenge_options(options: &LoginChallengeOptions) -> AuthResult<()> {
     if options.code_length == 0 {
         return Err(AuthError::InvalidConfiguration(
