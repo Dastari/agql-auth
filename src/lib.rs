@@ -65,6 +65,7 @@
 //! primitives.
 
 mod api_tokens;
+mod combined;
 mod config;
 mod errors;
 mod grant;
@@ -86,6 +87,7 @@ mod validator;
 mod tests;
 
 pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,

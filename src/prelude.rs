@@ -4,6 +4,7 @@
 //! guards, OIDC helpers, and session types in one place.
 
 pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
