@@ -41,9 +41,12 @@ pub struct HierarchicalScopeOptions {
     pub separator: char,
     /// Wildcard segment/string. Defaults to `"*"`.
     pub wildcard: String,
-    /// When `true`, a trailing wildcard uses the legacy raw-prefix behavior.
+    /// When `true`, a trailing wildcard uses the multi-segment prefix behavior.
     /// When `false`, a trailing wildcard consumes one remaining segment.
     pub wildcard_matches_multi_segment: bool,
+    /// When `true`, a granted scope equal to the bare wildcard satisfies every
+    /// requirement. Defaults to `false` so bare `*` has no implicit meaning.
+    pub allow_universal_wildcard: bool,
     /// Scopes that satisfy every requirement. Empty by default.
     pub super_scopes: Vec<String>,
 }
@@ -54,6 +57,7 @@ impl Default for HierarchicalScopeOptions {
             separator: '.',
             wildcard: "*".to_string(),
             wildcard_matches_multi_segment: true,
+            allow_universal_wildcard: false,
             super_scopes: Vec::new(),
         }
     }
@@ -106,8 +110,17 @@ impl ScopeMatch for HierarchicalScopeMatch {
             return false;
         }
 
+        if granted == self.options.wildcard {
+            return self.options.allow_universal_wildcard;
+        }
+
         if granted.ends_with(&self.options.wildcard) {
             let prefix = &granted[..granted.len() - self.options.wildcard.len()];
+            // Bare multi-segment trailing wildcard: "orders.*"
+            // Reject empty prefix (already handled as universal above).
+            if prefix.is_empty() {
+                return self.options.allow_universal_wildcard;
+            }
             if self.options.wildcard_matches_multi_segment {
                 return required.starts_with(prefix);
             }
@@ -120,6 +133,7 @@ impl ScopeMatch for HierarchicalScopeMatch {
 
         let granted_segments: Vec<&str> = granted.split(self.options.separator).collect();
         let required_segments: Vec<&str> = required.split(self.options.separator).collect();
+        // Middle wildcards are supported only as whole segments with equal counts.
         granted_segments.len() == required_segments.len()
             && granted_segments.iter().zip(required_segments.iter()).all(
                 |(granted_segment, required_segment)| {
@@ -130,9 +144,10 @@ impl ScopeMatch for HierarchicalScopeMatch {
 }
 
 /// Ergonomic matcher enum for common configurations.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum ScopeMatcher {
     /// Exact string matching.
+    #[default]
     Exact,
     /// Configured hierarchical matching.
     Hierarchical(HierarchicalScopeMatch),
@@ -154,12 +169,6 @@ impl ScopeMatcher {
     /// Converts this matcher into a trait object suitable for request runtime.
     pub fn into_arc(self) -> Arc<dyn ScopeMatch> {
         Arc::new(self)
-    }
-}
-
-impl Default for ScopeMatcher {
-    fn default() -> Self {
-        Self::Exact
     }
 }
 

@@ -1,0 +1,205 @@
+{
+  "version": "1.0",
+  "description": "Language-neutral golden vectors for agql-auth hierarchical scope matching.",
+  "defaults": {
+    "separator": ".",
+    "wildcard": "*",
+    "wildcard_matches_multi_segment": true,
+    "allow_universal_wildcard": false,
+    "super_scopes": []
+  },
+  "case_sensitive": true,
+  "matcher_vectors": [
+    {
+      "id": 1,
+      "granted": ["a.b.c.d"],
+      "required": "a.b.c.d",
+      "expected": true,
+      "notes": "exact match"
+    },
+    {
+      "id": 2,
+      "granted": ["a.b.c.read"],
+      "required": "a.b.c.write",
+      "expected": false
+    },
+    {
+      "id": 3,
+      "granted": ["a.b.*"],
+      "required": "a.b.c",
+      "expected": true
+    },
+    {
+      "id": 4,
+      "granted": ["a.b.*"],
+      "required": "a.b.c.d",
+      "expected": true,
+      "notes": "multi-segment trailing wildcard"
+    },
+    {
+      "id": 5,
+      "granted": ["a.b.*"],
+      "required": "a.bc.d",
+      "expected": false
+    },
+    {
+      "id": 6,
+      "granted": ["a.b.*"],
+      "required": "a.b",
+      "expected": false
+    },
+    {
+      "id": 7,
+      "granted": ["*"],
+      "required": "anything.at.all",
+      "expected": false,
+      "notes": "bare wildcard has no meaning unless allow_universal_wildcard=true"
+    },
+    {
+      "id": 8,
+      "granted": ["a.b*"],
+      "required": "a.bc",
+      "expected": true,
+      "notes": "raw trailing-wildcard prefix behavior when multi-segment mode is enabled"
+    },
+    {
+      "id": 9,
+      "granted": ["a.*.d"],
+      "required": "a.c.d",
+      "expected": true,
+      "notes": "single-segment middle wildcard"
+    },
+    {
+      "id": 10,
+      "granted": ["a.*.d"],
+      "required": "a.c.x.d",
+      "expected": false
+    },
+    {
+      "id": 11,
+      "granted": ["a.*.d"],
+      "required": "a.d",
+      "expected": false
+    },
+    {
+      "id": 12,
+      "granted": ["a.b.*.read"],
+      "required": "a.b.c.write",
+      "expected": false
+    },
+    {
+      "id": 13,
+      "granted": ["a.b.*.read"],
+      "required": "a.b.c.read",
+      "expected": true
+    },
+    {
+      "id": 14,
+      "granted": ["a.b.*"],
+      "required": "a.b.*",
+      "expected": true
+    },
+    {
+      "id": 15,
+      "granted": ["a.b.*"],
+      "required": "a.b.*.read",
+      "expected": true
+    },
+    {
+      "id": 16,
+      "granted": ["x.*"],
+      "required": "y.b.c",
+      "expected": false
+    },
+    {
+      "id": 17,
+      "granted": ["a.b.c.read"],
+      "required": "a.*.c.read",
+      "expected": false,
+      "notes": "wildcards are only interpreted in granted scopes"
+    },
+    {
+      "id": 18,
+      "granted": ["a.b.c.d"],
+      "required": "a.b.c.d.e",
+      "expected": false
+    },
+    {
+      "id": 19,
+      "granted": [],
+      "required": "a.b.c",
+      "expected": false
+    },
+    {
+      "id": 20,
+      "granted": ["a.b.c.read"],
+      "required": "a.b.c.read.extra",
+      "expected": false
+    },
+    {
+      "id": 21,
+      "granted": ["orders.read"],
+      "required": "orders.read",
+      "expected": true
+    },
+    {
+      "id": 22,
+      "granted": ["orders.read"],
+      "required": "orders.write",
+      "expected": false
+    },
+    {
+      "id": 23,
+      "granted": ["orders.*"],
+      "required": "orders.read",
+      "expected": true
+    },
+    {
+      "id": 24,
+      "granted": ["orders.*"],
+      "required": "orders.items.read",
+      "expected": true,
+      "options": { "wildcard_matches_multi_segment": true }
+    },
+    {
+      "id": 25,
+      "granted": ["orders.*"],
+      "required": "orders.items.read",
+      "expected": false,
+      "options": { "wildcard_matches_multi_segment": false }
+    },
+    {
+      "id": 26,
+      "granted": ["orders.items.*"],
+      "required": "orders.items.read",
+      "expected": true
+    },
+    {
+      "id": 27,
+      "granted": ["orders.*"],
+      "required": "billing.read",
+      "expected": false
+    },
+    {
+      "id": 28,
+      "granted": ["platform.admin"],
+      "required": "orders.delete",
+      "expected": false,
+      "notes": "super-scopes are empty by default"
+    },
+    {
+      "id": 29,
+      "granted": ["platform.admin"],
+      "required": "orders.delete",
+      "expected": true,
+      "options": { "super_scopes": ["platform.admin"] }
+    },
+    {
+      "id": 30,
+      "granted": ["*"],
+      "required": "orders.read",
+      "expected": true,
+      "options": { "allow_universal_wildcard": true }
+    }
+  ]
+}
