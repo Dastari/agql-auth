@@ -25,6 +25,7 @@ use uuid::Uuid;
 use crate::AuthResult;
 use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
+use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
 use crate::models::{
     AuthPayload, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitState,
     AuthUser, IssuedPurposeToken, PurposeTokenIssueRequest, PurposeTokenValidation,
@@ -532,6 +533,41 @@ where
             .await
     }
 
+    /// Issues a short-lived access token without writing a refresh-token row.
+    ///
+    /// This is intended for host-verified service, device, or one-shot grants
+    /// that should validate like normal user-shaped access tokens but must not
+    /// create a refreshable session.
+    pub async fn issue_access_token_only(
+        &self,
+        request: AccessTokenOnlyRequest,
+    ) -> AuthResult<AccessTokenOnlyGrant> {
+        validate_access_token_only_request(&request)?;
+        let now = OffsetDateTime::now_utc();
+        let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
+        if ttl <= Duration::ZERO {
+            return Err(AuthError::InvalidConfiguration(
+                "access-token-only ttl must be greater than zero".to_string(),
+            ));
+        }
+
+        let auth_user = AuthUser {
+            user_id: request.user_id,
+            session_id: Uuid::new_v4(),
+            roles: request.roles,
+            scopes: request.scopes,
+            session: request.session,
+        };
+        let access_token_expires_at = now + ttl;
+        let access_token = self.issue_access_token(&auth_user, now, access_token_expires_at)?;
+
+        Ok(AccessTokenOnlyGrant {
+            access_token,
+            access_token_expires_at,
+            user: auth_user,
+        })
+    }
+
     /// Injects an authenticated user into an `async-graphql` request when a token is present.
     ///
     /// Passing `None` leaves the request unauthenticated.
@@ -999,6 +1035,22 @@ fn validate_purpose_token_issue_request(request: &PurposeTokenIssueRequest) -> A
         }
     }
 
+    Ok(())
+}
+
+fn validate_access_token_only_request(request: &AccessTokenOnlyRequest) -> AuthResult<()> {
+    if request.user_id.trim().is_empty() {
+        return Err(AuthError::InvalidConfiguration(
+            "access-token-only user_id must not be empty".to_string(),
+        ));
+    }
+    if let Some(ttl) = request.ttl
+        && ttl <= Duration::ZERO
+    {
+        return Err(AuthError::InvalidConfiguration(
+            "access-token-only ttl must be greater than zero".to_string(),
+        ));
+    }
     Ok(())
 }
 

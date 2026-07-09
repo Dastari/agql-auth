@@ -9,6 +9,7 @@ pub use crate::config::{
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::errors::AuthError;
+pub use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
 pub use crate::graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
     auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,

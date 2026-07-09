@@ -251,7 +251,7 @@ fn auth_service(config: AuthConfig) -> AuthService<MemoryUserStore, MemoryRefres
     .unwrap()
 }
 
-fn rs256_config() -> AuthConfig {
+pub(super) fn rs256_config() -> AuthConfig {
     AuthConfig::with_rs256_pem(RSA_PRIVATE_KEY_A, RSA_PUBLIC_KEY_A, "auth-key-1")
 }
 

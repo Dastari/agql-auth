@@ -1,6 +1,7 @@
 mod api_tokens;
 mod auth_lifecycle;
 mod challenges;
+mod grant;
 mod graphql_transport;
 mod jwt_signing;
 mod oidc;
