@@ -139,6 +139,49 @@ impl Query {
 Existing user-only helpers and guards still require `AuthUser` and remain
 unchanged.
 
+## Combined User JWT Or API Token
+
+Use `CombinedAuth` when one GraphQL endpoint should accept either a user access
+JWT or an opaque API token:
+
+```rust
+use agql_auth::CombinedAuth;
+
+let request = CombinedAuth::new(&access_token_validator, &api_tokens)
+    .inject_http_auth(graphql_request, authorization_header, metadata)
+    .await?;
+```
+
+The injector tries JWT-shaped tokens first. Expired JWTs return
+`AuthError::AccessTokenExpired` and never fall back to API-token
+authentication. Invalid JWTs only fall back when the token matches the API
+token prefix. On success the request contains one `AuthPrincipal`, plus the
+specific `AuthUser` or `ApiTokenPrincipal`.
+
+## Access-Token-Only Grants
+
+Use `AuthService::issue_access_token_only` for short-lived user-shaped JWTs
+that should not create refresh-token rows:
+
+```rust
+use agql_auth::{AccessTokenOnlyRequest, AuthMethod, SessionContext};
+use time::Duration;
+
+let grant = auth
+    .issue_access_token_only(AccessTokenOnlyRequest {
+        user_id: "device-user-1".to_string(),
+        roles: vec!["Device".to_string()],
+        scopes: vec!["devices.read".to_string(), "devices.write".to_string()],
+        session: SessionContext::for_auth_method(AuthMethod::ServiceToken),
+        ttl: Some(Duration::minutes(30)),
+    })
+    .await?;
+```
+
+Use API tokens for long-lived, revocable service credentials. Use
+access-token-only grants for short-lived JWTs that need the same validation path
+as user sessions but no refresh-token session.
+
 ## Authorization Policy
 
 `agql-auth` stores and exposes generic scopes, optional audience, and optional

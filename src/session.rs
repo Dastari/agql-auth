@@ -26,12 +26,12 @@ pub struct MfaState {
     /// Whether the session has satisfied the host's MFA policy.
     pub satisfied: bool,
     /// MFA methods satisfied by the session.
-    pub methods: Vec<MfaMethod>,
+    pub methods: Vec<MfaFactor>,
 }
 
 /// Supported MFA methods recorded in local session context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum MfaMethod {
+pub enum MfaFactor {
     /// Time-based one-time password.
     Totp,
 }

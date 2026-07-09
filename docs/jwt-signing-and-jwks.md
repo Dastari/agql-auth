@@ -7,7 +7,7 @@ validation.
 
 ## HS256 Compatibility
 
-Existing users can keep using `AuthConfig::new(secret)`, but `0.6.0` requires
+Existing users can keep using `AuthConfig::new(secret)`, but `0.6.0` and later require
 the HS256 secret to be at least 32 bytes.
 
 ```rust
@@ -100,6 +100,48 @@ No private key fields are included.
 For HS256, JWKS export returns `AuthError::JwksUnsupported`. A symmetric secret
 is not public key material and should not be exposed as JWKS.
 
+## Store-Free Resource-Server Validation
+
+Use `AccessTokenValidator` when a service needs to validate local access tokens
+but should not own user or refresh-token stores:
+
+```rust
+use agql_auth::AccessTokenValidator;
+
+let validator = AccessTokenValidator::builder()
+    .issuer("agql-auth")
+    .audience("agql-auth-clients")
+    .rs256_public_pem(public_key_pem)
+    .key_id("auth-key-2026-07")
+    .build()?;
+
+let user = validator.authenticate_bearer(authorization_header)?;
+```
+
+Static JWKS JSON is also supported:
+
+```rust
+let validator = AccessTokenValidator::builder()
+    .issuer("agql-auth")
+    .audience("agql-auth-clients")
+    .jwks_json(jwks_json)
+    .key_id("auth-key-2026-07")
+    .build()?;
+```
+
+HS256 resource-server validation requires explicit opt-in:
+
+```rust
+let validator = AccessTokenValidator::builder()
+    .issuer("agql-auth")
+    .audience("agql-auth-clients")
+    .accept_hs256(true)
+    .hs256_secret(secret)
+    .build()?;
+```
+
+See [Resource servers](resource-servers.md).
+
 ## Production Posture
 
 For router or external-service validation:
@@ -129,7 +171,7 @@ Changing signing modes does not rename or remove access-token claims:
 - `exp`
 - `iat`
 
-`0.6.0` adds `typ = "access"` and `purpose = "access_token"` to newly issued
+`0.6.0` added `typ = "access"` and `purpose = "access_token"` to newly issued
 access tokens. Validation accepts legacy `0.5.x` access tokens that do not
 contain those claims, but rejects any token whose `typ` or `purpose` is present
 and not the access-token value.
@@ -159,8 +201,8 @@ use time::Duration;
 let issued = auth.issue_purpose_token(
     PurposeTokenIssueRequest::new(
         user_id,
-        "mobile_capture",
-        "digitise-mobile-capture",
+        "capture_upload",
+        "capture-upload-clients",
         Duration::minutes(15),
     )
     .with_session_id(session_id)
@@ -170,13 +212,36 @@ let issued = auth.issue_purpose_token(
 
 let verified = auth.authenticate_purpose_token(
     &issued.token,
-    PurposeTokenValidation::new("mobile_capture", "digitise-mobile-capture"),
+    PurposeTokenValidation::new("capture_upload", "capture-upload-clients"),
 )?;
 ```
 
 Do not validate purpose tokens with `authenticate_access_token`; access-token
 validation rejects `typ = "purpose_token"`. Custom claims may not use reserved
 claim names such as `sub`, `aud`, `exp`, `typ`, or `purpose`.
+
+## Access-Token-Only Grants
+
+`issue_access_token_only` issues a normal access JWT with no refresh-token row:
+
+```rust
+use agql_auth::{AccessTokenOnlyRequest, AuthMethod, SessionContext};
+use time::Duration;
+
+let grant = auth
+    .issue_access_token_only(AccessTokenOnlyRequest {
+        user_id: user_id.to_string(),
+        roles: vec!["Device".to_string()],
+        scopes: vec!["devices.read".to_string()],
+        session: SessionContext::for_auth_method(AuthMethod::ServiceToken),
+        ttl: Some(Duration::minutes(30)),
+    })
+    .await?;
+```
+
+The token validates through `AuthService::authenticate_access_token` and
+`AccessTokenValidator::authenticate_access_token` exactly like a normal session
+access token. It cannot be refreshed.
 
 ## RSA Advisory Note
 

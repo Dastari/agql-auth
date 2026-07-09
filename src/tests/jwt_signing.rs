@@ -203,8 +203,8 @@ fn purpose_tokens_validate_exact_purpose_and_audience() {
         .issue_purpose_token(
             PurposeTokenIssueRequest::new(
                 "user-1",
-                "mobile_capture",
-                "digitise-mobile-capture",
+                "capture_upload",
+                "capture-upload-clients",
                 Duration::minutes(15),
             )
             .with_session_id(session_id)
@@ -216,14 +216,14 @@ fn purpose_tokens_validate_exact_purpose_and_audience() {
 
     let claims = decode_payload(&issued.token);
     assert_eq!(claims["typ"], "purpose_token");
-    assert_eq!(claims["purpose"], "mobile_capture");
-    assert_eq!(claims["aud"], "digitise-mobile-capture");
+    assert_eq!(claims["purpose"], "capture_upload");
+    assert_eq!(claims["aud"], "capture-upload-clients");
     assert_eq!(claims["col"], "collection-1");
 
     let verified = auth
         .authenticate_purpose_token(
             &issued.token,
-            PurposeTokenValidation::new("mobile_capture", "digitise-mobile-capture"),
+            PurposeTokenValidation::new("capture_upload", "capture-upload-clients"),
         )
         .unwrap();
     assert_eq!(verified.subject, "user-1");
@@ -241,7 +241,7 @@ fn purpose_tokens_validate_exact_purpose_and_audience() {
     assert!(matches!(
         auth.authenticate_purpose_token(
             &issued.token,
-            PurposeTokenValidation::new("access_token", "digitise-mobile-capture"),
+            PurposeTokenValidation::new("access_token", "capture-upload-clients"),
         )
         .unwrap_err(),
         AuthError::InvalidPurposeToken
@@ -249,7 +249,7 @@ fn purpose_tokens_validate_exact_purpose_and_audience() {
     assert!(matches!(
         auth.authenticate_purpose_token(
             &issued.token,
-            PurposeTokenValidation::new("mobile_capture", "other-audience"),
+            PurposeTokenValidation::new("capture_upload", "other-audience"),
         )
         .unwrap_err(),
         AuthError::InvalidPurposeToken
@@ -263,8 +263,8 @@ fn purpose_tokens_reject_reserved_custom_claims() {
         .issue_purpose_token(
             PurposeTokenIssueRequest::new(
                 "user-1",
-                "mobile_capture",
-                "digitise-mobile-capture",
+                "capture_upload",
+                "capture-upload-clients",
                 Duration::minutes(15),
             )
             .with_claim("aud", json!("other-audience")),

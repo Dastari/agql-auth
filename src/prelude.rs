@@ -46,7 +46,7 @@ pub use crate::scope_match::{
 };
 pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use crate::service::AuthService;
-pub use crate::session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
+pub use crate::session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use crate::stores::{
     ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,

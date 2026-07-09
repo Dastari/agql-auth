@@ -565,7 +565,7 @@ async fn verified_user_session_issuance_supports_email_code_and_totp_context() {
                 auth_method: AuthMethod::TotpStepUp,
                 mfa: MfaState {
                     satisfied: true,
-                    methods: vec![MfaMethod::Totp],
+                    methods: vec![MfaFactor::Totp],
                 },
                 active_scope: Some(ActiveScope {
                     tenant_id: Some("tenant-1".to_string()),
@@ -590,7 +590,7 @@ async fn verified_user_session_issuance_supports_email_code_and_totp_context() {
     );
     assert_eq!(decoded.session.auth_method, AuthMethod::TotpStepUp);
     assert!(decoded.session.mfa.satisfied);
-    assert_eq!(decoded.session.mfa.methods, vec![MfaMethod::Totp]);
+    assert_eq!(decoded.session.mfa.methods, vec![MfaFactor::Totp]);
     assert_eq!(
         decoded
             .session

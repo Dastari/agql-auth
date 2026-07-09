@@ -7,6 +7,8 @@
 //! ## Core Pieces
 //!
 //! - [`AuthService`] issues and validates local sessions.
+//! - [`AccessTokenValidator`] validates access tokens in resource servers
+//!   without stores.
 //! - [`AuthConfig`] configures issuer, audience, TTLs, and JWT signing mode.
 //! - [`UserStore`] and [`RefreshTokenStore`] let the host provide persistence.
 //! - [`ApiTokenService`] issues and authenticates opaque service-to-service
@@ -15,6 +17,11 @@
 //!   authentication.
 //! - [`AuthPrincipal`] represents either a user session or an API-token
 //!   principal for handlers that accept both.
+//! - [`CombinedAuth`] injects either a user JWT or API token into one
+//!   [`AuthPrincipal`].
+//! - [`ScopeMatch`] supports exact default matching and opt-in hierarchical
+//!   matching through [`AuthRuntime`].
+//! - [`ChannelIdentity`] carries host-verified channel data for channel guards.
 //! - [`RequireAuth`], [`RequireAnyRole`], [`RequireScope`], and related guards
 //!   protect resolvers.
 //!
@@ -33,6 +40,9 @@
 //! authenticated to [`ApiTokenPrincipal`]. Use [`AuthPrincipal`] and the
 //! `RequirePrincipal*` guards when a resolver can accept either a user session
 //! or an API token.
+//!
+//! Use [`AuthService::issue_access_token_only`] for short-lived user-shaped JWT
+//! grants that should not create refresh-token rows.
 //!
 //! ## JWT Signing And JWKS
 //!
@@ -130,7 +140,7 @@ pub use scope_match::{
 };
 pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;
-pub use session::{ActiveScope, AuthMethod, MfaMethod, MfaState, SessionContext};
+pub use session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use stores::{
     ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,

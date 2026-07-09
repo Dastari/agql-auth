@@ -42,7 +42,8 @@ let auth = AuthService::new_with_rate_limit_store(
 `AuthConfig::new(secret)` preserves the legacy HS256 signing behavior. For new
 deployments where other services or routers need to validate tokens, prefer
 RS256. HS256 secrets must be at least 32 bytes. See
-[JWT signing and JWKS](jwt-signing-and-jwks.md).
+[JWT signing and JWKS](jwt-signing-and-jwks.md) and
+[Resource servers](resource-servers.md).
 
 ## Password Login
 

@@ -8,14 +8,19 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 - Argon2 password hashing and password login
 - Short-lived JWT access tokens and rotated opaque refresh tokens
+- Store-free access-token validation for resource servers
 - Long-lived opaque API/service tokens for server-to-server calls
 - HS256 compatibility mode and RS256 signing with JWKS export
 - Roles, scopes, and typed session context in access-token claims
+- Exact scope matching by default with opt-in hierarchical matching
 - Microsoft Entra ID / OIDC authorization-code + PKCE login
 - Host-controlled external user provisioning and account linking
 - Password reset tokens, one-time login challenges, and TOTP primitives
 - Rate limiting, exponential backoff, and temporary lockout for auth flows
 - Short-lived typed purpose JWTs with explicit audience validation
+- Access-token-only grants without refresh-token storage
+- Combined user JWT or API-token principal injection
+- Host-verified channel identity request data and guards
 - `async-graphql` request injection and guards
 - Storage traits instead of built-in database assumptions
 
@@ -23,7 +28,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 ```toml
 [dependencies]
-agql-auth = "0.6"
+agql-auth = "0.7"
 ```
 
 ## Basic Usage
@@ -53,7 +58,7 @@ let auth = AuthService::new_with_rate_limit_store(
 )?;
 ```
 
-HS256 secrets must be at least 32 bytes in `0.6.0`. Use a random secret from a
+HS256 secrets must be at least 32 bytes. Use a random secret from a
 secret manager; prefer RS256 when routers or other services validate tokens.
 
 Issue a local session with password login:
@@ -103,6 +108,32 @@ impl Query {
 }
 ```
 
+Exact scope matching remains the default. To opt into hierarchical matching for
+guards, configure a matcher and inject it with your auth path:
+
+```rust
+use std::sync::Arc;
+use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
+
+let auth = auth.with_scope_matcher(Arc::new(HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions {
+        super_scopes: vec!["platform.admin".to_string()],
+        ..Default::default()
+    },
+)));
+```
+
+See [Scope matching](docs/scope-matching.md).
+
+Hosts that verify channel credentials outside the crate can attach
+`ChannelIdentity` and use `RequireChannelScheme`:
+
+```rust
+use agql_auth::{ChannelIdentity, RequireChannelScheme};
+
+let request = request.data(ChannelIdentity::new("mtls", "device-1"));
+```
+
 ## RS256 And JWKS
 
 For services that need routers or other systems to validate local `agql-auth` tokens without sharing a symmetric secret, configure RS256 signing:
@@ -134,6 +165,24 @@ async fn jwks(auth: &AuthService<AppUserStore, AppRefreshTokenStore>)
 
 See [JWT signing and JWKS](docs/jwt-signing-and-jwks.md).
 
+Validate the same access tokens in a resource server without user or refresh
+stores:
+
+```rust
+use agql_auth::AccessTokenValidator;
+
+let validator = AccessTokenValidator::builder()
+    .issuer("agql-auth")
+    .audience("agql-auth-clients")
+    .rs256_public_pem(std::env::var("JWT_PUBLIC_KEY_PEM")?)
+    .key_id("auth-key-2026-07")
+    .build()?;
+
+let user = validator.authenticate_bearer(authorization_header)?;
+```
+
+See [Resource servers](docs/resource-servers.md).
+
 Use purpose tokens for short-lived, non-session grants:
 
 ```rust
@@ -144,8 +193,8 @@ use time::Duration;
 let issued = auth.issue_purpose_token(
     PurposeTokenIssueRequest::new(
         user_id,
-        "mobile_capture",
-        "digitise-mobile-capture",
+        "capture_upload",
+        "capture-upload-clients",
         Duration::minutes(15),
     )
     .with_session_id(session_id)
@@ -154,8 +203,25 @@ let issued = auth.issue_purpose_token(
 
 let grant = auth.authenticate_purpose_token(
     &issued.token,
-    PurposeTokenValidation::new("mobile_capture", "digitise-mobile-capture"),
+    PurposeTokenValidation::new("capture_upload", "capture-upload-clients"),
 )?;
+```
+
+Issue a user-shaped access token without a refresh-token row:
+
+```rust
+use agql_auth::{AccessTokenOnlyRequest, AuthMethod, SessionContext};
+use time::Duration;
+
+let grant = auth
+    .issue_access_token_only(AccessTokenOnlyRequest {
+        user_id: "device-user-1".to_string(),
+        roles: vec!["Device".to_string()],
+        scopes: vec!["devices.read".to_string()],
+        session: SessionContext::for_auth_method(AuthMethod::ServiceToken),
+        ttl: Some(Duration::minutes(30)),
+    })
+    .await?;
 ```
 
 ## API And Service Tokens
@@ -194,6 +260,16 @@ let principal = api_tokens
     .await?;
 ```
 
+Accept either a user JWT or an API token on one endpoint:
+
+```rust
+use agql_auth::CombinedAuth;
+
+let request = CombinedAuth::new(&validator, &api_tokens)
+    .inject_http_auth(graphql_request, authorization_header, metadata)
+    .await?;
+```
+
 See [API and service tokens](docs/api-service-tokens.md).
 
 ## Microsoft Login
@@ -224,31 +300,27 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [Getting started](docs/getting-started.md)
 - [Storage traits](docs/storage-traits.md)
 - [Authorization, scopes, and guards](docs/authorization.md)
+- [Resource servers](docs/resource-servers.md)
+- [Scope matching](docs/scope-matching.md)
 - [API and service tokens](docs/api-service-tokens.md)
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
+- [Migration guide](MIGRATION.md)
 
-## 0.6.0 Migration Notes
+## 0.7.0 Migration Notes
 
-- `RefreshTokenStore` implementers must add atomic `rotate_refresh_token`.
-- Production apps should implement `AuthRateLimitStore` and construct services
-  with `AuthService::new_with_rate_limit_store`.
-- HS256 secrets shorter than 32 bytes are rejected at `AuthService::new`.
-- `ValidatedOidcClaims.not_before` is now `Option<OffsetDateTime>`.
-- OIDC config includes discovery-cache TTL, forced-JWKS-refresh cooldown, and
-  additional trusted audiences for multi-audience ID tokens.
-- `AuthConfig.jwt_signing` is authoritative; `jwt_secret` remains a legacy
-  mirror field and should not be mutated directly.
-- Access tokens now include `typ = "access"` and `purpose = "access_token"`;
-  `0.6.x` still accepts legacy access tokens without those claims.
-- Purpose tokens use `typ = "purpose_token"`, exact `purpose`, and exact
-  audience validation.
-- TOTP replay protection is available through `TotpReplayStore`.
-- Auth throttling returns `AuthError::AuthThrottled`; temporary lockout returns
-  `AuthError::AuthLocked`. GraphQL extensions include `retryAfterSeconds`.
-- Unsupported authorization schemes such as `Basic abc` are rejected by bearer
-  parsing. Raw token strings are still accepted.
+- Exact scope matching remains the default.
+- Hierarchical scope matching is opt-in through `AuthRuntime`,
+  `AuthService::with_scope_matcher`, or `AccessTokenValidatorBuilder::scope_matcher`.
+- Resource servers should use `AccessTokenValidator` instead of constructing
+  `AuthService` just to validate JWTs.
+- Use `CombinedAuth` for endpoints that accept either user JWTs or API tokens.
+- Use `issue_access_token_only` for short-lived JWT grants that must not create
+  refresh-token rows.
+- Use `ChannelIdentity` only after the host has verified the channel.
+- See [MIGRATION.md](MIGRATION.md) for old-to-new API mappings and behavioral
+  compatibility notes.
 
 ## Design Boundaries
 

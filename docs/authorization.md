@@ -52,8 +52,8 @@ roles separately.
 
 ## Scope Matching
 
-Scope matching is exact string matching. The crate does not interpret wildcard
-or hierarchical scopes.
+Direct scope helpers remain exact string matching. This preserves existing
+runtime behavior:
 
 ```rust
 use agql_auth::{has_all_scopes, has_any_scope, has_scope};
@@ -70,6 +70,24 @@ if user.has_scope("orders.read") {
     // ...
 }
 ```
+
+For wildcard or hierarchical scopes, configure a `ScopeMatch` implementation
+and inject it through `AuthRuntime`. Guards read the runtime matcher and fall
+back to exact matching when no runtime is present:
+
+```rust
+use std::sync::Arc;
+use agql_auth::{AuthRuntime, HierarchicalScopeMatch};
+
+let request = request.data(AuthRuntime::new(Arc::new(
+    HierarchicalScopeMatch::with_defaults(),
+)));
+```
+
+`AuthService`, `AccessTokenValidator`, and `CombinedAuth` inject
+`AuthRuntime` after successful authentication. See
+[Scope matching](scope-matching.md) for the normative algorithm and golden
+vectors.
 
 ## GraphQL Guards
 
@@ -108,13 +126,18 @@ Use resolver code when authorization depends on object ownership, tenant
 membership, or other dynamic data.
 
 For resolvers that accept either a user session or an API token, use the generic
-principal guards:
+principal guards. `CombinedAuth` can inject either credential type into one
+`AuthPrincipal`:
 
 ```rust
 use agql_auth::{
-    RequireAllPrincipalScopes, RequireAnyPrincipalScope, RequirePrincipal,
-    RequirePrincipalScope,
+    CombinedAuth, RequireAllPrincipalScopes, RequireAnyPrincipalScope,
+    RequirePrincipal, RequirePrincipalScope,
 };
+
+let request = CombinedAuth::new(&access_token_validator, &api_token_service)
+    .inject_http_auth(request, authorization_header, metadata)
+    .await?;
 
 #[Object]
 impl Query {
@@ -151,4 +174,25 @@ use agql_auth::{principal_from_ctx, principal_from_ctx_opt};
 
 let principal = principal_from_ctx(ctx)?;
 let optional_principal = principal_from_ctx_opt(ctx);
+```
+
+## Channel Identity
+
+Hosts that verify a channel outside this crate can inject `ChannelIdentity`.
+The crate does not parse certificates or verify channel credentials.
+
+```rust
+use agql_auth::{ChannelIdentity, RequireChannelScheme};
+
+let request = request.data(
+    ChannelIdentity::new("mtls", "device-1").with_claim("fingerprint", "sha256:..."),
+);
+
+#[Object]
+impl Mutation {
+    #[graphql(guard = "RequireChannelScheme::new(\"mtls\")")]
+    async fn device_action(&self) -> bool {
+        true
+    }
+}
 ```
