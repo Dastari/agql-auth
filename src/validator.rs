@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
 use async_graphql::Request;
-use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, Validation, decode_header};
 use serde_json::Value as JsonValue;
 
+use crate::claims::ClaimRequirements;
+use crate::clock::{Clock, SystemClock};
+use crate::keys::{AccessTokenKeyResolver, StaticHs256Key, StaticJwksKeySet, StaticRs256Key};
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::token_decode::{
-    AccessTokenDecodeConfig, access_token_claims_to_user, decode_access_token_claims,
+    AccessTokenDecodeConfig, BearerParseMode, PurposePolicy, access_token_claims_to_user,
+    decode_access_token_claims,
 };
-use crate::util::strip_bearer_prefix;
+use crate::util::strip_bearer_prefix_with_mode;
 use crate::{AuthError, AuthPrincipal, AuthResult, AuthUser};
 
 const MIN_HS256_SECRET_BYTES: usize = 32;
+const DEFAULT_MAX_LEEWAY_SECONDS: u64 = 300;
 
 /// Store-free validator for local `agql-auth` access tokens.
 ///
@@ -20,18 +24,33 @@ const MIN_HS256_SECRET_BYTES: usize = 32;
 /// material without implementing [`crate::UserStore`] or
 /// [`crate::RefreshTokenStore`].
 pub struct AccessTokenValidator {
-    decode: AccessTokenDecodeConfig,
+    issuer: String,
+    audiences: Vec<String>,
+    leeway_seconds: u64,
+    allowed_algorithms: Vec<Algorithm>,
+    purpose_policy: PurposePolicy,
+    claim_requirements: ClaimRequirements,
+    key_resolver: Arc<dyn AccessTokenKeyResolver>,
+    expected_kid: Option<String>,
+    clock: Arc<dyn Clock>,
     scope_matcher: Arc<dyn ScopeMatch>,
+    bearer_parse_mode: BearerParseMode,
 }
 
 /// Builder for [`AccessTokenValidator`].
 pub struct AccessTokenValidatorBuilder {
     issuer: Option<String>,
-    audience: Option<String>,
+    audiences: Vec<String>,
     leeway_seconds: Option<u64>,
     key_id: Option<String>,
     key_material: Option<ValidatorKeyMaterial>,
+    key_resolver: Option<Arc<dyn AccessTokenKeyResolver>>,
     accept_hs256: bool,
+    allowed_algorithms: Option<Vec<Algorithm>>,
+    purpose_policy: PurposePolicy,
+    claim_requirements: ClaimRequirements,
+    bearer_parse_mode: BearerParseMode,
+    clock: Arc<dyn Clock>,
     scope_matcher: Arc<dyn ScopeMatch>,
 }
 
@@ -46,11 +65,17 @@ impl AccessTokenValidatorBuilder {
     pub fn new() -> Self {
         Self {
             issuer: None,
-            audience: None,
+            audiences: Vec::new(),
             leeway_seconds: None,
             key_id: None,
             key_material: None,
+            key_resolver: None,
             accept_hs256: false,
+            allowed_algorithms: None,
+            purpose_policy: PurposePolicy::AccessTokenOrLegacy,
+            claim_requirements: ClaimRequirements::default(),
+            bearer_parse_mode: BearerParseMode::BearerOrRaw,
+            clock: Arc::new(SystemClock),
             scope_matcher: Arc::new(ExactScopeMatch),
         }
     }
@@ -61,13 +86,28 @@ impl AccessTokenValidatorBuilder {
         self
     }
 
-    /// Sets the expected audience.
+    /// Sets a single expected audience.
     pub fn audience(mut self, audience: impl Into<String>) -> Self {
-        self.audience = Some(audience.into());
+        self.audiences = vec![audience.into()];
+        self
+    }
+
+    /// Sets one or more expected audiences.
+    ///
+    /// A token is accepted when any of its audiences matches any configured
+    /// audience (exact string match via `jsonwebtoken` validation).
+    pub fn audiences<I, S>(mut self, audiences: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.audiences = audiences.into_iter().map(Into::into).collect();
         self
     }
 
     /// Sets clock skew in seconds for JWT validation.
+    ///
+    /// Values above 300 seconds are rejected as excessive.
     pub fn leeway_seconds(mut self, seconds: u64) -> Self {
         self.leeway_seconds = Some(seconds);
         self
@@ -80,15 +120,12 @@ impl AccessTokenValidatorBuilder {
     }
 
     /// Uses a static JWKS JSON document.
-    ///
-    /// When the JWKS has multiple keys, call [`Self::key_id`] so the validator
-    /// can select the intended key.
     pub fn jwks_json(mut self, jwks_json: impl Into<String>) -> Self {
         self.key_material = Some(ValidatorKeyMaterial::JwksJson(jwks_json.into()));
         self
     }
 
-    /// Requires the JWT header `kid` to match this key id.
+    /// Requires the JWT header `kid` to match this key id for single-key setups.
     pub fn key_id(mut self, key_id: impl Into<String>) -> Self {
         self.key_id = Some(key_id.into());
         self
@@ -107,6 +144,45 @@ impl AccessTokenValidatorBuilder {
         self
     }
 
+    /// Restricts accepted signature algorithms.
+    ///
+    /// Algorithms are never inferred solely from untrusted token headers without
+    /// comparison to this configured policy.
+    pub fn allowed_algorithms(mut self, algorithms: impl IntoIterator<Item = Algorithm>) -> Self {
+        self.allowed_algorithms = Some(algorithms.into_iter().collect());
+        self
+    }
+
+    /// Installs a custom key resolver (static multi-key JWKS, rotating set, etc.).
+    pub fn key_resolver(mut self, resolver: Arc<dyn AccessTokenKeyResolver>) -> Self {
+        self.key_resolver = Some(resolver);
+        self
+    }
+
+    /// Sets purpose validation policy.
+    pub fn purpose_policy(mut self, policy: PurposePolicy) -> Self {
+        self.purpose_policy = policy;
+        self
+    }
+
+    /// Sets optional multi-tenant / binding claim requirements.
+    pub fn claim_requirements(mut self, requirements: ClaimRequirements) -> Self {
+        self.claim_requirements = requirements;
+        self
+    }
+
+    /// Controls whether raw tokens without a `Bearer` scheme are accepted.
+    pub fn bearer_parse_mode(mut self, mode: BearerParseMode) -> Self {
+        self.bearer_parse_mode = mode;
+        self
+    }
+
+    /// Installs an injectable clock (useful for deterministic tests).
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Sets the request-time scope matcher injected into GraphQL data.
     pub fn scope_matcher(mut self, matcher: Arc<dyn ScopeMatch>) -> Self {
         self.scope_matcher = matcher;
@@ -116,32 +192,54 @@ impl AccessTokenValidatorBuilder {
     /// Builds the validator.
     pub fn build(self) -> AuthResult<AccessTokenValidator> {
         let issuer = required_non_empty(self.issuer, "issuer")?;
-        let audience = required_non_empty(self.audience, "audience")?;
-        let key_material = self.key_material.ok_or_else(|| {
-            AuthError::InvalidConfiguration("validator key material is required".to_string())
-        })?;
-
-        let (algorithm, decoding_key, expected_kid) =
-            build_decoding_key(key_material, self.key_id, self.accept_hs256)?;
-        let mut validation = Validation::new(algorithm);
-        validation.set_issuer(std::slice::from_ref(&issuer));
-        validation.set_audience(std::slice::from_ref(&audience));
-        if let Some(leeway) = self.leeway_seconds {
-            validation.leeway = leeway;
+        if self.audiences.is_empty()
+            || self
+                .audiences
+                .iter()
+                .any(|audience| audience.trim().is_empty())
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "validator audience is required".to_string(),
+            ));
         }
-        validation.required_spec_claims.extend(
-            ["exp", "iat", "iss", "aud", "sub"]
-                .into_iter()
-                .map(str::to_string),
-        );
+        let leeway = self.leeway_seconds.unwrap_or(0);
+        if leeway > DEFAULT_MAX_LEEWAY_SECONDS {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "validator leeway_seconds must be <= {DEFAULT_MAX_LEEWAY_SECONDS}"
+            )));
+        }
+
+        let (default_algorithm, key_resolver, expected_kid) = build_key_resolver(
+            self.key_material,
+            self.key_resolver,
+            self.key_id,
+            self.accept_hs256,
+        )?;
+
+        let allowed_algorithms = match self.allowed_algorithms {
+            Some(algorithms) if !algorithms.is_empty() => {
+                if algorithms.contains(&Algorithm::HS256) && !self.accept_hs256 {
+                    return Err(AuthError::InvalidConfiguration(
+                        "HS256 must be enabled with accept_hs256(true)".to_string(),
+                    ));
+                }
+                algorithms
+            }
+            _ => vec![default_algorithm],
+        };
 
         Ok(AccessTokenValidator {
-            decode: AccessTokenDecodeConfig {
-                decoding_key,
-                validation,
-                expected_kid,
-            },
+            issuer,
+            audiences: self.audiences,
+            leeway_seconds: leeway,
+            allowed_algorithms,
+            purpose_policy: self.purpose_policy,
+            claim_requirements: self.claim_requirements,
+            key_resolver,
+            expected_kid,
+            clock: self.clock,
             scope_matcher: self.scope_matcher,
+            bearer_parse_mode: self.bearer_parse_mode,
         })
     }
 }
@@ -165,13 +263,14 @@ impl AccessTokenValidator {
 
     /// Validates a raw access token and returns the authenticated user.
     pub fn authenticate_access_token(&self, token: &str) -> AuthResult<AuthUser> {
-        let claims = decode_access_token_claims(token, &self.decode)?;
+        let decode_config = self.decode_config_for_token(token)?;
+        let claims = decode_access_token_claims(token, &decode_config)?;
         access_token_claims_to_user(claims)
     }
 
-    /// Validates a bearer value with or without the `Bearer ` prefix.
+    /// Validates a bearer value according to the configured parse mode.
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
-        let token = strip_bearer_prefix(bearer_or_token)?;
+        let token = strip_bearer_prefix_with_mode(bearer_or_token, self.bearer_parse_mode)?;
         self.authenticate_access_token(token)
     }
 
@@ -236,6 +335,49 @@ impl AccessTokenValidator {
             .ok_or(AuthError::MissingConnectionInitAuth)?;
         self.authenticate_bearer(token)
     }
+
+    fn decode_config_for_token(&self, token: &str) -> AuthResult<AccessTokenDecodeConfig> {
+        let header = decode_header(token).map_err(|_| AuthError::InvalidAccessToken)?;
+        if !self.allowed_algorithms.contains(&header.alg) {
+            return Err(AuthError::InvalidAccessToken);
+        }
+        if let Some(expected_kid) = &self.expected_kid {
+            match header.kid.as_deref() {
+                Some(actual) if actual == expected_kid => {}
+                _ => return Err(AuthError::InvalidAccessToken),
+            }
+        }
+
+        let resolved = self.key_resolver.resolve(header.kid.as_deref())?;
+        if !self.allowed_algorithms.contains(&resolved.algorithm) {
+            return Err(AuthError::InvalidAccessToken);
+        }
+
+        let mut validation = Validation::new(resolved.algorithm);
+        validation.algorithms = self.allowed_algorithms.clone();
+        validation.set_issuer(std::slice::from_ref(&self.issuer));
+        validation.set_audience(&self.audiences);
+        validation.leeway = self.leeway_seconds;
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.required_spec_claims.extend(
+            ["exp", "iat", "iss", "aud", "sub"]
+                .into_iter()
+                .map(str::to_string),
+        );
+
+        Ok(AccessTokenDecodeConfig {
+            decoding_key: resolved.decoding_key,
+            validation,
+            // Kid already enforced above / by resolver.
+            expected_kid: None,
+            leeway_seconds: self.leeway_seconds,
+            purpose_policy: self.purpose_policy,
+            claim_requirements: self.claim_requirements.clone(),
+            clock: self.clock.clone(),
+            allowed_algorithms: self.allowed_algorithms.clone(),
+        })
+    }
 }
 
 fn required_non_empty(value: Option<String>, name: &str) -> AuthResult<String> {
@@ -249,44 +391,42 @@ fn required_non_empty(value: Option<String>, name: &str) -> AuthResult<String> {
     Ok(value)
 }
 
-fn build_decoding_key(
-    key_material: ValidatorKeyMaterial,
+fn build_key_resolver(
+    key_material: Option<ValidatorKeyMaterial>,
+    key_resolver: Option<Arc<dyn AccessTokenKeyResolver>>,
     key_id: Option<String>,
     accept_hs256: bool,
-) -> AuthResult<(Algorithm, DecodingKey, Option<String>)> {
+) -> AuthResult<(Algorithm, Arc<dyn AccessTokenKeyResolver>, Option<String>)> {
+    if let Some(resolver) = key_resolver {
+        let algorithm = resolver
+            .resolve(key_id.as_deref())
+            .map(|key| key.algorithm)
+            .unwrap_or(Algorithm::RS256);
+        return Ok((algorithm, resolver, key_id));
+    }
+
     match key_material {
-        ValidatorKeyMaterial::Rs256PublicPem(public_key_pem) => {
-            let key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes()).map_err(|_| {
-                AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string())
-            })?;
-            Ok((Algorithm::RS256, key, key_id))
+        Some(ValidatorKeyMaterial::Rs256PublicPem(public_key_pem)) => {
+            let resolver = Arc::new(StaticRs256Key::from_pem(&public_key_pem, key_id.clone())?)
+                as Arc<dyn AccessTokenKeyResolver>;
+            Ok((Algorithm::RS256, resolver, key_id))
         }
-        ValidatorKeyMaterial::JwksJson(jwks_json) => {
-            let jwks: JwkSet = serde_json::from_str(&jwks_json).map_err(|_| {
-                AuthError::InvalidConfiguration("invalid JWKS JSON document".to_string())
-            })?;
-            let (jwk, expected_kid) = match key_id {
-                Some(key_id) => {
-                    let jwk = jwks.find(&key_id).ok_or_else(|| {
-                        AuthError::InvalidConfiguration("JWKS key_id was not found".to_string())
-                    })?;
-                    (jwk, Some(key_id))
-                }
-                None if jwks.keys.len() == 1 => {
-                    let jwk = &jwks.keys[0];
-                    (jwk, jwk.common.key_id.clone())
-                }
-                None => {
-                    return Err(AuthError::InvalidConfiguration(
+        Some(ValidatorKeyMaterial::JwksJson(jwks_json)) => {
+            let resolver = Arc::new(StaticJwksKeySet::from_jwks_json(&jwks_json)?)
+                as Arc<dyn AccessTokenKeyResolver>;
+            // Fail fast for multi-key sets without kid when no token is available.
+            if key_id.is_none() {
+                let _ = resolver.resolve(None).map_err(|_| {
+                    AuthError::InvalidConfiguration(
                         "validator key_id is required for multi-key JWKS".to_string(),
-                    ));
-                }
-            };
-            let key = DecodingKey::from_jwk(jwk)
-                .map_err(|_| AuthError::InvalidConfiguration("unsupported JWKS key".to_string()))?;
-            Ok((Algorithm::RS256, key, expected_kid))
+                    )
+                })?;
+            } else {
+                let _ = resolver.resolve(key_id.as_deref())?;
+            }
+            Ok((Algorithm::RS256, resolver, key_id))
         }
-        ValidatorKeyMaterial::Hs256Secret(secret) => {
+        Some(ValidatorKeyMaterial::Hs256Secret(secret)) => {
             if !accept_hs256 {
                 return Err(AuthError::InvalidConfiguration(
                     "HS256 validation requires accept_hs256(true)".to_string(),
@@ -297,11 +437,12 @@ fn build_decoding_key(
                     "HS256 secret must be at least 32 bytes".to_string(),
                 ));
             }
-            Ok((
-                Algorithm::HS256,
-                DecodingKey::from_secret(secret.as_bytes()),
-                key_id,
-            ))
+            let resolver = Arc::new(StaticHs256Key::from_secret(&secret, key_id.clone())?)
+                as Arc<dyn AccessTokenKeyResolver>;
+            Ok((Algorithm::HS256, resolver, key_id))
         }
+        None => Err(AuthError::InvalidConfiguration(
+            "validator key material is required".to_string(),
+        )),
     }
 }
