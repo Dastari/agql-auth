@@ -9,6 +9,7 @@ mod recovery;
 mod scope_match;
 mod scopes;
 mod totp;
+mod validator;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

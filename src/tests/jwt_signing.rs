@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::{MemoryRefreshTokenStore, MemoryUserStore, TEST_HS256_SECRET, metadata, stored_user};
 use crate::prelude::*;
 
-const RSA_PRIVATE_KEY_A: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+pub(super) const RSA_PRIVATE_KEY_A: &str = r#"-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTL
 UTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2V
 rUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8H
@@ -39,7 +39,7 @@ UvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8
 oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
 -----END RSA PRIVATE KEY-----"#;
 
-const RSA_PUBLIC_KEY_A: &str = r#"-----BEGIN RSA PUBLIC KEY-----
+pub(super) const RSA_PUBLIC_KEY_A: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBCgKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4
 l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2VrUyW
 yj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG
@@ -48,7 +48,7 @@ QzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+j8MtvIj812dkS4QMiRVN/by2h
 3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQAB
 -----END RSA PUBLIC KEY-----"#;
 
-const RSA_PRIVATE_KEY_B: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+pub(super) const RSA_PRIVATE_KEY_B: &str = r#"-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAnzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA+kzeVOVpVWw
 kWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr/Mr
 m/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEi
@@ -76,7 +76,7 @@ y18Ae9n7dHVueyslrb6weq7dTkYDi3iOYRW8HRkIQh06wEdbxt0shTzAJvvCQfrB
 jg/3747WSsf/zBTcHihTRBdAv6OmdhV4/dD5YBfLAkLrd+mX7iE=
 -----END RSA PRIVATE KEY-----"#;
 
-const RSA_PUBLIC_KEY_B: &str = r#"-----BEGIN PUBLIC KEY-----
+pub(super) const RSA_PUBLIC_KEY_B: &str = r#"-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv
 vkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc
 aT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy

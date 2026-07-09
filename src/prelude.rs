@@ -49,3 +49,4 @@ pub use crate::stores::{
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
     RefreshTokenStore, TotpReplayStore, UserStore,
 };
+pub use crate::validator::{AccessTokenValidator, AccessTokenValidatorBuilder};

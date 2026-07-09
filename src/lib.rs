@@ -79,6 +79,7 @@ mod session;
 mod stores;
 mod token_decode;
 mod util;
+mod validator;
 
 #[cfg(test)]
 mod tests;
@@ -129,5 +130,6 @@ pub use stores::{
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
     RefreshTokenStore, TotpReplayStore, UserStore,
 };
+pub use validator::{AccessTokenValidator, AccessTokenValidatorBuilder};
 
 pub type AuthResult<T> = Result<T, AuthError>;
