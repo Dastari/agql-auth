@@ -12,9 +12,7 @@ use argon2::password_hash::{
 use async_graphql::Data;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
-};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs8::DecodePublicKey;
@@ -34,38 +32,20 @@ use crate::models::{
 };
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
+use crate::token_decode::{
+    ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
+    access_token_claims_to_user, decode_access_token_claims,
+};
 use crate::util::{
     extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
-    hash_refresh_token, map_access_token_decode_error, map_purpose_token_decode_error,
-    strip_bearer_prefix,
+    hash_refresh_token, map_purpose_token_decode_error, strip_bearer_prefix,
 };
 
 const MIN_HS256_SECRET_BYTES: usize = 32;
-const ACCESS_TOKEN_TYPE: &str = "access";
-const ACCESS_TOKEN_PURPOSE: &str = "access_token";
 const PASSWORD_RESET_TOKEN_TYPE: &str = "password_reset";
 const PASSWORD_RESET_TOKEN_PURPOSE: &str = "password_reset";
 const PURPOSE_TOKEN_TYPE: &str = "purpose_token";
 const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWdxbC1hdXRoLWR1bW15LXNsdA$8ClNuSX6M3l/dalOcz8a117s1wLv/AbzbJiKA7dS4Ak";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AccessTokenClaims {
-    #[serde(default)]
-    typ: Option<String>,
-    sub: String,
-    sid: String,
-    roles: Vec<String>,
-    #[serde(default)]
-    scopes: Vec<String>,
-    #[serde(default)]
-    ctx: SessionContext,
-    iss: String,
-    aud: String,
-    exp: i64,
-    iat: i64,
-    #[serde(default)]
-    purpose: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PasswordResetTokenClaims {
@@ -360,29 +340,8 @@ where
 
     /// Validates a local JWT access token and returns the authenticated user.
     pub fn authenticate_access_token(&self, token: &str) -> AuthResult<AuthUser> {
-        self.validate_local_jwt_header(token)
-            .map_err(|_| AuthError::InvalidAccessToken)?;
-        let token_data = decode::<AccessTokenClaims>(token, &self.decoding_key, &self.validation)
-            .map_err(map_access_token_decode_error)?;
-        let claims = token_data.claims;
-        if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
-            return Err(AuthError::AccessTokenExpired);
-        }
-        if !matches!(claims.typ.as_deref(), None | Some(ACCESS_TOKEN_TYPE)) {
-            return Err(AuthError::InvalidAccessToken);
-        }
-        if !matches!(claims.purpose.as_deref(), None | Some(ACCESS_TOKEN_PURPOSE)) {
-            return Err(AuthError::InvalidAccessToken);
-        }
-        let session_id = Uuid::parse_str(&claims.sid).map_err(|_| AuthError::InvalidAccessToken)?;
-
-        Ok(AuthUser {
-            user_id: claims.sub,
-            session_id,
-            roles: claims.roles,
-            scopes: claims.scopes,
-            session: claims.ctx,
-        })
+        let claims = decode_access_token_claims(token, &self.access_token_decode_config())?;
+        access_token_claims_to_user(claims)
     }
 
     /// Validates a bearer token with or without the `Bearer ` prefix.
@@ -676,7 +635,8 @@ where
     }
 
     pub(super) fn validate_local_jwt_header(&self, token: &str) -> AuthResult<()> {
-        let header = decode_header(token).map_err(|_| AuthError::InvalidAccessToken)?;
+        let header =
+            jsonwebtoken::decode_header(token).map_err(|_| AuthError::InvalidAccessToken)?;
         if header.alg != self.signing_algorithm {
             return Err(AuthError::InvalidAccessToken);
         }
@@ -689,6 +649,14 @@ where
         }
 
         Ok(())
+    }
+
+    pub(super) fn access_token_decode_config(&self) -> AccessTokenDecodeConfig {
+        AccessTokenDecodeConfig {
+            decoding_key: self.decoding_key.clone(),
+            validation: self.validation.clone(),
+            expected_kid: self.signing_key_id.clone(),
+        }
     }
 
     fn validation_for_audience(&self, audience: &str) -> Validation {

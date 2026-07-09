@@ -76,6 +76,7 @@ mod scopes;
 mod service;
 mod session;
 mod stores;
+mod token_decode;
 mod util;
 
 #[cfg(test)]
