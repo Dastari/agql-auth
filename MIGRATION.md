@@ -166,6 +166,9 @@ let validator = AccessTokenValidator::builder()
 
 ### Golden Vectors
 
+Canonical vectors are published in
+[`testdata/scope_match_golden.json`](testdata/scope_match_golden.json).
+
 | # | Granted | Required | Expected |
 |---|---------|----------|----------|
 | 1 | `a.b.c.d` | `a.b.c.d` | allow |
@@ -174,7 +177,7 @@ let validator = AccessTokenValidator::builder()
 | 4 | `a.b.*` | `a.b.c.d` | allow |
 | 5 | `a.b.*` | `a.bc.d` | deny |
 | 6 | `a.b.*` | `a.b` | deny |
-| 7 | `*` | `anything.at.all` | allow |
+| 7 | `*` | `anything.at.all` | deny (default) |
 | 8 | `a.b*` | `a.bc` | allow |
 | 9 | `a.*.d` | `a.c.d` | allow |
 | 10 | `a.*.d` | `a.c.x.d` | deny |
@@ -189,9 +192,43 @@ let validator = AccessTokenValidator::builder()
 | 19 | empty granted set | `a.b.c` | deny |
 | 20 | `a.b.c.read` | `a.b.c.read.extra` | deny |
 
-Rows 7 and 8 are legacy-compatible hierarchical matcher behavior. Hosts that
-do not want bare-star universal grants or raw partial-prefix grants should not
-issue those grants or should provide a custom `ScopeMatch`.
+Bare `*` is denied unless `allow_universal_wildcard = true`. Super-scopes remain
+empty unless configured.
+
+## Public GraphQL Errors
+
+Before:
+
+```text
+message included OIDC/store internal detail strings
+```
+
+After:
+
+```rust
+assert_eq!(err.public_code(), "AUTH_SERVICE_UNAVAILABLE");
+assert_eq!(err.public_message(), "authentication service unavailable");
+// GraphQL ErrorExtensions uses only public_message + code
+```
+
+## AuthUser Construction
+
+Add the new field (or rely on struct update / default in tests):
+
+```rust
+AuthUser {
+    user_id,
+    session_id,
+    roles,
+    scopes,
+    session,
+    token_claims: Default::default(),
+}
+```
+
+## Access-Token-Only TTL Bound
+
+Custom TTLs must be `<= AuthConfig::max_access_token_ttl` (default 24 hours).
 
 ## Channel Identity
 

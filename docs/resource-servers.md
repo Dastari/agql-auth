@@ -33,10 +33,27 @@ let validator = AccessTokenValidator::builder()
     .build()?;
 ```
 
-`AuthService` and `AccessTokenValidator` agree on the access-token claim shape:
-`typ`, `purpose`, `iss`, `aud`, `sub`, `sid`, `roles`, `scopes`, `ctx`, `exp`,
-and `iat`. New access tokens carry `typ = "access"` and
-`purpose = "access_token"`; legacy tokens missing those claims still validate.
+`AuthService` and `AccessTokenValidator` share one decode core and agree on the
+access-token claim shape: `typ`, `purpose`, `iss`, `aud`, `sub`, `sid`, `roles`,
+`scopes`, `ctx`, `exp`, `iat`, optional `nbf`, and optional multi-tenant metadata
+(`jti`, `tenant_id`, `organization_id`, `session_family_id`, `actor`, `auth_time`,
+`amr`, `acr`, `cnf`, resource binding, `correlation_id`). New access tokens carry
+`typ = "access"`, `purpose = "access_token"`, and a unique `jti`. Legacy tokens
+missing purpose still validate under the default purpose policy.
+
+## Validation Policy Highlights
+
+- RS256 by default; explicit algorithm allowlist via `allowed_algorithms`
+- Issuer and audience validation (including multi-audience tokens)
+- Expiry and `nbf` checks with configurable bounded clock skew (`leeway_seconds`, max 300)
+- Injectable clock for deterministic tests
+- Expected `kid` where configured; multi-key JWKS resolves by token `kid`
+- HS256 only with `accept_hs256(true)`
+- Purpose policy: `AccessTokenOrLegacy` (default) or `RequireAccessToken`
+- Claim requirements via `ClaimRequirements`
+- Bearer parse mode: `BearerOrRaw` (default) or `RequireBearer`
+- Basic and other schemes are rejected
+- Missing auth is distinguishable from invalid auth; invalid never becomes anonymous
 
 ## Static JWKS JSON
 

@@ -51,9 +51,11 @@ Defaults:
 - `separator = '.'`
 - `wildcard = "*"`
 - `wildcard_matches_multi_segment = true`
+- `allow_universal_wildcard = false`
 - `super_scopes = []`
 
-No hidden admin scope is configured by the crate.
+No hidden admin scope is configured by the crate. Scope comparison is
+**case-sensitive**.
 
 ## Normative Algorithm
 
@@ -61,47 +63,38 @@ For `matches(granted, required)`:
 
 1. If `granted` is configured in `super_scopes`, allow.
 2. If `granted == required`, allow.
-3. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
+3. If `granted` equals the bare wildcard, allow only when
+   `allow_universal_wildcard` is true.
+4. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
    the trailing wildcard and require `required.starts_with(prefix)`.
-4. If `granted` ends with the wildcard and multi-segment mode is disabled, the
+5. If `granted` ends with the wildcard and multi-segment mode is disabled, the
    trailing wildcard consumes exactly one remaining segment.
-5. Otherwise split both strings on the separator. Segment counts must be equal,
+6. Otherwise split both strings on the separator. Segment counts must be equal,
    and each granted segment must equal the required segment or equal the
-   wildcard.
+   wildcard (middle wildcards are whole segments only).
 
 Wildcards are interpreted only in the granted scope. The required scope is
-treated literally.
+treated literally. Leading wildcards and partial middle globs are not given
+special product-specific meaning beyond the rules above.
 
 ## Golden Vectors
 
-These vectors are part of the conformance suite:
+Language-neutral JSON vectors live at
+[`testdata/scope_match_golden.json`](../testdata/scope_match_golden.json) so
+non-Rust routers can implement identical behavior.
+
+Summary:
 
 | # | Granted | Required | Expected |
 |---|---------|----------|----------|
 | 1 | `a.b.c.d` | `a.b.c.d` | allow |
 | 2 | `a.b.c.read` | `a.b.c.write` | deny |
 | 3 | `a.b.*` | `a.b.c` | allow |
-| 4 | `a.b.*` | `a.b.c.d` | allow |
-| 5 | `a.b.*` | `a.bc.d` | deny |
-| 6 | `a.b.*` | `a.b` | deny |
-| 7 | `*` | `anything.at.all` | allow |
-| 8 | `a.b*` | `a.bc` | allow |
-| 9 | `a.*.d` | `a.c.d` | allow |
-| 10 | `a.*.d` | `a.c.x.d` | deny |
-| 11 | `a.*.d` | `a.d` | deny |
-| 12 | `a.b.*.read` | `a.b.c.write` | deny |
-| 13 | `a.b.*.read` | `a.b.c.read` | allow |
-| 14 | `a.b.*` | `a.b.*` | allow |
-| 15 | `a.b.*` | `a.b.*.read` | allow |
-| 16 | `x.*` | `y.b.c` | deny |
-| 17 | `a.b.c.read` | `a.*.c.read` | deny |
-| 18 | `a.b.c.d` | `a.b.c.d.e` | deny |
-| 19 | empty granted set | `a.b.c` | deny |
-| 20 | `a.b.c.read` | `a.b.c.read.extra` | deny |
-
-Rows 7 and 8 intentionally preserve legacy compatibility for the hierarchical
-matcher. Hosts that do not want bare `*` or raw partial-prefix behavior should
-avoid issuing those grants or provide a custom matcher.
+| 4 | `a.b.*` | `a.b.c.d` | allow (multi-segment) |
+| 7 | `*` | `anything.at.all` | deny by default |
+| 30 | `*` | `orders.read` | allow when `allow_universal_wildcard` |
+| 25 | `orders.*` | `orders.items.read` | deny when single-segment mode |
+| 29 | `platform.admin` | `orders.delete` | allow only as configured super-scope |
 
 ## Super-Scopes
 
