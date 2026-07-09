@@ -76,12 +76,16 @@
 
 mod api_tokens;
 mod channel;
+mod claims;
+mod clock;
 mod combined;
 mod config;
+mod decision;
 mod errors;
 mod grant;
 mod graphql;
 mod guards;
+mod keys;
 mod models;
 mod oidc;
 pub mod prelude;
@@ -91,6 +95,7 @@ mod service;
 mod session;
 mod stores;
 mod token_decode;
+mod token_status;
 mod util;
 mod validator;
 
@@ -99,10 +104,19 @@ mod tests;
 
 pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use channel::ChannelIdentity;
+pub use claims::{
+    AccessTokenMetadata, ActorIdentity, ClaimRequirementError, ClaimRequirements,
+    ConfirmationClaims,
+};
+pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
+};
+pub use decision::{
+    AuthorizationDecision, AuthorizationDecisionHook, AuthorizationOutcome,
+    AuthorizationReasonCode, NoopAuthorizationDecisionHook, emit_decision,
 };
 pub use errors::AuthError;
 pub use grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
@@ -116,6 +130,10 @@ pub use guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
     RequireAnyRole, RequireAnyScope, RequireAuth, RequireChannelScheme, RequirePrincipal,
     RequirePrincipalScope, RequireScope,
+};
+pub use keys::{
+    AccessTokenKeyResolver, KeyRefreshPolicy, ResolvedKey, RotatingJwksKeySet, StaleKeyPolicy,
+    StaticHs256Key, StaticJwksKeySet, StaticRs256Key,
 };
 pub use models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
@@ -145,6 +163,11 @@ pub use stores::{
     ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
     RefreshTokenStore, TotpReplayStore, UserStore,
+};
+pub use token_decode::{BearerParseMode, PurposePolicy};
+pub use token_status::{
+    AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,
+    TokenStatusChecker, TokenStatusRequest,
 };
 pub use validator::{AccessTokenValidator, AccessTokenValidatorBuilder};
 

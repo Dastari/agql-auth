@@ -94,11 +94,12 @@ async fn issue_access_token_only_rejects_empty_subject_and_non_positive_ttl() {
 }
 
 fn request(ttl: Option<Duration>) -> AccessTokenOnlyRequest {
-    AccessTokenOnlyRequest {
-        user_id: "device-user-1".to_string(),
-        roles: vec!["Device".to_string()],
-        scopes: vec!["devices.read".to_string(), "devices.write".to_string()],
-        session: SessionContext::for_auth_method(AuthMethod::ServiceToken),
-        ttl,
-    }
+    let mut request = AccessTokenOnlyRequest::new(
+        "device-user-1",
+        vec!["Device".to_string()],
+        vec!["devices.read".to_string(), "devices.write".to_string()],
+        SessionContext::for_auth_method(AuthMethod::ServiceToken),
+    );
+    request.ttl = ttl;
+    request
 }

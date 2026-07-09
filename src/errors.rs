@@ -3,8 +3,9 @@ use thiserror::Error;
 
 /// Error type returned by `agql-auth` APIs.
 ///
-/// The implementation also maps each variant to an `async-graphql` extension
-/// code through [`async_graphql::ErrorExtensions`].
+/// Internal variants may carry diagnostic detail for server-side tracing.
+/// GraphQL clients receive only [`Self::public_code`] and
+/// [`Self::public_message`] through [`ErrorExtensions`].
 #[derive(Debug, Error)]
 pub enum AuthError {
     /// Principal/password did not match.
@@ -25,6 +26,9 @@ pub enum AuthError {
     /// Access token is expired.
     #[error("access token expired")]
     AccessTokenExpired,
+    /// Token or session has been revoked.
+    #[error("token revoked")]
+    TokenRevoked,
     /// Purpose token failed validation.
     #[error("invalid purpose token")]
     InvalidPurposeToken,
@@ -107,6 +111,8 @@ pub enum AuthError {
     #[error("oauth state replay detected")]
     OAuthStateReplayed,
     /// OIDC discovery failed.
+    ///
+    /// The inner string is for server-side diagnostics only.
     #[error("oidc discovery failed: {0}")]
     OidcDiscovery(String),
     /// OIDC token exchange failed.
@@ -142,65 +148,137 @@ pub enum AuthError {
     /// Host store operation failed.
     #[error("storage error: {0}")]
     Store(String),
+    /// Authentication dependency is temporarily unavailable.
+    #[error("authentication service unavailable")]
+    AuthServiceUnavailable,
     /// Legacy configuration error.
     #[error("configuration error: {0}")]
     Config(String),
 }
 
+impl AuthError {
+    /// Stable public error code suitable for clients and contracts.
+    pub fn public_code(&self) -> &'static str {
+        match self {
+            AuthError::InvalidCredentials => "INVALID_CREDENTIALS",
+            AuthError::Unauthenticated => "UNAUTHENTICATED",
+            AuthError::Forbidden => "FORBIDDEN",
+            AuthError::InvalidBearerToken => "INVALID_BEARER_TOKEN",
+            AuthError::InvalidAccessToken => "INVALID_ACCESS_TOKEN",
+            AuthError::AccessTokenExpired => "ACCESS_TOKEN_EXPIRED",
+            AuthError::TokenRevoked => "TOKEN_REVOKED",
+            AuthError::InvalidPurposeToken => "INVALID_PURPOSE_TOKEN",
+            AuthError::PurposeTokenExpired => "PURPOSE_TOKEN_EXPIRED",
+            AuthError::InvalidApiToken => "INVALID_API_TOKEN",
+            AuthError::ApiTokenExpired => "API_TOKEN_EXPIRED",
+            AuthError::ApiTokenRevoked => "TOKEN_REVOKED",
+            AuthError::InvalidRefreshToken => "INVALID_REFRESH_TOKEN",
+            AuthError::RefreshTokenExpired => "REFRESH_TOKEN_EXPIRED",
+            AuthError::RefreshTokenReplayDetected => "REFRESH_TOKEN_REPLAY_DETECTED",
+            AuthError::UserDisabled => "USER_DISABLED",
+            AuthError::AuthThrottled { .. } | AuthError::AuthLocked { .. } => "RATE_LIMITED",
+            AuthError::InvalidPasswordResetToken => "INVALID_PASSWORD_RESET_TOKEN",
+            AuthError::PasswordResetTokenExpired => "PASSWORD_RESET_TOKEN_EXPIRED",
+            AuthError::PasswordResetTokenReplayed => "PASSWORD_RESET_TOKEN_REPLAYED",
+            AuthError::InvalidLoginChallenge => "INVALID_LOGIN_CHALLENGE",
+            AuthError::LoginChallengeExpired => "LOGIN_CHALLENGE_EXPIRED",
+            AuthError::LoginChallengeReplayed => "LOGIN_CHALLENGE_REPLAYED",
+            AuthError::LoginChallengeAttemptsExhausted => "LOGIN_CHALLENGE_ATTEMPTS_EXHAUSTED",
+            AuthError::InvalidLoginCode => "INVALID_LOGIN_CODE",
+            AuthError::InvalidTotpCode => "INVALID_TOTP_CODE",
+            AuthError::TotpCodeReplayed => "TOTP_CODE_REPLAYED",
+            AuthError::InvalidTotpSecret => "INVALID_TOTP_SECRET",
+            AuthError::InvalidOAuthState => "INVALID_OAUTH_STATE",
+            AuthError::OAuthStateExpired => "OAUTH_STATE_EXPIRED",
+            AuthError::OAuthStateReplayed => "OAUTH_STATE_REPLAYED",
+            AuthError::OidcDiscovery(_) => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::OidcTokenExchange(_) => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::OidcCallback(_) => "UNAUTHENTICATED",
+            AuthError::OidcTokenValidation(_) => "UNAUTHENTICATED",
+            AuthError::ExternalLoginRejected(_) => "FORBIDDEN",
+            AuthError::JwksUnsupported => "INVALID_CONFIGURATION",
+            AuthError::InvalidConfiguration(_) => "INVALID_CONFIGURATION",
+            AuthError::MissingAuthorizationData => "UNAUTHENTICATED",
+            AuthError::MissingConnectionInitAuth => "UNAUTHENTICATED",
+            AuthError::TokenCreation(_) => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::PasswordHashing(_) => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::Store(_) | AuthError::AuthServiceUnavailable => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::Config(_) => "INVALID_CONFIGURATION",
+        }
+    }
+
+    /// Safe public message that never includes internal diagnostics.
+    pub fn public_message(&self) -> &'static str {
+        match self {
+            AuthError::InvalidCredentials => "invalid credentials",
+            AuthError::Unauthenticated
+            | AuthError::MissingAuthorizationData
+            | AuthError::MissingConnectionInitAuth
+            | AuthError::OidcCallback(_)
+            | AuthError::OidcTokenValidation(_) => "unauthenticated",
+            AuthError::Forbidden | AuthError::ExternalLoginRejected(_) => "forbidden",
+            AuthError::InvalidBearerToken => "invalid bearer token",
+            AuthError::InvalidAccessToken => "invalid access token",
+            AuthError::AccessTokenExpired => "access token expired",
+            AuthError::TokenRevoked => "token revoked",
+            AuthError::InvalidPurposeToken => "invalid purpose token",
+            AuthError::PurposeTokenExpired => "purpose token expired",
+            AuthError::InvalidApiToken => "invalid api token",
+            AuthError::ApiTokenExpired => "api token expired",
+            AuthError::ApiTokenRevoked => "token revoked",
+            AuthError::InvalidRefreshToken => "invalid refresh token",
+            AuthError::RefreshTokenExpired => "refresh token expired",
+            AuthError::RefreshTokenReplayDetected => "refresh token replay detected",
+            AuthError::UserDisabled => "user is disabled",
+            AuthError::AuthThrottled { .. } | AuthError::AuthLocked { .. } => "rate limited",
+            AuthError::InvalidPasswordResetToken => "invalid password reset token",
+            AuthError::PasswordResetTokenExpired => "password reset token expired",
+            AuthError::PasswordResetTokenReplayed => "password reset token replay detected",
+            AuthError::InvalidLoginChallenge => "invalid login challenge",
+            AuthError::LoginChallengeExpired => "login challenge expired",
+            AuthError::LoginChallengeReplayed => "login challenge replay detected",
+            AuthError::LoginChallengeAttemptsExhausted => "login challenge attempts exhausted",
+            AuthError::InvalidLoginCode => "invalid login challenge code",
+            AuthError::InvalidTotpCode => "invalid totp code",
+            AuthError::TotpCodeReplayed => "totp code replay detected",
+            AuthError::InvalidTotpSecret => "invalid totp secret",
+            AuthError::InvalidOAuthState => "invalid oauth state",
+            AuthError::OAuthStateExpired => "oauth state expired",
+            AuthError::OAuthStateReplayed => "oauth state replay detected",
+            AuthError::OidcDiscovery(_)
+            | AuthError::OidcTokenExchange(_)
+            | AuthError::TokenCreation(_)
+            | AuthError::PasswordHashing(_)
+            | AuthError::Store(_)
+            | AuthError::AuthServiceUnavailable => "authentication service unavailable",
+            AuthError::JwksUnsupported
+            | AuthError::InvalidConfiguration(_)
+            | AuthError::Config(_) => "invalid configuration",
+        }
+    }
+
+    /// Internal diagnostic detail suitable for server-side tracing only.
+    pub fn internal_detail(&self) -> Option<&str> {
+        match self {
+            AuthError::OidcDiscovery(detail)
+            | AuthError::OidcTokenExchange(detail)
+            | AuthError::OidcCallback(detail)
+            | AuthError::OidcTokenValidation(detail)
+            | AuthError::ExternalLoginRejected(detail)
+            | AuthError::InvalidConfiguration(detail)
+            | AuthError::TokenCreation(detail)
+            | AuthError::PasswordHashing(detail)
+            | AuthError::Store(detail)
+            | AuthError::Config(detail) => Some(detail.as_str()),
+            _ => None,
+        }
+    }
+}
+
 impl ErrorExtensions for AuthError {
     fn extend(&self) -> async_graphql::Error {
-        async_graphql::Error::new(self.to_string()).extend_with(|_, e| {
-            e.set(
-                "code",
-                match self {
-                    AuthError::InvalidCredentials => "INVALID_CREDENTIALS",
-                    AuthError::Unauthenticated => "UNAUTHENTICATED",
-                    AuthError::Forbidden => "FORBIDDEN",
-                    AuthError::InvalidBearerToken => "INVALID_BEARER_TOKEN",
-                    AuthError::InvalidAccessToken => "INVALID_ACCESS_TOKEN",
-                    AuthError::AccessTokenExpired => "ACCESS_TOKEN_EXPIRED",
-                    AuthError::InvalidPurposeToken => "INVALID_PURPOSE_TOKEN",
-                    AuthError::PurposeTokenExpired => "PURPOSE_TOKEN_EXPIRED",
-                    AuthError::InvalidApiToken => "INVALID_API_TOKEN",
-                    AuthError::ApiTokenExpired => "API_TOKEN_EXPIRED",
-                    AuthError::ApiTokenRevoked => "API_TOKEN_REVOKED",
-                    AuthError::InvalidRefreshToken => "INVALID_REFRESH_TOKEN",
-                    AuthError::RefreshTokenExpired => "REFRESH_TOKEN_EXPIRED",
-                    AuthError::RefreshTokenReplayDetected => "REFRESH_TOKEN_REPLAY_DETECTED",
-                    AuthError::UserDisabled => "USER_DISABLED",
-                    AuthError::AuthThrottled { .. } => "AUTH_THROTTLED",
-                    AuthError::AuthLocked { .. } => "AUTH_LOCKED",
-                    AuthError::InvalidPasswordResetToken => "INVALID_PASSWORD_RESET_TOKEN",
-                    AuthError::PasswordResetTokenExpired => "PASSWORD_RESET_TOKEN_EXPIRED",
-                    AuthError::PasswordResetTokenReplayed => "PASSWORD_RESET_TOKEN_REPLAYED",
-                    AuthError::InvalidLoginChallenge => "INVALID_LOGIN_CHALLENGE",
-                    AuthError::LoginChallengeExpired => "LOGIN_CHALLENGE_EXPIRED",
-                    AuthError::LoginChallengeReplayed => "LOGIN_CHALLENGE_REPLAYED",
-                    AuthError::LoginChallengeAttemptsExhausted => {
-                        "LOGIN_CHALLENGE_ATTEMPTS_EXHAUSTED"
-                    }
-                    AuthError::InvalidLoginCode => "INVALID_LOGIN_CODE",
-                    AuthError::InvalidTotpCode => "INVALID_TOTP_CODE",
-                    AuthError::TotpCodeReplayed => "TOTP_CODE_REPLAYED",
-                    AuthError::InvalidTotpSecret => "INVALID_TOTP_SECRET",
-                    AuthError::InvalidOAuthState => "INVALID_OAUTH_STATE",
-                    AuthError::OAuthStateExpired => "OAUTH_STATE_EXPIRED",
-                    AuthError::OAuthStateReplayed => "OAUTH_STATE_REPLAYED",
-                    AuthError::OidcDiscovery(_) => "OIDC_DISCOVERY_FAILED",
-                    AuthError::OidcTokenExchange(_) => "OIDC_TOKEN_EXCHANGE_FAILED",
-                    AuthError::OidcCallback(_) => "OIDC_CALLBACK_FAILED",
-                    AuthError::OidcTokenValidation(_) => "OIDC_TOKEN_VALIDATION_FAILED",
-                    AuthError::ExternalLoginRejected(_) => "EXTERNAL_LOGIN_REJECTED",
-                    AuthError::JwksUnsupported => "JWKS_UNSUPPORTED",
-                    AuthError::InvalidConfiguration(_) => "INVALID_CONFIGURATION",
-                    AuthError::MissingAuthorizationData => "MISSING_AUTHORIZATION_DATA",
-                    AuthError::MissingConnectionInitAuth => "MISSING_CONNECTION_INIT_AUTH",
-                    AuthError::TokenCreation(_) => "TOKEN_CREATION_FAILED",
-                    AuthError::PasswordHashing(_) => "PASSWORD_HASHING_FAILED",
-                    AuthError::Store(_) => "STORE_ERROR",
-                    AuthError::Config(_) => "CONFIG_ERROR",
-                },
-            );
+        async_graphql::Error::new(self.public_message()).extend_with(|_, e| {
+            e.set("code", self.public_code());
             match self {
                 AuthError::AuthThrottled {
                     retry_after_seconds,

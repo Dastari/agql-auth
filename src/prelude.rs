@@ -5,10 +5,17 @@
 
 pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use crate::channel::ChannelIdentity;
+pub use crate::claims::{
+    AccessTokenMetadata, ActorIdentity, ClaimRequirements, ConfirmationClaims,
+};
+pub use crate::clock::{Clock, FixedClock, SystemClock};
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
+};
+pub use crate::decision::{
+    AuthorizationDecision, AuthorizationDecisionHook, AuthorizationOutcome, AuthorizationReasonCode,
 };
 pub use crate::errors::AuthError;
 pub use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
@@ -22,6 +29,10 @@ pub use crate::guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
     RequireAnyRole, RequireAnyScope, RequireAuth, RequireChannelScheme, RequirePrincipal,
     RequirePrincipalScope, RequireScope,
+};
+pub use crate::keys::{
+    AccessTokenKeyResolver, KeyRefreshPolicy, RotatingJwksKeySet, StaleKeyPolicy, StaticJwksKeySet,
+    StaticRs256Key,
 };
 pub use crate::models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
@@ -51,5 +62,10 @@ pub use crate::stores::{
     ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
     RefreshTokenStore, TotpReplayStore, UserStore,
+};
+pub use crate::token_decode::{BearerParseMode, PurposePolicy};
+pub use crate::token_status::{
+    AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,
+    TokenStatusChecker, TokenStatusRequest,
 };
 pub use crate::validator::{AccessTokenValidator, AccessTokenValidatorBuilder};

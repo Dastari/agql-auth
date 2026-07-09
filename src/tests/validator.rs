@@ -46,11 +46,10 @@ async fn rs256_valid_token_from_auth_service_validates_one_to_one() {
         .unwrap();
 
     assert_eq!(decoded, payload.user);
-    assert_eq!(
+    assert!(
         validator
             .scope_matcher()
-            .has_scope(&decoded.scopes, "orders.read"),
-        true
+            .has_scope(&decoded.scopes, "orders.read")
     );
 }
 

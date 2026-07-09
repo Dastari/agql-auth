@@ -2,6 +2,7 @@ mod api_tokens;
 mod auth_lifecycle;
 mod challenges;
 mod channel;
+mod claims_and_status;
 mod combined;
 mod grant;
 mod graphql_transport;
