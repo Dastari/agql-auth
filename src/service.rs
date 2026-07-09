@@ -23,6 +23,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::AuthResult;
+use crate::claims::AccessTokenMetadata;
 use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
 use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
@@ -36,7 +37,7 @@ use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
 use crate::token_decode::{
     ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
-    access_token_claims_to_user, decode_access_token_claims,
+    access_token_claims_to_user, audience_claim, decode_access_token_claims,
 };
 use crate::util::{
     extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
@@ -222,9 +223,13 @@ where
         let auth_user = AuthUser {
             user_id: user.id,
             session_id,
-            roles: user.roles,
-            scopes: user.scopes,
+            roles: dedupe_stable(user.roles),
+            scopes: dedupe_stable(user.scopes),
             session: SessionContext::for_auth_method(AuthMethod::Password),
+            token_claims: AccessTokenMetadata {
+                session_family_id: Some(session_family_id.to_string()),
+                ..AccessTokenMetadata::default()
+            },
         };
 
         self.issue_auth_payload(auth_user, session_family_id, metadata)
@@ -284,18 +289,17 @@ where
         let auth_user = AuthUser {
             user_id: user.id,
             session_id: existing.session_id,
-            roles: user.roles,
-            scopes: existing.scopes.clone(),
+            roles: dedupe_stable(user.roles),
+            scopes: dedupe_stable(existing.scopes.clone()),
             session: existing.session.clone(),
+            token_claims: AccessTokenMetadata {
+                session_family_id: Some(existing.session_family_id.to_string()),
+                ..AccessTokenMetadata::default()
+            },
         };
 
-        let (new_raw_refresh_token, new_record, access_token, access_token_expires_at) = self
-            .issue_tokens_only(
-                &auth_user,
-                existing.session_family_id,
-                metadata.clone(),
-                now,
-            )
+        let (new_raw_refresh_token, new_record, access_token, access_token_expires_at, user) = self
+            .issue_tokens_only(auth_user, existing.session_family_id, metadata.clone(), now)
             .await?;
 
         let rotated = self
@@ -321,7 +325,7 @@ where
         }
 
         Ok(AuthPayload {
-            user: auth_user,
+            user,
             access_token,
             access_token_expires_at,
             refresh_token: new_raw_refresh_token,
@@ -522,14 +526,19 @@ where
         session: SessionContext,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
+        let session_family_id = Uuid::new_v4();
         let auth_user = AuthUser {
             user_id: user_id.into(),
             session_id: Uuid::new_v4(),
-            roles,
-            scopes,
+            roles: dedupe_stable(roles),
+            scopes: dedupe_stable(scopes),
             session,
+            token_claims: AccessTokenMetadata {
+                session_family_id: Some(session_family_id.to_string()),
+                ..AccessTokenMetadata::default()
+            },
         };
-        self.issue_auth_payload(auth_user, Uuid::new_v4(), metadata)
+        self.issue_auth_payload(auth_user, session_family_id, metadata)
             .await
     }
 
@@ -542,7 +551,7 @@ where
         &self,
         request: AccessTokenOnlyRequest,
     ) -> AuthResult<AccessTokenOnlyGrant> {
-        validate_access_token_only_request(&request)?;
+        validate_access_token_only_request(&request, &self.config)?;
         let now = OffsetDateTime::now_utc();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
         if ttl <= Duration::ZERO {
@@ -550,21 +559,45 @@ where
                 "access-token-only ttl must be greater than zero".to_string(),
             ));
         }
+        if ttl > self.config.max_access_token_ttl {
+            return Err(AuthError::InvalidConfiguration(
+                "access-token-only ttl exceeds configured maximum".to_string(),
+            ));
+        }
 
+        let jti = Uuid::new_v4().to_string();
         let auth_user = AuthUser {
             user_id: request.user_id,
             session_id: Uuid::new_v4(),
-            roles: request.roles,
-            scopes: request.scopes,
+            roles: dedupe_stable(request.roles),
+            scopes: dedupe_stable(request.scopes),
             session: request.session,
+            token_claims: AccessTokenMetadata {
+                jti: Some(jti),
+                tenant_id: request.tenant_id,
+                organization_id: request.organization_id,
+                session_family_id: request.session_family_id,
+                actor: request.actor,
+                auth_time: request.auth_time,
+                amr: request.amr,
+                acr: request.acr,
+                cnf: request.cnf,
+                resource_type: request.resource_type,
+                resource_id: request.resource_id,
+                correlation_id: request.correlation_id,
+                purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
+                expires_at: None,
+                additional: request.additional_claims,
+            },
         };
         let access_token_expires_at = now + ttl;
-        let access_token = self.issue_access_token(&auth_user, now, access_token_expires_at)?;
+        let (access_token, user) =
+            self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
         Ok(AccessTokenOnlyGrant {
             access_token,
             access_token_expires_at,
-            user: auth_user,
+            user,
         })
     }
 
@@ -603,8 +636,8 @@ where
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
         let now = OffsetDateTime::now_utc();
-        let (refresh_token, record, access_token, access_token_expires_at) = self
-            .issue_tokens_only(&auth_user, session_family_id, metadata, now)
+        let (refresh_token, record, access_token, access_token_expires_at, user) = self
+            .issue_tokens_only(auth_user, session_family_id, metadata, now)
             .await?;
 
         self.refresh_store
@@ -612,7 +645,7 @@ where
             .await?;
 
         Ok(AuthPayload {
-            user: auth_user,
+            user,
             access_token,
             access_token_expires_at,
             refresh_token,
@@ -622,23 +655,24 @@ where
 
     async fn issue_tokens_only(
         &self,
-        auth_user: &AuthUser,
+        auth_user: AuthUser,
         session_family_id: Uuid,
         metadata: ClientMetadata,
         now: OffsetDateTime,
-    ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime)> {
+    ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         let access_token_expires_at = now + self.config.access_token_ttl;
-        let access_token = self.issue_access_token(auth_user, now, access_token_expires_at)?;
+        let (access_token, user) =
+            self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
         let raw_refresh_token = generate_opaque_token();
         let refresh_token_expires_at = now + self.config.refresh_token_ttl;
         let refresh_record = StoredRefreshToken {
             id: Uuid::new_v4(),
-            user_id: auth_user.user_id.clone(),
-            session_id: auth_user.session_id,
+            user_id: user.user_id.clone(),
+            session_id: user.session_id,
             session_family_id,
-            scopes: auth_user.scopes.clone(),
-            session: auth_user.session.clone(),
+            scopes: user.scopes.clone(),
+            session: user.session.clone(),
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
             expires_at: refresh_token_expires_at,
@@ -654,15 +688,27 @@ where
             refresh_record,
             access_token,
             access_token_expires_at,
+            user,
         ))
     }
 
-    fn issue_access_token(
+    fn issue_access_token_with_user(
         &self,
-        auth_user: &AuthUser,
+        mut auth_user: AuthUser,
         issued_at: OffsetDateTime,
         expires_at: OffsetDateTime,
-    ) -> AuthResult<String> {
+    ) -> AuthResult<(String, AuthUser)> {
+        let jti = auth_user
+            .token_claims
+            .jti
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        auth_user.token_claims.jti = Some(jti.clone());
+        auth_user.token_claims.purpose = Some(ACCESS_TOKEN_PURPOSE.to_string());
+        // JWT exp is second-precision; keep principal metadata aligned with claims.
+        auth_user.token_claims.expires_at =
+            OffsetDateTime::from_unix_timestamp(expires_at.unix_timestamp()).ok();
+
         let claims = AccessTokenClaims {
             typ: Some(ACCESS_TOKEN_TYPE.to_string()),
             sub: auth_user.user_id.clone(),
@@ -671,13 +717,28 @@ where
             scopes: auth_user.scopes.clone(),
             ctx: auth_user.session.clone(),
             iss: self.config.issuer.clone(),
-            aud: self.config.audience.clone(),
+            aud: audience_claim(&self.config.audience),
             exp: expires_at.unix_timestamp(),
             iat: issued_at.unix_timestamp(),
+            nbf: None,
             purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
+            jti: Some(jti),
+            tenant_id: auth_user.token_claims.tenant_id.clone(),
+            organization_id: auth_user.token_claims.organization_id.clone(),
+            session_family_id: auth_user.token_claims.session_family_id.clone(),
+            actor: auth_user.token_claims.actor.clone(),
+            auth_time: auth_user.token_claims.auth_time,
+            amr: auth_user.token_claims.amr.clone(),
+            acr: auth_user.token_claims.acr.clone(),
+            cnf: auth_user.token_claims.cnf.clone(),
+            resource_type: auth_user.token_claims.resource_type.clone(),
+            resource_id: auth_user.token_claims.resource_id.clone(),
+            correlation_id: auth_user.token_claims.correlation_id.clone(),
+            additional: auth_user.token_claims.additional.clone(),
         };
 
-        self.encode_local_jwt(&claims)
+        let token = self.encode_local_jwt(&claims)?;
+        Ok((token, auth_user))
     }
 
     pub(super) fn encode_local_jwt<T>(&self, claims: &T) -> AuthResult<String>
@@ -708,11 +769,11 @@ where
     }
 
     pub(super) fn access_token_decode_config(&self) -> AccessTokenDecodeConfig {
-        AccessTokenDecodeConfig {
-            decoding_key: self.decoding_key.clone(),
-            validation: self.validation.clone(),
-            expected_kid: self.signing_key_id.clone(),
-        }
+        AccessTokenDecodeConfig::for_service(
+            self.decoding_key.clone(),
+            self.validation.clone(),
+            self.signing_key_id.clone(),
+        )
     }
 
     fn validation_for_audience(&self, audience: &str) -> Validation {
@@ -1038,21 +1099,74 @@ fn validate_purpose_token_issue_request(request: &PurposeTokenIssueRequest) -> A
     Ok(())
 }
 
-fn validate_access_token_only_request(request: &AccessTokenOnlyRequest) -> AuthResult<()> {
+fn validate_access_token_only_request(
+    request: &AccessTokenOnlyRequest,
+    config: &AuthConfig,
+) -> AuthResult<()> {
     if request.user_id.trim().is_empty() {
         return Err(AuthError::InvalidConfiguration(
             "access-token-only user_id must not be empty".to_string(),
         ));
     }
-    if let Some(ttl) = request.ttl
-        && ttl <= Duration::ZERO
-    {
-        return Err(AuthError::InvalidConfiguration(
-            "access-token-only ttl must be greater than zero".to_string(),
-        ));
+    if let Some(ttl) = request.ttl {
+        if ttl <= Duration::ZERO {
+            return Err(AuthError::InvalidConfiguration(
+                "access-token-only ttl must be greater than zero".to_string(),
+            ));
+        }
+        if ttl > config.max_access_token_ttl {
+            return Err(AuthError::InvalidConfiguration(
+                "access-token-only ttl exceeds configured maximum".to_string(),
+            ));
+        }
+    }
+    for key in request.additional_claims.keys() {
+        if RESERVED_ACCESS_TOKEN_CLAIMS.contains(&key.as_str()) {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "access-token-only custom claim '{key}' is reserved"
+            )));
+        }
     }
     Ok(())
 }
+
+fn dedupe_stable(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
+    "typ",
+    "sub",
+    "sid",
+    "roles",
+    "scopes",
+    "ctx",
+    "purpose",
+    "iss",
+    "aud",
+    "exp",
+    "iat",
+    "nbf",
+    "jti",
+    "tenant_id",
+    "organization_id",
+    "session_family_id",
+    "actor",
+    "auth_time",
+    "amr",
+    "acr",
+    "cnf",
+    "resource_type",
+    "resource_id",
+    "correlation_id",
+];
 
 const RESERVED_PURPOSE_TOKEN_CLAIMS: &[&str] = &[
     "typ", "sub", "sid", "scopes", "purpose", "iss", "aud", "exp", "iat",

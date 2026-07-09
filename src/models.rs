@@ -6,6 +6,7 @@ use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::claims::AccessTokenMetadata;
 use crate::scope_match::ScopeMatch;
 use crate::scopes::{
     has_all_scopes as scopes_include_all, has_any_scope as scopes_include_any,
@@ -28,6 +29,9 @@ pub struct AuthUser {
     /// Typed session context embedded in the access-token `ctx` claim.
     #[serde(default)]
     pub session: SessionContext,
+    /// Optional standard access-token metadata (`jti`, tenant, `cnf`, etc.).
+    #[serde(default)]
+    pub token_claims: AccessTokenMetadata,
 }
 
 impl AuthUser {
@@ -197,6 +201,7 @@ impl ApiTokenPrincipal {
 
 /// Authenticated principal that can represent a user session or an API token.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AuthPrincipal {
     /// Existing local user-session principal.
     User(AuthUser),
@@ -339,6 +344,34 @@ impl AuthPrincipal {
         match self {
             Self::User(_) => None,
             Self::ApiToken(token) => Some(token),
+        }
+    }
+
+    /// Returns tenant ID from a user principal's token claims, if present.
+    pub fn tenant_id(&self) -> Option<&str> {
+        match self {
+            Self::User(user) => user.token_claims.tenant_id.as_deref(),
+            Self::ApiToken(_) => None,
+        }
+    }
+
+    /// Returns `jti` / token reference suitable for audits (never a raw token).
+    pub fn token_ref(&self) -> Option<String> {
+        match self {
+            Self::User(user) => user
+                .token_claims
+                .jti
+                .clone()
+                .or_else(|| Some(user.session_id.to_string())),
+            Self::ApiToken(token) => Some(token.token_id.to_string()),
+        }
+    }
+
+    /// Returns safe claim metadata for bridge layers such as `graphql-orm`.
+    pub fn access_token_metadata(&self) -> Option<&AccessTokenMetadata> {
+        match self {
+            Self::User(user) => Some(&user.token_claims),
+            Self::ApiToken(_) => None,
         }
     }
 }

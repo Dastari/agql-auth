@@ -28,6 +28,10 @@ pub struct AuthConfig {
     pub jwt_signing: JwtSigningConfig,
     /// Access-token lifetime.
     pub access_token_ttl: Duration,
+    /// Maximum allowed access-token lifetime for custom TTLs.
+    ///
+    /// Used by access-token-only grants and similar short-lived issuance paths.
+    pub max_access_token_ttl: Duration,
     /// Refresh-token lifetime.
     pub refresh_token_ttl: Duration,
     /// Abuse-protection settings for credential and request flows.
@@ -42,6 +46,7 @@ impl fmt::Debug for AuthConfig {
             .field("jwt_secret", &"[redacted]")
             .field("jwt_signing", &self.jwt_signing)
             .field("access_token_ttl", &self.access_token_ttl)
+            .field("max_access_token_ttl", &self.max_access_token_ttl)
             .field("refresh_token_ttl", &self.refresh_token_ttl)
             .field("rate_limits", &self.rate_limits)
             .finish()
@@ -69,6 +74,7 @@ impl AuthConfig {
             jwt_secret: secret.clone(),
             jwt_signing: JwtSigningConfig::Hs256 { secret },
             access_token_ttl: Duration::minutes(15),
+            max_access_token_ttl: Duration::hours(24),
             refresh_token_ttl: Duration::days(30),
             rate_limits: AuthRateLimitConfig::default(),
         }
@@ -93,6 +99,7 @@ impl AuthConfig {
                 key_id: key_id.into(),
             },
             access_token_ttl: Duration::minutes(15),
+            max_access_token_ttl: Duration::hours(24),
             refresh_token_ttl: Duration::days(30),
             rate_limits: AuthRateLimitConfig::default(),
         }

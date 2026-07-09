@@ -14,6 +14,13 @@ use crate::{AuthError, AuthResult, LoginChallengeOptions, TotpOptions};
 type HmacSha1 = Hmac<Sha1>;
 
 pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {
+    strip_bearer_prefix_with_mode(input, crate::token_decode::BearerParseMode::BearerOrRaw)
+}
+
+pub(crate) fn strip_bearer_prefix_with_mode(
+    input: &str,
+    mode: crate::token_decode::BearerParseMode,
+) -> AuthResult<&str> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(AuthError::InvalidBearerToken);
@@ -23,10 +30,16 @@ pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {
     }
 
     let Some((scheme, rest)) = trimmed.split_once(char::is_whitespace) else {
-        return Ok(trimmed);
+        return match mode {
+            crate::token_decode::BearerParseMode::BearerOrRaw => Ok(trimmed),
+            crate::token_decode::BearerParseMode::RequireBearer => {
+                Err(AuthError::InvalidBearerToken)
+            }
+        };
     };
 
     if !scheme.eq_ignore_ascii_case("Bearer") {
+        // Explicitly reject Basic and other schemes.
         return Err(AuthError::InvalidBearerToken);
     }
 
