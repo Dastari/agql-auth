@@ -76,7 +76,8 @@
 ### Migration
 
 See [MIGRATION.md](MIGRATION.md) for old-to-new API mappings, behavioral
-classification, and the scope matcher golden table.
+classification, WebSocket reauthorization expectations, and the scope matcher
+golden table.
 
 ### SemVer Recommendation
 
@@ -84,3 +85,6 @@ Publish as **0.7.0**. This is a minor release under 0.x conventions with additiv
 APIs and deliberate hardening. Treat GraphQL public error messages and
 `AuthUser` construction as breaking for consumers that depended on previous
 behavior; document upgrades via the migration guide.
+
+Pin Git consumers (for example Gema) to the annotated `v0.7.0` tag SHA on
+`main`, not to a vendored tree.

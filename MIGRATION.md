@@ -24,11 +24,15 @@ channel guards are opt-in APIs.
 | Existing `AuthUser::has_scope` helpers | No behavioral break | exact matching |
 | Existing `RequireScope` guards without `AuthRuntime` | No behavioral break | exact matching |
 | Previous MFA Rust enum type name | Structural/API break | rename to `MfaFactor`; serialized claims unchanged |
+| `AuthUser` struct construction | Structural/API break | add `token_claims: Default::default()` |
+| GraphQL `ErrorExtensions` message text | Behavioral hardening | safe public message only; use `public_code()` |
+| Access-token-only / custom access TTL | Behavioral bound | must be `<= AuthConfig::max_access_token_ttl` (24h default) |
+| Hierarchical bare `*` wildcard | Behavioral opt-in | deny unless `allow_universal_wildcard = true` |
 | `AccessTokenValidator` HS256 validation | Behavioral guard on new API | rejected unless `accept_hs256(true)` |
-| `HierarchicalScopeMatch` | Behavioral opt-in | not used unless configured |
+| `HierarchicalScopeMatch` | Behavioral opt-in | not used unless configured; exact remains default |
 | `super_scopes` | Behavioral opt-in | empty by default |
 | `CombinedAuth` token order | Behavioral opt-in | JWT-shaped first; expired JWT never falls back |
-| `ChannelIdentity` | Additive | host must verify channel before injection |
+| `ChannelIdentity` / WebSocket reauth hooks | Additive | host-owned channel verify + optional status checks |
 
 No product scope names, tenant IDs, cookie policy, HTTP routing, SQL, or
 certificate parsing is introduced by this release.
@@ -122,19 +126,19 @@ After:
 
 ```rust
 use agql_auth::AccessTokenOnlyRequest;
+use time::Duration;
 
 let grant = auth
-    .issue_access_token_only(AccessTokenOnlyRequest {
-        user_id,
-        roles,
-        scopes,
-        session,
-        ttl: Some(time::Duration::minutes(30)),
-    })
+    .issue_access_token_only(
+        AccessTokenOnlyRequest::new(user_id, roles, scopes, session)
+            .with_ttl(Duration::minutes(30)),
+    )
     .await?;
 ```
 
-This path never writes a refresh-token row.
+This path never writes a refresh-token row. TTL must be positive and not exceed
+`AuthConfig::max_access_token_ttl` (default 24 hours). Issued tokens include a
+unique `jti` and `purpose = access_token`.
 
 ## Hierarchical Scope Matching
 
@@ -249,3 +253,21 @@ impl Mutation {
 ```
 
 The host owns all channel verification.
+
+## WebSocket Reauthorization Expectations
+
+`0.7` does not take over your subscription transport. Hosts should:
+
+1. Authenticate `connection_init` with
+   `AccessTokenValidator::authenticate_connection_init_value` (or
+   `AuthService::authenticate_connection_init_value`).
+2. Treat missing connection-init credentials as unauthenticated and invalid
+   tokens as fail-closed (never as anonymous).
+3. Optionally implement `TokenStatusChecker` for session/`jti`/principal
+   revocation on high-risk operations or periodic checks.
+4. Use `ReauthorizationPolicy::next_deadline` with
+   `AuthUser.token_claims.expires_at` to schedule reauthorization.
+5. Keep the default failure mode fail-closed
+   (`StatusCheckFailureMode::FailClosed`).
+
+See [WebSocket reauthorization](docs/websocket-reauthorization.md).
