@@ -4,7 +4,8 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 use crate::{
-    ApiTokenPrincipal, AuthError, AuthPrincipal, AuthRuntime, AuthUser, ExactScopeMatch, ScopeMatch,
+    ApiTokenPrincipal, AuthError, AuthPrincipal, AuthRuntime, AuthUser, ChannelIdentity,
+    ExactScopeMatch, ScopeMatch,
 };
 
 /// Reads the authenticated user from an `async-graphql` context.
@@ -52,6 +53,17 @@ pub fn scope_matcher_from_ctx(ctx: &Context<'_>) -> Arc<dyn ScopeMatch> {
     auth_runtime_from_ctx_opt(ctx)
         .map(|runtime| runtime.scope_matcher.clone())
         .unwrap_or_else(|| Arc::new(ExactScopeMatch))
+}
+
+/// Reads the host-verified channel identity from context.
+pub fn channel_identity_from_ctx<'a>(ctx: &'a Context<'_>) -> GraphqlResult<&'a ChannelIdentity> {
+    ctx.data_opt::<ChannelIdentity>()
+        .ok_or(AuthError::Unauthenticated.extend())
+}
+
+/// Reads the host-verified channel identity from context, if present.
+pub fn channel_identity_from_ctx_opt<'a>(ctx: &'a Context<'_>) -> Option<&'a ChannelIdentity> {
+    ctx.data_opt::<ChannelIdentity>()
 }
 
 /// Top-level GraphQL field selected by a request.

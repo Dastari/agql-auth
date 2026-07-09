@@ -4,6 +4,7 @@
 //! guards, OIDC helpers, and session types in one place.
 
 pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use crate::channel::ChannelIdentity;
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
@@ -14,13 +15,13 @@ pub use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
 pub use crate::graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
     auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,
-    graphql_refresh_cookie_directive, principal_from_ctx, principal_from_ctx_opt,
-    scope_matcher_from_ctx,
+    channel_identity_from_ctx, channel_identity_from_ctx_opt, graphql_refresh_cookie_directive,
+    principal_from_ctx, principal_from_ctx_opt, scope_matcher_from_ctx,
 };
 pub use crate::guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
-    RequireAnyRole, RequireAnyScope, RequireAuth, RequirePrincipal, RequirePrincipalScope,
-    RequireScope,
+    RequireAnyRole, RequireAnyScope, RequireAuth, RequireChannelScheme, RequirePrincipal,
+    RequirePrincipalScope, RequireScope,
 };
 pub use crate::models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,

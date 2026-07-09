@@ -65,6 +65,7 @@
 //! primitives.
 
 mod api_tokens;
+mod channel;
 mod combined;
 mod config;
 mod errors;
@@ -87,6 +88,7 @@ mod validator;
 mod tests;
 
 pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use channel::ChannelIdentity;
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
@@ -97,13 +99,13 @@ pub use grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
 pub use graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
     auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,
-    graphql_refresh_cookie_directive, principal_from_ctx, principal_from_ctx_opt,
-    scope_matcher_from_ctx,
+    channel_identity_from_ctx, channel_identity_from_ctx_opt, graphql_refresh_cookie_directive,
+    principal_from_ctx, principal_from_ctx_opt, scope_matcher_from_ctx,
 };
 pub use guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
-    RequireAnyRole, RequireAnyScope, RequireAuth, RequirePrincipal, RequirePrincipalScope,
-    RequireScope,
+    RequireAnyRole, RequireAnyScope, RequireAuth, RequireChannelScheme, RequirePrincipal,
+    RequirePrincipalScope, RequireScope,
 };
 pub use models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,

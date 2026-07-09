@@ -1,6 +1,6 @@
 use async_graphql::{Context, ErrorExtensions, Guard, Result as GraphqlResult};
 
-use crate::{AuthError, auth_user_from_ctx, principal_from_ctx};
+use crate::{AuthError, ChannelIdentity, auth_user_from_ctx, principal_from_ctx};
 use crate::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use std::sync::Arc;
 
@@ -328,6 +328,34 @@ impl Guard for RequireAllPrincipalScopes {
                 Err(AuthError::Forbidden.extend())
             }
         });
+        async move { allowed }
+    }
+}
+
+/// `async-graphql` guard requiring a host-verified channel scheme.
+#[derive(Clone, Debug)]
+pub struct RequireChannelScheme {
+    scheme: String,
+}
+
+impl RequireChannelScheme {
+    /// Creates a channel-scheme guard.
+    pub fn new(scheme: impl Into<String>) -> Self {
+        Self {
+            scheme: scheme.into(),
+        }
+    }
+}
+
+impl Guard for RequireChannelScheme {
+    fn check(
+        &self,
+        ctx: &Context<'_>,
+    ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let allowed = match ctx.data_opt::<ChannelIdentity>() {
+            Some(identity) if identity.scheme == self.scheme => Ok(()),
+            _ => Err(AuthError::Forbidden.extend()),
+        };
         async move { allowed }
     }
 }
