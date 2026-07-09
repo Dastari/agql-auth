@@ -72,6 +72,7 @@ mod guards;
 mod models;
 mod oidc;
 pub mod prelude;
+mod scope_match;
 mod scopes;
 mod service;
 mod session;
@@ -90,8 +91,9 @@ pub use config::{
 pub use errors::AuthError;
 pub use graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
-    auth_user_from_ctx, auth_user_from_ctx_opt, graphql_refresh_cookie_directive,
-    principal_from_ctx, principal_from_ctx_opt,
+    auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,
+    graphql_refresh_cookie_directive, principal_from_ctx, principal_from_ctx_opt,
+    scope_matcher_from_ctx,
 };
 pub use guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
@@ -114,6 +116,10 @@ pub use oidc::{
     OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
     ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
     hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+};
+pub use scope_match::{
+    AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions, ScopeMatch,
+    ScopeMatcher,
 };
 pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;

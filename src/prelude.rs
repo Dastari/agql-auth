@@ -11,8 +11,9 @@ pub use crate::config::{
 pub use crate::errors::AuthError;
 pub use crate::graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
-    auth_user_from_ctx, auth_user_from_ctx_opt, graphql_refresh_cookie_directive,
-    principal_from_ctx, principal_from_ctx_opt,
+    auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,
+    graphql_refresh_cookie_directive, principal_from_ctx, principal_from_ctx_opt,
+    scope_matcher_from_ctx,
 };
 pub use crate::guards::{
     RequireAllPrincipalScopes, RequireAllRoles, RequireAllScopes, RequireAnyPrincipalScope,
@@ -35,6 +36,10 @@ pub use crate::oidc::{
     OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
     ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
     hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+};
+pub use crate::scope_match::{
+    AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions, ScopeMatch,
+    ScopeMatcher,
 };
 pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use crate::service::AuthService;

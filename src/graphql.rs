@@ -1,7 +1,11 @@
 use async_graphql::{Context, ErrorExtensions, Result as GraphqlResult};
 use serde_json::Value as JsonValue;
 
-use crate::{ApiTokenPrincipal, AuthError, AuthPrincipal, AuthUser};
+use std::sync::Arc;
+
+use crate::{
+    ApiTokenPrincipal, AuthError, AuthPrincipal, AuthRuntime, AuthUser, ExactScopeMatch, ScopeMatch,
+};
 
 /// Reads the authenticated user from an `async-graphql` context.
 ///
@@ -36,6 +40,18 @@ pub fn principal_from_ctx_opt(ctx: &Context<'_>) -> Option<AuthPrincipal> {
 
     ctx.data_opt::<ApiTokenPrincipal>()
         .map(|principal| AuthPrincipal::ApiToken(principal.clone()))
+}
+
+/// Reads auth runtime data from an `async-graphql` context, if present.
+pub fn auth_runtime_from_ctx_opt<'a>(ctx: &'a Context<'_>) -> Option<&'a AuthRuntime> {
+    ctx.data_opt::<AuthRuntime>()
+}
+
+/// Reads the configured scope matcher from context or returns exact matching.
+pub fn scope_matcher_from_ctx(ctx: &Context<'_>) -> Arc<dyn ScopeMatch> {
+    auth_runtime_from_ctx_opt(ctx)
+        .map(|runtime| runtime.scope_matcher.clone())
+        .unwrap_or_else(|| Arc::new(ExactScopeMatch))
 }
 
 /// Top-level GraphQL field selected by a request.

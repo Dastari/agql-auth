@@ -6,6 +6,7 @@ use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::scope_match::ScopeMatch;
 use crate::scopes::{
     has_all_scopes as scopes_include_all, has_any_scope as scopes_include_any,
     has_scope as scope_exists,
@@ -49,6 +50,31 @@ impl AuthUser {
         S: AsRef<str>,
     {
         scopes_include_all(&self.scopes, required)
+    }
+
+    /// Returns `true` when the configured matcher satisfies the required scope.
+    pub fn has_scope_with(&self, matcher: &dyn ScopeMatch, required: &str) -> bool {
+        matcher.has_scope(&self.scopes, required)
+    }
+
+    /// Returns `true` when the configured matcher satisfies any required scope.
+    pub fn has_any_scope_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        required
+            .iter()
+            .any(|scope| self.has_scope_with(matcher, scope.as_ref()))
+    }
+
+    /// Returns `true` when the configured matcher satisfies all required scopes.
+    pub fn has_all_scopes_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        required
+            .iter()
+            .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
     }
 }
 
@@ -142,6 +168,31 @@ impl ApiTokenPrincipal {
     {
         scopes_include_all(&self.scopes, required)
     }
+
+    /// Returns `true` when the configured matcher satisfies the required scope.
+    pub fn has_scope_with(&self, matcher: &dyn ScopeMatch, required: &str) -> bool {
+        matcher.has_scope(&self.scopes, required)
+    }
+
+    /// Returns `true` when the configured matcher satisfies any required scope.
+    pub fn has_any_scope_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        required
+            .iter()
+            .any(|scope| self.has_scope_with(matcher, scope.as_ref()))
+    }
+
+    /// Returns `true` when the configured matcher satisfies all required scopes.
+    pub fn has_all_scopes_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        required
+            .iter()
+            .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
+    }
 }
 
 /// Authenticated principal that can represent a user session or an API token.
@@ -197,6 +248,34 @@ impl AuthPrincipal {
         S: AsRef<str>,
     {
         scopes_include_all(self.scopes(), required)
+    }
+
+    /// Returns `true` when the configured matcher satisfies the required scope.
+    pub fn has_scope_with(&self, matcher: &dyn ScopeMatch, required: &str) -> bool {
+        match self {
+            Self::User(user) => user.has_scope_with(matcher, required),
+            Self::ApiToken(token) => token.has_scope_with(matcher, required),
+        }
+    }
+
+    /// Returns `true` when the configured matcher satisfies any required scope.
+    pub fn has_any_scope_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        required
+            .iter()
+            .any(|scope| self.has_scope_with(matcher, scope.as_ref()))
+    }
+
+    /// Returns `true` when the configured matcher satisfies all required scopes.
+    pub fn has_all_scopes_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
+    where
+        S: AsRef<str>,
+    {
+        required
+            .iter()
+            .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
     }
 
     /// Returns the API-token audience, if this is an API-token principal.

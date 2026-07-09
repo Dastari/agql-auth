@@ -6,6 +6,7 @@ mod jwt_signing;
 mod oidc;
 mod rate_limits;
 mod recovery;
+mod scope_match;
 mod scopes;
 mod totp;
 

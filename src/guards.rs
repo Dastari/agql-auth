@@ -1,6 +1,8 @@
 use async_graphql::{Context, ErrorExtensions, Guard, Result as GraphqlResult};
 
 use crate::{AuthError, auth_user_from_ctx, principal_from_ctx};
+use crate::{AuthRuntime, ExactScopeMatch, ScopeMatch};
+use std::sync::Arc;
 
 /// `async-graphql` guard requiring an authenticated `AuthUser` in request data.
 #[derive(Clone, Copy, Debug, Default)]
@@ -101,8 +103,9 @@ impl Guard for RequireScope {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let matcher = matcher_from_ctx(ctx);
         let allowed = auth_user_from_ctx(ctx).and_then(|user| {
-            if user.has_scope(&self.scope) {
+            if user.has_scope_with(matcher.as_ref(), &self.scope) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -136,8 +139,9 @@ impl Guard for RequireAnyScope {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let matcher = matcher_from_ctx(ctx);
         let allowed = auth_user_from_ctx(ctx).and_then(|user| {
-            if user.has_any_scope(&self.scopes) {
+            if user.has_any_scope_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -171,8 +175,9 @@ impl Guard for RequireAllScopes {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let matcher = matcher_from_ctx(ctx);
         let allowed = auth_user_from_ctx(ctx).and_then(|user| {
-            if user.has_all_scopes(&self.scopes) {
+            if user.has_all_scopes_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -243,8 +248,9 @@ impl Guard for RequirePrincipalScope {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let matcher = matcher_from_ctx(ctx);
         let allowed = principal_from_ctx(ctx).and_then(|principal| {
-            if principal.has_scope(&self.scope) {
+            if principal.has_scope_with(matcher.as_ref(), &self.scope) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -278,8 +284,9 @@ impl Guard for RequireAnyPrincipalScope {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let matcher = matcher_from_ctx(ctx);
         let allowed = principal_from_ctx(ctx).and_then(|principal| {
-            if principal.has_any_scope(&self.scopes) {
+            if principal.has_any_scope_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -313,8 +320,9 @@ impl Guard for RequireAllPrincipalScopes {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
+        let matcher = matcher_from_ctx(ctx);
         let allowed = principal_from_ctx(ctx).and_then(|principal| {
-            if principal.has_all_scopes(&self.scopes) {
+            if principal.has_all_scopes_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -322,4 +330,10 @@ impl Guard for RequireAllPrincipalScopes {
         });
         async move { allowed }
     }
+}
+
+fn matcher_from_ctx(ctx: &Context<'_>) -> Arc<dyn ScopeMatch> {
+    ctx.data_opt::<AuthRuntime>()
+        .map(|runtime| runtime.scope_matcher.clone())
+        .unwrap_or_else(|| Arc::new(ExactScopeMatch))
 }

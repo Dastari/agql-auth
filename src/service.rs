@@ -30,6 +30,7 @@ use crate::models::{
     AuthUser, IssuedPurposeToken, PurposeTokenIssueRequest, PurposeTokenValidation,
     RefreshTokenRevocationReason, StoredRefreshToken, VerifiedPurposeToken,
 };
+use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
 use crate::token_decode::{
@@ -96,6 +97,7 @@ pub struct AuthService<U, R> {
     signing_algorithm: Algorithm,
     signing_key_id: Option<String>,
     jwks: Option<JsonValue>,
+    scope_matcher: Arc<dyn ScopeMatch>,
 }
 
 impl<U, R> AuthService<U, R>
@@ -139,6 +141,7 @@ where
             signing_algorithm: jwt_keys.algorithm,
             signing_key_id: jwt_keys.key_id,
             jwks: jwt_keys.jwks,
+            scope_matcher: Arc::new(ExactScopeMatch),
             config,
             user_store,
             refresh_store,
@@ -154,6 +157,20 @@ where
             .hash_password(password.as_bytes(), &salt)
             .map(|hash| hash.to_string())
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))
+    }
+
+    /// Returns a clone of the configured request-time scope matcher.
+    pub fn scope_matcher(&self) -> Arc<dyn ScopeMatch> {
+        self.scope_matcher.clone()
+    }
+
+    /// Sets the request-time scope matcher used by GraphQL auth injection.
+    ///
+    /// Direct [`AuthUser::has_scope`](crate::AuthUser::has_scope) calls remain
+    /// exact; guards use this matcher when [`AuthRuntime`] is injected.
+    pub fn with_scope_matcher(mut self, scope_matcher: Arc<dyn ScopeMatch>) -> Self {
+        self.scope_matcher = scope_matcher;
+        self
     }
 
     /// Verifies a password against an Argon2 password hash.
@@ -525,7 +542,9 @@ where
     ) -> AuthResult<async_graphql::Request> {
         if let Some(raw) = bearer_or_token {
             let auth_user = self.authenticate_bearer(raw)?;
-            request = request.data(auth_user);
+            request = request
+                .data(auth_user)
+                .data(AuthRuntime::new(self.scope_matcher()));
         }
 
         Ok(request)
@@ -536,6 +555,7 @@ where
         let token = extract_connection_init_token(&value)?;
         let auth_user = self.authenticate_bearer(&token)?;
         let mut data = Data::default();
+        data.insert(AuthRuntime::new(self.scope_matcher()));
         data.insert(auth_user);
         Ok(data)
     }
