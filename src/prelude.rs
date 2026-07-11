@@ -4,6 +4,11 @@
 //! guards, OIDC helpers, and session types in one place.
 
 pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use crate::assurance::{
+    AssuranceDenial, AssuranceDenialCode, AssuranceMatchMode, MAX_ASSURANCE_CONTEXT_LENGTH,
+    MAX_ASSURANCE_METHOD_LENGTH, MAX_ASSURANCE_METHODS, MfaAcceptance, RecentMfaPolicy,
+    RefreshableTokenMetadata, SessionAssurance, StepUpAuthentication,
+};
 pub use crate::channel::ChannelIdentity;
 pub use crate::claims::{
     AccessTokenMetadata, ActorIdentity, ClaimRequirements, ConfirmationClaims,

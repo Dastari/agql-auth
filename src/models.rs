@@ -723,6 +723,9 @@ pub struct StoredRefreshToken {
     /// Session context bound to refresh-token rotation.
     #[serde(default)]
     pub session: SessionContext,
+    /// Explicitly allowlisted metadata that is safe to preserve on rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshable_metadata: Option<crate::RefreshableTokenMetadata>,
     /// Hash of the raw refresh token.
     pub token_hash: String,
     /// Creation time.
@@ -1216,6 +1219,15 @@ pub struct ValidatedOidcClaims {
     pub not_before: Option<OffsetDateTime>,
     /// Issued-at time.
     pub issued_at: OffsetDateTime,
+    /// Provider-reported authentication time. This is not local MFA acceptance.
+    #[serde(default)]
+    pub auth_time: Option<OffsetDateTime>,
+    /// Normalized provider-reported authentication methods.
+    #[serde(default)]
+    pub amr: Option<Vec<String>>,
+    /// Provider-reported authentication context class.
+    #[serde(default)]
+    pub acr: Option<String>,
     /// Validated nonce.
     pub nonce: String,
     /// Provider tenant ID, when present.

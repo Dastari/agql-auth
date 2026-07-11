@@ -163,6 +163,14 @@ let mapper = MicrosoftClaimsMapper::new()
 
 For custom policy, implement `ClaimsMapper` directly.
 
+Validated standard `auth_time`, `amr`, and `acr` values are available on
+`ValidatedOidcClaims`, but they are evidence rather than local authorization.
+Neither `MicrosoftClaimsMapper` nor `NoopClaimsMapper` treats any provider value
+as MFA. A custom mapper may return `MappedClaims.assurance` only after explicit
+host policy accepts the provider's methods/ACR. Do not assume a Microsoft (or
+other provider) claim value universally means MFA. See
+[session assurance](session-assurance.md).
+
 Do not use email, UPN, name, or preferred username as authorization
 identifiers. For Microsoft work/school accounts, the preferred stable external
 identity key is `tid + oid`; generic OIDC falls back to `iss + sub`.

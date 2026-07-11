@@ -104,13 +104,15 @@ pub struct OidcCallbackOutcome {
     pub claims: ValidatedOidcClaims,
 }
 
-/// Local roles and scopes derived from provider claims.
+/// Local roles, scopes, and optional host-accepted assurance derived from provider claims.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MappedClaims {
     /// Local roles to assign.
     pub roles: Vec<String>,
     /// Local scopes to assign.
     pub scopes: Vec<String>,
+    /// Host-accepted assurance. `None` leaves local MFA unsatisfied.
+    pub assurance: Option<crate::SessionAssurance>,
 }
 
 /// Local user resolution returned by an [`ExternalUserProvisioner`].
@@ -148,9 +150,9 @@ impl ProvisionedExternalUser {
 }
 
 #[async_trait]
-/// Maps validated provider claims into local roles and scopes.
+/// Maps validated provider claims into local roles, scopes, and assurance.
 pub trait ClaimsMapper: Send + Sync {
-    /// Returns local roles and scopes derived from validated claims.
+    /// Returns local roles, scopes, and optional host-accepted assurance.
     async fn map_claims(&self, claims: &ValidatedOidcClaims) -> AuthResult<MappedClaims>;
 }
 
@@ -368,7 +370,11 @@ impl ClaimsMapper for MicrosoftClaimsMapper {
             );
         }
 
-        Ok(MappedClaims { roles, scopes })
+        Ok(MappedClaims {
+            roles,
+            scopes,
+            assurance: None,
+        })
     }
 }
 
@@ -643,13 +649,19 @@ impl OidcProvider {
             OidcProviderKind::MicrosoftEntra => AuthMethod::MicrosoftOidc,
             OidcProviderKind::Generic => AuthMethod::Oidc,
         };
+        let session = if let Some(assurance) = mapped_claims.assurance {
+            SessionContext::for_auth_method(auth_method).with_assurance(assurance)
+        } else {
+            SessionContext::for_auth_method(auth_method)
+        };
 
         let auth = auth_service
-            .issue_session_for_user_with_scopes(
+            .issue_session_for_user_with_metadata(
                 provisioned_user.user_id,
                 provisioned_user.roles,
                 provisioned_user.scopes,
-                SessionContext::for_auth_method(auth_method),
+                session,
+                crate::RefreshableTokenMetadata::default(),
                 metadata,
             )
             .await?;
@@ -869,6 +881,28 @@ impl OidcProvider {
             ));
         }
 
+        if claims.auth_time.is_some_and(|auth_time| auth_time < 0) {
+            return Err(AuthError::OidcTokenValidation(
+                "ID token auth_time must be a non-negative timestamp".to_string(),
+            ));
+        }
+        if claims.auth_time.is_some_and(|auth_time| {
+            auth_time > now.saturating_add(self.config.clock_skew.whole_seconds())
+        }) {
+            return Err(AuthError::OidcTokenValidation(
+                "ID token auth_time is in the future".to_string(),
+            ));
+        }
+        let normalized_assurance = crate::SessionAssurance::new(
+            unix_timestamp_to_datetime(claims.auth_time.unwrap_or(claims.iat))?,
+            claims.amr.clone().unwrap_or_default(),
+            claims.acr.clone(),
+            None,
+            crate::MfaAcceptance::Unsatisfied,
+        )
+        .map_err(|error| AuthError::OidcTokenValidation(error.to_string()))?;
+        let normalized_amr = claims.amr.as_ref().map(|_| normalized_assurance.methods);
+
         let external_subject = stable_external_subject(
             &self.config.provider_kind,
             &claims.iss,
@@ -888,6 +922,12 @@ impl OidcProvider {
             expires_at: unix_timestamp_to_datetime(claims.exp)?,
             not_before: claims.nbf.map(unix_timestamp_to_datetime).transpose()?,
             issued_at: unix_timestamp_to_datetime(claims.iat)?,
+            auth_time: claims
+                .auth_time
+                .map(unix_timestamp_to_datetime)
+                .transpose()?,
+            amr: normalized_amr,
+            acr: normalized_assurance.acr,
             nonce,
             tenant_id,
             object_id: claims.oid,
@@ -993,6 +1033,9 @@ struct RawOidcIdTokenClaims {
     exp: i64,
     nbf: Option<i64>,
     iat: i64,
+    auth_time: Option<i64>,
+    amr: Option<Vec<String>>,
+    acr: Option<String>,
     nonce: Option<String>,
     azp: Option<String>,
     tid: Option<String>,

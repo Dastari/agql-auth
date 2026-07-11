@@ -311,7 +311,19 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
+- [Session assurance and recent MFA](docs/session-assurance.md)
 - [Migration guide](MIGRATION.md)
+
+## 0.8.0 Migration Notes
+
+- OIDC assurance claims are exposed as typed evidence but do not satisfy local
+  MFA until the host mapper explicitly accepts them.
+- Refresh rotation preserves authoritative `auth_time`, normalized AMR, ACR,
+  MFA acceptance, and an explicitly safe metadata subset.
+- Refresh stores must accept the optional `refreshable_metadata` field and the
+  optional assurance nested in `SessionContext`; legacy rows remain valid.
+- Use `RecentMfaPolicy` with an injected clock for recent-MFA enforcement.
+- See [MIGRATION.md](MIGRATION.md) for the `0.7` to `0.8` migration.
 
 ## 0.7.0 Migration Notes
 

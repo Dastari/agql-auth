@@ -1,4 +1,110 @@
-# Migration Guide: 0.6 to 0.7
+# Migration Guide
+
+## 0.7 to 0.8: session assurance continuity
+
+`0.8` adds authoritative session assurance without changing the
+`RefreshTokenStore` trait methods. Existing issuance methods remain available
+and issue no authoritative assurance unless the supplied `SessionContext`
+contains one.
+
+### Host code
+
+Replace ad hoc MFA booleans or access-token-only claim plumbing with:
+
+```rust
+use agql_auth::{
+    AuthMethod, MfaAcceptance, RefreshableTokenMetadata, SessionAssurance,
+};
+
+let assurance = SessionAssurance::new(
+    verified_authentication_time,
+    ["pwd", "otp"],
+    Some(host_accepted_acr),
+    Some("my-provider-policy-v1".to_string()),
+    MfaAcceptance::Satisfied,
+)?;
+
+let payload = auth
+    .issue_assured_user_session(
+        user_id,
+        roles,
+        scopes,
+        AuthMethod::Oidc,
+        assurance,
+        RefreshableTokenMetadata::default(),
+        client_metadata,
+    )
+    .await?;
+```
+
+For OIDC, read `ValidatedOidcClaims.auth_time`, `.amr`, and `.acr` inside your
+`ClaimsMapper`. Return `MappedClaims { assurance: Some(...) }` only after local
+policy accepts the provider values. A missing value, `NoopClaimsMapper`, and
+`MicrosoftClaimsMapper` all leave MFA unsatisfied.
+
+### Refresh storage migration
+
+`StoredRefreshToken` adds `refreshable_metadata: Option<RefreshableTokenMetadata>`.
+`SessionContext`, already stored in the refresh record, adds optional
+`assurance`. JSON/document stores can deploy the new reader first: both fields
+use Serde defaults and missing values become `None`.
+
+For relational stores, add nullable JSON columns (or equivalent typed columns):
+
+```sql
+ALTER TABLE refresh_tokens
+    ADD COLUMN refreshable_metadata JSON NULL;
+
+-- If session context is decomposed rather than stored as JSON, also add
+-- nullable assurance timestamp, AMR, ACR, context, and MFA-acceptance fields.
+```
+
+Do not backfill old rows with the migration time. Leave assurance `NULL`.
+Legacy sessions continue refreshing normally, but an opted-in
+`RecentMfaPolicy` denies them until a genuine step-up occurs.
+
+The store trait signatures did not change. Implementations that construct
+`StoredRefreshToken` literals must add `refreshable_metadata: None`. This public
+record and `MappedClaims`/`ValidatedOidcClaims` field addition is the reason for
+the `0.7` to `0.8` SemVer bump.
+
+### Refresh metadata decision
+
+Only tenant ID, organization ID, actor, and correlation ID are refreshable.
+Assurance is sourced from `SessionContext.assurance`. A new `jti`, expiry, and
+purpose are generated for every access token. `cnf`, resource type/ID, and
+arbitrary additional claims are not propagated because their validity may be
+specific to one sender, resource, or token.
+
+### Recent-MFA guard
+
+```rust
+use agql_auth::{AssuranceMatchMode, RecentMfaPolicy};
+use time::Duration;
+
+let policy = RecentMfaPolicy {
+    maximum_age: Duration::minutes(10),
+    clock_skew: Duration::seconds(30),
+    allowed_amr: vec!["otp".into(), "hwk".into()],
+    allowed_acr: vec!["urn:example:loa:2".into()],
+    match_mode: AssuranceMatchMode::Any,
+};
+
+policy.evaluate(&authenticated_user, &clock).map_err(|denial| {
+    // Return denial.code().as_str() and denial.public_message() to the client.
+    // Send denial.internal_detail() only to protected server diagnostics.
+    denial
+})?;
+```
+
+At the exact maximum-age or future-skew boundary, the policy allows. One second
+beyond either boundary denies. Missing/inconsistent claims and checked-time
+overflow deny safely.
+
+See [session assurance](docs/session-assurance.md) for trust boundaries,
+step-up, and long-lived connection guidance.
+
+## 0.6 to 0.7
 
 Upgrade recipe:
 

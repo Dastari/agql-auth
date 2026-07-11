@@ -34,6 +34,13 @@ Important refresh-token behavior:
 - `rotate_refresh_token` atomically revokes the current token and inserts the
   replacement during refresh.
 
+Since `0.8`, the record's existing `session` value may contain
+`SessionContext.assurance`, and `refreshable_metadata` contains only tenant,
+organization, actor, and correlation values. Persist both unchanged in the
+replacement row. Missing values from pre-0.8 rows deserialize as `None`; never
+backfill `auth_time` with refresh or migration time. See
+[session assurance](session-assurance.md) and [MIGRATION.md](../MIGRATION.md).
+
 `rotate_refresh_token` is required in `0.6.0`. It must return `Ok(true)` only
 when the current token exists, is not revoked, is marked used/revoked for
 rotation, and the replacement token is inserted in the same transaction. Return

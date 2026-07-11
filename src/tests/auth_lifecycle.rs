@@ -567,6 +567,7 @@ async fn verified_user_session_issuance_supports_email_code_and_totp_context() {
                     satisfied: true,
                     methods: vec![MfaFactor::Totp],
                 },
+                assurance: None,
                 active_scope: Some(ActiveScope {
                     tenant_id: Some("tenant-1".to_string()),
                     organization_id: Some("org-1".to_string()),

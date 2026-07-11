@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- `SessionAssurance`, `MfaAcceptance`, and normalized AMR/ACR/context bounds for
+  host-authoritative authentication facts.
+- `AuthService::issue_assured_user_session` and
+  `issue_session_for_user_with_metadata` for refreshable sessions with assurance
+  and explicitly refresh-safe standard metadata.
+- `RefreshableTokenMetadata`, limited to tenant, organization, actor, and
+  correlation metadata.
+- `AuthService::step_up_session`, which rotates only the selected session and
+  records the genuine step-up time from an injected `Clock`.
+- `RecentMfaPolicy` with injected-clock max-age/skew checks, configurable AMR/ACR
+  AND/OR matching, stable public denial codes, and separate internal detail.
+- Typed OIDC `auth_time`, normalized `amr`, and `acr` on
+  `ValidatedOidcClaims`, with strict type, size, and timestamp validation.
+
+### Changed
+
+- `SessionContext` gains optional authoritative assurance.
+- `MappedClaims` gains optional host-accepted assurance. Built-in and no-op
+  mappers leave it absent; provider claims never imply local MFA by default.
+- `StoredRefreshToken` gains optional `refreshable_metadata`; assurance is
+  stored in its existing `session` value. Both fields deserialize safely when
+  absent.
+- Refresh rotation reconstructs `auth_time`, `amr`, `acr`, MFA state, and the
+  allowlisted session metadata without changing the original authentication
+  time.
+
+### Security
+
+- Recent-MFA evaluation requires signed token assurance claims to match the
+  authoritative session assurance and fails closed on missing, inconsistent,
+  future, stale, or arithmetically unsafe timestamps.
+- Per-token `jti`, expiry, purpose, confirmation (`cnf`), resource bindings,
+  and arbitrary claims are deliberately regenerated or omitted on refresh.
+- Assurance denials expose one safe client message; diagnostic detail remains
+  server-only and is omitted from `Debug`.
+- Crate publication is disabled; distribution remains Git-only.
+
+### Migration / SemVer
+
+`0.8.0` is a pre-1.0 minor with public-struct and persisted-record additions.
+Hosts using struct literals or relational refresh-token schemas must migrate.
+The `RefreshTokenStore` trait signatures are unchanged. See
+[MIGRATION.md](MIGRATION.md) and [session assurance](docs/session-assurance.md).
+
 ## 0.7.0
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "agql-auth"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Database-agnostic authentication primitives and async-graphql integration helpers."
@@ -10,6 +10,7 @@ documentation = "https://docs.rs/agql-auth"
 readme = "README.md"
 keywords = ["auth", "graphql", "async-graphql", "jwt", "oidc"]
 categories = ["authentication", "web-programming"]
+publish = false
 
 [dependencies]
 async-graphql = "7"

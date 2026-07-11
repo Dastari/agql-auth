@@ -23,7 +23,11 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::AuthResult;
+use crate::assurance::{
+    MfaAcceptance, RefreshableTokenMetadata, SessionAssurance, StepUpAuthentication,
+};
 use crate::claims::AccessTokenMetadata;
+use crate::clock::Clock;
 use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
 use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
@@ -245,6 +249,40 @@ where
         refresh_token: &str,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
+        self.rotate_session(refresh_token, metadata, None).await
+    }
+
+    /// Rotates one refreshable session after a successful host-verified step-up.
+    ///
+    /// The injected clock supplies the genuine step-up time. Only the session
+    /// identified by `refresh_token` is changed; unrelated sessions and token
+    /// families are untouched. Calling this method is the host's assertion that
+    /// the supplied methods/ACR satisfy its MFA policy.
+    pub async fn step_up_session(
+        &self,
+        refresh_token: &str,
+        step_up: StepUpAuthentication,
+        metadata: ClientMetadata,
+        clock: &dyn Clock,
+    ) -> AuthResult<AuthPayload> {
+        let assurance = SessionAssurance::new(
+            clock.now(),
+            step_up.methods,
+            step_up.acr,
+            step_up.context,
+            MfaAcceptance::Satisfied,
+        )
+        .map_err(|error| AuthError::InvalidConfiguration(error.to_string()))?;
+        self.rotate_session(refresh_token, metadata, Some(assurance))
+            .await
+    }
+
+    async fn rotate_session(
+        &self,
+        refresh_token: &str,
+        metadata: ClientMetadata,
+        assurance_override: Option<SessionAssurance>,
+    ) -> AuthResult<AuthPayload> {
         let now = OffsetDateTime::now_utc();
         let token_hash = hash_refresh_token(refresh_token);
         let existing = self
@@ -286,14 +324,35 @@ where
             return Err(AuthError::UserDisabled);
         }
 
+        let mut session = existing.session.clone();
+        if let Some(assurance) = assurance_override {
+            session = session.with_assurance(assurance);
+        }
+        let refreshable_metadata = existing.refreshable_metadata.clone().unwrap_or_default();
+        let auth_time = session.assurance.as_ref().map(SessionAssurance::auth_time);
+        let amr = session
+            .assurance
+            .as_ref()
+            .map(|value| value.methods.clone());
+        let acr = session
+            .assurance
+            .as_ref()
+            .and_then(|value| value.acr.clone());
         let auth_user = AuthUser {
             user_id: user.id,
             session_id: existing.session_id,
             roles: dedupe_stable(user.roles),
             scopes: dedupe_stable(existing.scopes.clone()),
-            session: existing.session.clone(),
+            session,
             token_claims: AccessTokenMetadata {
                 session_family_id: Some(existing.session_family_id.to_string()),
+                tenant_id: refreshable_metadata.tenant_id,
+                organization_id: refreshable_metadata.organization_id,
+                actor: refreshable_metadata.actor,
+                auth_time,
+                amr,
+                acr,
+                correlation_id: refreshable_metadata.correlation_id,
                 ..AccessTokenMetadata::default()
             },
         };
@@ -526,7 +585,48 @@ where
         session: SessionContext,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
+        self.issue_session_for_user_with_metadata(
+            user_id,
+            roles,
+            scopes,
+            session,
+            RefreshableTokenMetadata::default(),
+            metadata,
+        )
+        .await
+    }
+
+    /// Issues a refreshable session with host-validated assurance and an
+    /// explicitly refresh-safe subset of standard access-token metadata.
+    ///
+    /// Existing issuance methods call this with no assurance or refreshable
+    /// metadata. Sender/resource bindings and arbitrary custom claims are not
+    /// accepted here because their validity may be per-token.
+    pub async fn issue_session_for_user_with_metadata(
+        &self,
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        mut session: SessionContext,
+        refreshable_metadata: RefreshableTokenMetadata,
+        metadata: ClientMetadata,
+    ) -> AuthResult<AuthPayload> {
+        if let Some(assurance) = session.assurance.as_ref() {
+            assurance
+                .validate()
+                .map_err(|error| AuthError::InvalidConfiguration(error.to_string()))?;
+            session.mfa = assurance.mfa_state();
+        }
         let session_family_id = Uuid::new_v4();
+        let assurance_auth_time = session.assurance.as_ref().map(SessionAssurance::auth_time);
+        let assurance_amr = session
+            .assurance
+            .as_ref()
+            .map(|value| value.methods.clone());
+        let assurance_acr = session
+            .assurance
+            .as_ref()
+            .and_then(|value| value.acr.clone());
         let auth_user = AuthUser {
             user_id: user_id.into(),
             session_id: Uuid::new_v4(),
@@ -535,11 +635,44 @@ where
             session,
             token_claims: AccessTokenMetadata {
                 session_family_id: Some(session_family_id.to_string()),
+                tenant_id: refreshable_metadata.tenant_id.clone(),
+                organization_id: refreshable_metadata.organization_id.clone(),
+                actor: refreshable_metadata.actor.clone(),
+                auth_time: assurance_auth_time,
+                amr: assurance_amr,
+                acr: assurance_acr,
+                correlation_id: refreshable_metadata.correlation_id.clone(),
                 ..AccessTokenMetadata::default()
             },
         };
         self.issue_auth_payload(auth_user, session_family_id, metadata)
             .await
+    }
+
+    /// Issues a refreshable session from host-accepted authentication facts.
+    ///
+    /// This is the direct typed entry point for password, passkey, OIDC, or
+    /// other host flows that have already established authoritative assurance.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn issue_assured_user_session(
+        &self,
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        auth_method: AuthMethod,
+        assurance: SessionAssurance,
+        refreshable_metadata: RefreshableTokenMetadata,
+        metadata: ClientMetadata,
+    ) -> AuthResult<AuthPayload> {
+        self.issue_session_for_user_with_metadata(
+            user_id,
+            roles,
+            scopes,
+            SessionContext::for_auth_method(auth_method).with_assurance(assurance),
+            refreshable_metadata,
+            metadata,
+        )
+        .await
     }
 
     /// Issues a short-lived access token without writing a refresh-token row.
@@ -666,6 +799,14 @@ where
 
         let raw_refresh_token = generate_opaque_token();
         let refresh_token_expires_at = now + self.config.refresh_token_ttl;
+        let refreshable_metadata = RefreshableTokenMetadata {
+            tenant_id: user.token_claims.tenant_id.clone(),
+            organization_id: user.token_claims.organization_id.clone(),
+            actor: user.token_claims.actor.clone(),
+            correlation_id: user.token_claims.correlation_id.clone(),
+        };
+        let refreshable_metadata = (refreshable_metadata != RefreshableTokenMetadata::default())
+            .then_some(refreshable_metadata);
         let refresh_record = StoredRefreshToken {
             id: Uuid::new_v4(),
             user_id: user.user_id.clone(),
@@ -673,6 +814,7 @@ where
             session_family_id,
             scopes: user.scopes.clone(),
             session: user.session.clone(),
+            refreshable_metadata,
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
             expires_at: refresh_token_expires_at,

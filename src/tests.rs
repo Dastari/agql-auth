@@ -1,4 +1,5 @@
 mod api_tokens;
+mod assurance;
 mod auth_lifecycle;
 mod challenges;
 mod channel;

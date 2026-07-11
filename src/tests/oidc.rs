@@ -227,6 +227,27 @@ struct StaticProvisioner {
     user_id: String,
 }
 
+struct AcceptingAssuranceMapper;
+
+#[async_trait]
+impl ClaimsMapper for AcceptingAssuranceMapper {
+    async fn map_claims(&self, claims: &ValidatedOidcClaims) -> crate::AuthResult<MappedClaims> {
+        let assurance = SessionAssurance::new(
+            claims.auth_time.expect("test auth_time"),
+            claims.amr.clone().expect("test amr"),
+            claims.acr.clone(),
+            Some(claims.provider_name.clone()),
+            MfaAcceptance::Satisfied,
+        )
+        .unwrap();
+        Ok(MappedClaims {
+            roles: vec![],
+            scopes: vec![],
+            assurance: Some(assurance),
+        })
+    }
+}
+
 #[async_trait]
 impl ExternalUserProvisioner for StaticProvisioner {
     async fn resolve_external_user(
@@ -411,6 +432,9 @@ async fn microsoft_claim_mapper_maps_roles_groups_tenant_and_object_id() {
         expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
         not_before: Some(OffsetDateTime::now_utc() - Duration::minutes(1)),
         issued_at: OffsetDateTime::now_utc(),
+        auth_time: None,
+        amr: None,
+        acr: None,
         nonce: "nonce".to_string(),
         tenant_id: Some(TENANT_ID.to_string()),
         object_id: Some(OBJECT_ID.to_string()),
@@ -454,7 +478,11 @@ async fn mocked_callback_validates_id_token_and_issues_local_session() {
         .create_authorization_request(&state_store)
         .await
         .unwrap();
-    client.set_token_response(signed_id_token(valid_claims(&request.nonce), "rsa01"));
+    let mut provider_claims = valid_claims(&request.nonce);
+    provider_claims["auth_time"] = json!(OffsetDateTime::now_utc().unix_timestamp());
+    provider_claims["amr"] = json!(["pwd", "otp"]);
+    provider_claims["acr"] = json!("urn:example:loa:2");
+    client.set_token_response(signed_id_token(provider_claims, "rsa01"));
 
     let mapper = MicrosoftClaimsMapper::new()
         .map_role_to_role("App.Admin", "Admin")
@@ -481,6 +509,14 @@ async fn mocked_callback_validates_id_token_and_issues_local_session() {
     );
     assert_eq!(result.auth.user.roles, vec!["Admin".to_string()]);
     assert_eq!(result.auth.user.scopes, vec!["group.read".to_string()]);
+    assert!(result.claims.auth_time.is_some());
+    assert_eq!(
+        result.claims.amr,
+        Some(vec!["pwd".to_string(), "otp".to_string()])
+    );
+    assert_eq!(result.claims.acr.as_deref(), Some("urn:example:loa:2"));
+    assert!(result.auth.user.session.assurance.is_none());
+    assert!(!result.auth.user.session.mfa.satisfied);
     assert_eq!(
         result.external_identity.external_subject,
         format!("{TENANT_ID}:{OBJECT_ID}")
@@ -492,6 +528,111 @@ async fn mocked_callback_validates_id_token_and_issues_local_session() {
             .auth_method,
         AuthMethod::MicrosoftOidc
     );
+}
+
+#[tokio::test]
+async fn oidc_assurance_requires_explicit_host_mapping_before_mfa_is_satisfied() {
+    let (provider, client) = provider_and_client();
+    let state_store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request(&state_store)
+        .await
+        .unwrap();
+    let auth_time = OffsetDateTime::now_utc().unix_timestamp();
+    let mut claims = valid_claims(&request.nonce);
+    claims["auth_time"] = json!(auth_time);
+    claims["amr"] = json!([" OTP ", "pwd", "otp"]);
+    claims["acr"] = json!("urn:example:loa:2");
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+
+    let auth = test_auth_service(
+        MemoryUserStore::default(),
+        MemoryRefreshTokenStore::default(),
+    );
+    let result = provider
+        .login_with_callback(
+            &auth,
+            &state_store,
+            &MemoryExternalIdentityStore::default(),
+            &StaticProvisioner {
+                user_id: "local-user".to_string(),
+            },
+            &AcceptingAssuranceMapper,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+            metadata(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.auth.user.session.mfa.satisfied);
+    assert_eq!(result.auth.user.token_claims.auth_time, Some(auth_time));
+    assert_eq!(
+        result.auth.user.token_claims.amr,
+        Some(vec!["otp".to_string(), "pwd".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn oidc_assurance_claims_enforce_types_sizes_and_timestamp_bounds() {
+    let valid = run_validation_case(|claims, _| {
+        claims["auth_time"] = json!(OffsetDateTime::now_utc().unix_timestamp());
+        claims["amr"] = json!([" OTP ", "pwd", "otp"]);
+        claims["acr"] = json!("urn:example:loa:2");
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        valid.claims.amr,
+        Some(vec!["otp".to_string(), "pwd".to_string()])
+    );
+
+    let wrong_auth_time = run_validation_case(|claims, _| claims["auth_time"] = json!("now")).await;
+    assert!(matches!(
+        wrong_auth_time,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+    let wrong_amr = run_validation_case(|claims, _| claims["amr"] = json!("otp")).await;
+    assert!(matches!(wrong_amr, Err(AuthError::OidcTokenValidation(_))));
+    let wrong_acr = run_validation_case(|claims, _| claims["acr"] = json!(["loa2"])).await;
+    assert!(matches!(wrong_acr, Err(AuthError::OidcTokenValidation(_))));
+    let negative = run_validation_case(|claims, _| claims["auth_time"] = json!(-1)).await;
+    assert!(matches!(negative, Err(AuthError::OidcTokenValidation(_))));
+    let invalid_timestamp =
+        run_validation_case(|claims, _| claims["auth_time"] = json!(i64::MAX)).await;
+    assert!(matches!(
+        invalid_timestamp,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+    let too_many = run_validation_case(|claims, _| {
+        claims["amr"] = json!(
+            (0..=MAX_ASSURANCE_METHODS)
+                .map(|index| format!("m{index}"))
+                .collect::<Vec<_>>()
+        );
+    })
+    .await;
+    assert!(matches!(too_many, Err(AuthError::OidcTokenValidation(_))));
+    let too_many_duplicates = run_validation_case(|claims, _| {
+        claims["amr"] = json!(vec!["otp"; MAX_ASSURANCE_METHODS + 1]);
+    })
+    .await;
+    assert!(matches!(
+        too_many_duplicates,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+    let long_method = run_validation_case(|claims, _| {
+        claims["amr"] = json!(["x".repeat(MAX_ASSURANCE_METHOD_LENGTH + 1)])
+    })
+    .await;
+    assert!(matches!(
+        long_method,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+    let long_acr = run_validation_case(|claims, _| {
+        claims["acr"] = json!("x".repeat(MAX_ASSURANCE_CONTEXT_LENGTH + 1))
+    })
+    .await;
+    assert!(matches!(long_acr, Err(AuthError::OidcTokenValidation(_))));
 }
 
 #[tokio::test]

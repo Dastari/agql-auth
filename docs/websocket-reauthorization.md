@@ -55,3 +55,16 @@ Security-sensitive defaults fail closed.
 3. On each high-risk operation or when `now >= deadline`, call the status checker.
 4. On `Revoked` / `Expired`, close the socket with a safe public error.
 5. Never log raw tokens from the connection payload.
+
+## Assurance Aging
+
+Connection-init authentication is not a permanent recent-MFA decision. For an
+operation protected by `RecentMfaPolicy`, reevaluate the current `AuthUser` at
+operation start with the host clock. Also schedule a channel deadline no later
+than `auth_time + maximum_age` (subject to the configured skew rule).
+
+When assurance ages out, pause or deny protected operations with the policy's
+safe public code/message. Require a genuine step-up over the host's normal HTTP
+or device flow, rotate the selected session, and reauthenticate the channel
+with the new access token. Do not mutate an in-flight principal or extend its
+`auth_time` merely because the socket remains connected.

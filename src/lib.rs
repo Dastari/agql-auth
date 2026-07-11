@@ -31,6 +31,9 @@
 //! roles, scopes, and [`SessionContext`]. Refresh tokens are opaque, hashed
 //! before storage, and rotated on refresh. A replayed refresh token revokes the
 //! token family through the host's [`RefreshTokenStore`].
+//! [`SessionAssurance`] carries host-accepted authentication time, AMR, ACR,
+//! and MFA acceptance unchanged through refresh rotation. Resource servers can
+//! enforce freshness with [`RecentMfaPolicy`] and an injected [`Clock`].
 //!
 //! ## API And Service Tokens
 //!
@@ -75,6 +78,7 @@
 //! primitives.
 
 mod api_tokens;
+mod assurance;
 mod channel;
 mod claims;
 mod clock;
@@ -103,6 +107,12 @@ mod validator;
 mod tests;
 
 pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use assurance::{
+    AssuranceDenial, AssuranceDenialCode, AssuranceInputError, AssuranceMatchMode,
+    MAX_ASSURANCE_CONTEXT_LENGTH, MAX_ASSURANCE_METHOD_LENGTH, MAX_ASSURANCE_METHODS,
+    MfaAcceptance, RecentMfaPolicy, RefreshableTokenMetadata, SessionAssurance,
+    StepUpAuthentication,
+};
 pub use channel::ChannelIdentity;
 pub use claims::{
     AccessTokenMetadata, ActorIdentity, ClaimRequirementError, ClaimRequirements,

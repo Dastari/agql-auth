@@ -58,6 +58,9 @@ pub struct SessionContext {
     /// MFA state associated with the session.
     #[serde(default)]
     pub mfa: MfaState,
+    /// Host-authoritative authentication assurance for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assurance: Option<crate::SessionAssurance>,
     /// Optional active business scope.
     #[serde(default)]
     pub active_scope: Option<ActiveScope>,
@@ -69,7 +72,15 @@ impl SessionContext {
         Self {
             auth_method,
             mfa: MfaState::default(),
+            assurance: None,
             active_scope: None,
         }
+    }
+
+    /// Attaches validated host assurance and keeps the compatibility MFA view aligned.
+    pub fn with_assurance(mut self, assurance: crate::SessionAssurance) -> Self {
+        self.mfa = assurance.mfa_state();
+        self.assurance = Some(assurance);
+        self
     }
 }
