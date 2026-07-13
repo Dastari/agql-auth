@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.1
+
+### Fixed
+
+- Locally issued access tokens now omit unset optional top-level claims instead
+  of serializing them as JSON `null`. In particular, an unset registered `nbf`
+  claim is absent, preserving its RFC 7519 NumericDate type when present and
+  interoperability with strict JWT resource servers.
+- The same omission rule is applied consistently to optional access-token
+  metadata and reviewed across the private password-reset and purpose-token
+  claim representations.
+
+### Compatibility
+
+- Deserialization remains backward compatible: omitted optional claims decode
+  as `None`, and numeric `nbf` validation, clock injection, leeway, signatures,
+  issuer, and audience policy are unchanged.
+- No public API or storage trait changed. Hosts do not need to set `nbf` when
+  no not-before constraint is intended; omission is the correct representation.
+- This remains a Git-only distribution and is not published to crates.io.
+
 ## 0.8.0
 
 ### Added

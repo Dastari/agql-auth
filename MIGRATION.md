@@ -1,5 +1,21 @@
 # Migration Guide
 
+## 0.8.0 to 0.8.1: omitted optional JWT claims
+
+No source, configuration, or storage migration is required. `0.8.1` changes
+only locally issued JWT serialization: unset optional top-level claims are
+omitted instead of encoded as JSON `null`.
+
+Hosts should not manufacture an `nbf` value to work around the `0.8.0` output.
+When no not-before constraint is intended, the standards-conforming payload has
+no `nbf` member. When `nbf` is present, it remains a NumericDate and existing
+injected-clock/leeway validation applies unchanged.
+
+Existing short-lived `0.8.0` tokens may continue to decode in compatible
+consumers, but strict resource servers can reject their `"nbf": null` member.
+Upgrade the issuer to `0.8.1` and let those tokens expire normally; no refresh
+record or key migration is needed.
+
 ## 0.7 to 0.8: session assurance continuity
 
 `0.8` adds authoritative session assurance without changing the

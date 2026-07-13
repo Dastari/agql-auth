@@ -77,6 +77,41 @@ async fn validator_enforces_claim_requirements_and_nbf_with_test_clock() {
         .build()
         .unwrap();
 
+    let no_nbf = encode_rs256(json!({
+        "typ": "access",
+        "purpose": "access_token",
+        "sub": "user-1",
+        "sid": Uuid::new_v4().to_string(),
+        "roles": [],
+        "scopes": [],
+        "iss": "agql-auth",
+        "aud": "agql-auth-clients",
+        "exp": (now + Duration::minutes(15)).unix_timestamp(),
+        "iat": now.unix_timestamp(),
+        "jti": "jti-no-nbf",
+        "tenant_id": "tenant-1",
+    }));
+    assert!(validator.authenticate_access_token(&no_nbf).is_ok());
+
+    for nbf in [now - Duration::seconds(1), now] {
+        let numeric_nbf = encode_rs256(json!({
+            "typ": "access",
+            "purpose": "access_token",
+            "sub": "user-1",
+            "sid": Uuid::new_v4().to_string(),
+            "roles": [],
+            "scopes": [],
+            "iss": "agql-auth",
+            "aud": "agql-auth-clients",
+            "exp": (now + Duration::minutes(15)).unix_timestamp(),
+            "iat": now.unix_timestamp(),
+            "jti": "jti-numeric-nbf",
+            "tenant_id": "tenant-1",
+            "nbf": nbf.unix_timestamp(),
+        }));
+        assert!(validator.authenticate_access_token(&numeric_nbf).is_ok());
+    }
+
     let missing_claims = encode_rs256(json!({
         "typ": "access",
         "purpose": "access_token",

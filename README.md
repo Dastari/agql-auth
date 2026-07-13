@@ -314,6 +314,13 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Migration guide](MIGRATION.md)
 
+## 0.8.1 Interoperability Note
+
+`0.8.1` is an output-only interoperability patch: unset optional JWT claims,
+including `nbf`, are omitted rather than serialized as JSON `null`. Hosts do
+not need to set `nbf` unless a genuine not-before constraint is intended. There
+are no public API or storage migrations from `0.8.0`.
+
 ## 0.8.0 Migration Notes
 
 - OIDC assurance claims are exposed as typed evidence but do not satisfy local

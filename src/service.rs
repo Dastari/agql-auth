@@ -58,7 +58,7 @@ const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWdxbC1hdXRoLW
 pub(super) struct PasswordResetTokenClaims {
     pub(super) sub: String,
     pub(super) jti: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) typ: Option<String>,
     pub(super) purpose: String,
     pub(super) iss: String,
@@ -71,7 +71,7 @@ pub(super) struct PasswordResetTokenClaims {
 struct PurposeTokenClaims {
     typ: String,
     sub: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     sid: Option<String>,
     #[serde(default)]
     scopes: Vec<String>,

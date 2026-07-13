@@ -195,6 +195,196 @@ async fn issued_access_tokens_include_purpose() {
     assert_eq!(claims["purpose"], "access_token");
 }
 
+#[tokio::test]
+async fn refreshable_access_token_omits_unset_optional_top_level_claims() {
+    let auth = auth_service(rs256_config("auth-key-1"));
+    let issued = auth
+        .issue_verified_user_session_with_scopes(
+            "user-1",
+            vec!["Operator".to_string()],
+            vec!["records.read".to_string()],
+            AuthMethod::Password,
+            metadata(),
+        )
+        .await
+        .unwrap();
+
+    let claims = decode_payload(&issued.access_token);
+    assert_unset_access_claims_absent(
+        &claims,
+        &[
+            "nbf",
+            "tenant_id",
+            "organization_id",
+            "actor",
+            "auth_time",
+            "amr",
+            "acr",
+            "cnf",
+            "resource_type",
+            "resource_id",
+            "correlation_id",
+        ],
+    );
+    assert!(claims.get("session_family_id").is_some());
+    assert!(!decode_payload_json(&issued.access_token).contains("\"nbf\":null"));
+    auth.authenticate_access_token(&issued.access_token)
+        .unwrap();
+
+    let diagnostics = format!("{issued:?}");
+    assert!(!diagnostics.contains(&issued.access_token));
+    assert!(!diagnostics.contains(&issued.refresh_token));
+    assert!(!diagnostics.contains(RSA_PRIVATE_KEY_A.lines().nth(1).unwrap()));
+}
+
+#[tokio::test]
+async fn access_token_only_omits_unset_optional_top_level_claims() {
+    let auth = auth_service(rs256_config("auth-key-1"));
+    let grant = auth
+        .issue_access_token_only(AccessTokenOnlyRequest::new(
+            "machine-1",
+            vec!["Worker".to_string()],
+            vec!["jobs.run".to_string()],
+            SessionContext::for_auth_method(AuthMethod::ServiceToken),
+        ))
+        .await
+        .unwrap();
+
+    let claims = decode_payload(&grant.access_token);
+    assert_unset_access_claims_absent(
+        &claims,
+        &[
+            "nbf",
+            "tenant_id",
+            "organization_id",
+            "session_family_id",
+            "actor",
+            "auth_time",
+            "amr",
+            "acr",
+            "cnf",
+            "resource_type",
+            "resource_id",
+            "correlation_id",
+        ],
+    );
+    assert!(!decode_payload_json(&grant.access_token).contains("\"nbf\":null"));
+    auth.authenticate_access_token(&grant.access_token).unwrap();
+
+    let diagnostics = format!("{grant:?}");
+    assert!(!diagnostics.contains(&grant.access_token));
+    assert!(!diagnostics.contains(RSA_PRIVATE_KEY_A.lines().nth(1).unwrap()));
+}
+
+#[tokio::test]
+async fn populated_optional_access_token_metadata_serializes_and_round_trips() {
+    let auth = auth_service(rs256_config("auth-key-1"));
+    let authenticated_at = OffsetDateTime::from_unix_timestamp(1_700_000_123).unwrap();
+    let assurance = SessionAssurance::new(
+        authenticated_at,
+        ["pwd", "otp"],
+        Some("urn:example:loa:2".to_string()),
+        Some("example-policy".to_string()),
+        MfaAcceptance::Satisfied,
+    )
+    .unwrap();
+    let actor = ActorIdentity {
+        sub: "operator-1".to_string(),
+        amr: vec!["hwk".to_string()],
+    };
+    let confirmation = ConfirmationClaims {
+        x5t_s256: Some("certificate-thumbprint".to_string()),
+        jkt: Some("jwk-thumbprint".to_string()),
+    };
+    let mut request = AccessTokenOnlyRequest::new(
+        "user-1",
+        vec!["Operator".to_string()],
+        vec!["records.read".to_string()],
+        SessionContext::for_auth_method(AuthMethod::Oidc).with_assurance(assurance.clone()),
+    );
+    request.tenant_id = Some("tenant-1".to_string());
+    request.organization_id = Some("organization-1".to_string());
+    request.session_family_id = Some("family-1".to_string());
+    request.actor = Some(actor.clone());
+    request.auth_time = Some(authenticated_at.unix_timestamp());
+    request.amr = Some(vec!["pwd".to_string(), "otp".to_string()]);
+    request.acr = Some("urn:example:loa:2".to_string());
+    request.cnf = Some(confirmation.clone());
+    request.resource_type = Some("record".to_string());
+    request.resource_id = Some("record-1".to_string());
+    request.correlation_id = Some("correlation-1".to_string());
+
+    let grant = auth.issue_access_token_only(request).await.unwrap();
+    let claims = decode_payload(&grant.access_token);
+    assert_eq!(claims["tenant_id"], "tenant-1");
+    assert_eq!(claims["organization_id"], "organization-1");
+    assert_eq!(claims["session_family_id"], "family-1");
+    assert_eq!(
+        claims["actor"],
+        json!({"sub": "operator-1", "amr": ["hwk"]})
+    );
+    assert_eq!(claims["auth_time"], authenticated_at.unix_timestamp());
+    assert_eq!(claims["amr"], json!(["pwd", "otp"]));
+    assert_eq!(claims["acr"], "urn:example:loa:2");
+    assert_eq!(
+        claims["cnf"],
+        json!({"x5t#S256": "certificate-thumbprint", "jkt": "jwk-thumbprint"})
+    );
+    assert_eq!(claims["resource_type"], "record");
+    assert_eq!(claims["resource_id"], "record-1");
+    assert_eq!(claims["correlation_id"], "correlation-1");
+    assert!(claims.get("nbf").is_none());
+
+    let decoded = auth.authenticate_access_token(&grant.access_token).unwrap();
+    assert_eq!(decoded.session.assurance, Some(assurance));
+    assert_eq!(decoded.token_claims.tenant_id.as_deref(), Some("tenant-1"));
+    assert_eq!(
+        decoded.token_claims.organization_id.as_deref(),
+        Some("organization-1")
+    );
+    assert_eq!(
+        decoded.token_claims.session_family_id.as_deref(),
+        Some("family-1")
+    );
+    assert_eq!(decoded.token_claims.actor, Some(actor));
+    assert_eq!(
+        decoded.token_claims.auth_time,
+        Some(authenticated_at.unix_timestamp())
+    );
+    assert_eq!(
+        decoded.token_claims.amr,
+        Some(vec!["pwd".to_string(), "otp".to_string()])
+    );
+    assert_eq!(
+        decoded.token_claims.acr.as_deref(),
+        Some("urn:example:loa:2")
+    );
+    assert_eq!(decoded.token_claims.cnf, Some(confirmation));
+    assert_eq!(
+        decoded.token_claims.resource_type.as_deref(),
+        Some("record")
+    );
+    assert_eq!(
+        decoded.token_claims.resource_id.as_deref(),
+        Some("record-1")
+    );
+    assert_eq!(
+        decoded.token_claims.correlation_id.as_deref(),
+        Some("correlation-1")
+    );
+}
+
+#[test]
+fn invalid_token_diagnostics_do_not_expose_raw_token_or_key_material() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
+    let raw_token = "raw-token-secret-marker";
+    let error = auth.authenticate_access_token(raw_token).unwrap_err();
+    let diagnostics = format!("{error:?} {error}");
+    assert!(!diagnostics.contains(raw_token));
+    assert!(!diagnostics.contains(TEST_HS256_SECRET));
+    assert!(!diagnostics.contains(RSA_PRIVATE_KEY_A.lines().nth(1).unwrap()));
+}
+
 #[test]
 fn purpose_tokens_validate_exact_purpose_and_audience() {
     let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
@@ -542,6 +732,26 @@ fn decode_payload(token: &str) -> JsonValue {
     let payload = token.split('.').nth(1).unwrap();
     let bytes = URL_SAFE_NO_PAD.decode(payload).unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn decode_payload_json(token: &str) -> String {
+    let payload = token.split('.').nth(1).unwrap();
+    let bytes = URL_SAFE_NO_PAD.decode(payload).unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
+fn assert_unset_access_claims_absent(claims: &JsonValue, expected_absent: &[&str]) {
+    let object = claims.as_object().unwrap();
+    for key in expected_absent {
+        assert!(
+            !object.contains_key(*key),
+            "unset optional claim must be absent: {key}"
+        );
+    }
+    assert!(
+        object.values().all(|value| !value.is_null()),
+        "issued access tokens must not contain top-level null claims"
+    );
 }
 
 fn assert_claim_shape(claims: &JsonValue) {
