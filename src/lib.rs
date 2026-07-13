@@ -93,6 +93,8 @@ mod keys;
 mod models;
 mod oidc;
 pub mod prelude;
+mod principal_reference;
+mod purpose_grant;
 mod scope_match;
 mod scopes;
 mod service;
@@ -125,8 +127,9 @@ pub use config::{
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use decision::{
-    AuthorizationDecision, AuthorizationDecisionHook, AuthorizationOutcome,
-    AuthorizationReasonCode, NoopAuthorizationDecisionHook, emit_decision,
+    AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
+    AuthorizationOutcome, AuthorizationReasonCode, LinkedAuthorizationDecision,
+    NoopAuthorizationDecisionHook, emit_decision,
 };
 pub use errors::AuthError;
 pub use grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
@@ -162,6 +165,10 @@ pub use oidc::{
     ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
     hash_oauth_state, pkce_s256_challenge, stable_external_subject,
 };
+pub use principal_reference::{
+    CurrentPrincipalResolver, PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal,
+};
+pub use purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use scope_match::{
     AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions, ScopeMatch,
     ScopeMatcher,

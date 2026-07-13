@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- `PrincipalReference` and `PrincipalReferenceKind` for persisting stable,
+  non-secret identity and resource bindings without bearer credentials or
+  stale role/scope snapshots.
+- `CurrentPrincipalResolver` and `ResolvedPrincipal` for host-authoritative
+  current-principal rehydration with immutable identity validation.
+- `PurposeBoundGrantReference` and `PurposeGrantStatus` for exact,
+  expiring, revocable audience/resource/action/purpose grant evaluation.
+- `AuthorizationInvocation` and `LinkedAuthorizationDecision` for linking
+  ordinary authorization audits to an internal or transport invocation without
+  replacing the authenticated actor.
+
+### Security
+
+- Principal references deliberately omit roles, scopes, bearer values, token
+  hashes, cookies, and authorization headers. Long-lived work must rehydrate
+  current authority and fail closed on status or storage errors.
+- Resolved principals must retain the referenced identity, session/token,
+  tenant, audience, actor, and resource bindings. A reference or purpose-bound
+  grant is not authorization and cannot add authority.
+
+### Compatibility
+
+- Existing authentication, token, guard, store, and authorization-decision APIs
+  are unchanged. Invocation metadata uses an additive wrapper rather than a new
+  field on `AuthorizationDecision`, preserving struct-literal compatibility.
+- No database or serialized-record migration is required. Hosts opt in by
+  persisting `PrincipalReference` values and implementing
+  `CurrentPrincipalResolver`.
+- This remains a Git-only distribution and is not published to crates.io.
+
 ## 0.8.1
 
 ### Fixed

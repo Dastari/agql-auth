@@ -1,5 +1,25 @@
 # Migration Guide
 
+## 0.8.1 to 0.9.0: durable principal lifecycle primitives
+
+No existing call-site, database, token, session, or serialized-record migration
+is required. Version 0.9.0 adds opt-in APIs for disconnected or long-lived work.
+
+Persist `AuthPrincipal::reference()` instead of a bearer token or a cloned
+roles/scopes snapshot. Implement `CurrentPrincipalResolver` in the host using
+its authoritative session/token and membership stores. Before every protected
+operation, resolve the reference and use only the roles, scopes, assurance, and
+status on the returned `ResolvedPrincipal`.
+
+`PrincipalReference` and `PurposeBoundGrantReference` are identifiers and
+bindings, not authorization proofs. Resolver authorization remains mandatory,
+and implementations must fail closed when current authority cannot be loaded.
+
+`AuthorizationDecision` is structurally unchanged. Calling
+`with_invocation(...)` now produces a `LinkedAuthorizationDecision` wrapper so
+hosts can correlate authorization and application audits without changing the
+actor or granting authority.
+
 ## 0.8.0 to 0.8.1: omitted optional JWT claims
 
 No source, configuration, or storage migration is required. `0.8.1` changes

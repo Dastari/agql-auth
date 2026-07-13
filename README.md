@@ -307,12 +307,22 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [Key rotation and JWKS](docs/key-rotation.md)
 - [API and service tokens](docs/api-service-tokens.md)
 - [WebSocket reauthorization](docs/websocket-reauthorization.md)
+- [Durable principal lifecycle](docs/principal-lifecycle.md)
 - [Public error codes](docs/public-error-codes.md)
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Migration guide](MIGRATION.md)
+
+## 0.9.0 Principal Lifecycle
+
+`0.9.0` adds opt-in non-secret principal references, current-principal
+rehydration, purpose-bound grant references, and linked invocation audit
+metadata. These primitives support disconnected and long-lived work without
+persisting bearer credentials or stale authorization snapshots. See
+[Durable principal lifecycle](docs/principal-lifecycle.md) and
+[MIGRATION.md](MIGRATION.md).
 
 ## 0.8.1 Interoperability Note
 

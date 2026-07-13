@@ -9,6 +9,7 @@ mod grant;
 mod graphql_transport;
 mod jwt_signing;
 mod oidc;
+mod principal_reference;
 mod rate_limits;
 mod recovery;
 mod scope_match;

@@ -20,7 +20,8 @@ pub use crate::config::{
     MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::decision::{
-    AuthorizationDecision, AuthorizationDecisionHook, AuthorizationOutcome, AuthorizationReasonCode,
+    AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
+    AuthorizationOutcome, AuthorizationReasonCode, LinkedAuthorizationDecision,
 };
 pub use crate::errors::AuthError;
 pub use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
@@ -56,6 +57,10 @@ pub use crate::oidc::{
     ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
     hash_oauth_state, pkce_s256_challenge, stable_external_subject,
 };
+pub use crate::principal_reference::{
+    CurrentPrincipalResolver, PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal,
+};
+pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use crate::scope_match::{
     AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions, ScopeMatch,
     ScopeMatcher,

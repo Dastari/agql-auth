@@ -4,6 +4,56 @@ use time::OffsetDateTime;
 
 use crate::models::AuthPrincipal;
 
+/// Safe invocation metadata that links authorization and application audits.
+///
+/// The authenticated principal remains the actor. This metadata describes the
+/// mechanism and causal operation without granting any additional authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationInvocation {
+    /// Host-defined mechanism such as `graphql_transport` or `internal_service`.
+    pub mechanism: String,
+    /// Causal operation identifier.
+    pub causation_id: Option<String>,
+    /// Delegation/grant reference when applicable.
+    pub delegation_ref: Option<String>,
+}
+
+impl AuthorizationInvocation {
+    /// Creates invocation metadata for a mechanism.
+    pub fn new(mechanism: impl Into<String>) -> Self {
+        Self {
+            mechanism: mechanism.into(),
+            causation_id: None,
+            delegation_ref: None,
+        }
+    }
+
+    /// Sets the causal operation identifier.
+    pub fn with_causation_id(mut self, causation_id: impl Into<String>) -> Self {
+        self.causation_id = Some(causation_id.into());
+        self
+    }
+
+    /// Sets the delegation/grant reference.
+    pub fn with_delegation_ref(mut self, delegation_ref: impl Into<String>) -> Self {
+        self.delegation_ref = Some(delegation_ref.into());
+        self
+    }
+}
+
+/// An authorization decision linked to safe invocation metadata.
+///
+/// This wrapper keeps [`AuthorizationDecision`] source-compatible for hosts
+/// that construct it directly. The invocation metadata provides correlation
+/// only and does not change the actor, outcome, or authority of the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedAuthorizationDecision {
+    /// The original authorization decision.
+    pub decision: AuthorizationDecision,
+    /// Safe invocation and causation metadata.
+    pub invocation: AuthorizationInvocation,
+}
+
 /// Stable authorization decision outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationOutcome {
@@ -98,6 +148,17 @@ impl AuthorizationDecision {
             token_or_session_ref,
             correlation_id: None,
             timestamp,
+        }
+    }
+
+    /// Links invocation metadata without changing actor, outcome, or authority.
+    pub fn with_invocation(
+        self,
+        invocation: AuthorizationInvocation,
+    ) -> LinkedAuthorizationDecision {
+        LinkedAuthorizationDecision {
+            decision: self,
+            invocation,
         }
     }
 }
