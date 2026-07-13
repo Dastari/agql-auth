@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- `OidcAuthorizationOptions`, typed `OidcPrompt` values, bounded `max_age` and
+  `acr_values`, and typed essential ID-token `auth_time`/standard `acr` claim
+  requests.
+- `OidcProvider::create_authorization_request_with_options`, which normalizes
+  options before state insertion and binds a versioned
+  `OidcAuthorizationPolicy` to the exact one-time OAuth state.
+- Callback enforcement for mandatory/fresh `auth_time` and exact standard
+  scalar `acr`, with inclusive checked clock-skew boundaries and
+  `OidcProvider::new_with_clock` for deterministic tests.
+- `OidcAuthorizationOutcome` and `require_bound_policy`, allowing a host
+  endpoint to reject a normal-login callback where a specific bound
+  reauthentication policy is required.
+- Strictly typed, bounded provider `acrs` list exposure on
+  `ValidatedOidcClaims`, kept separate from standard scalar `acr`.
+
+### Security
+
+- Authorization options have no arbitrary query-parameter map. Invalid prompt
+  combinations, negative/over-limit ages, duplicate/blank/control/oversized
+  values, conflicting ACR requests, malformed claims, and stored-policy
+  corruption fail closed.
+- `max_age` always requires signed `auth_time`; future, stale, negative,
+  malformed, and arithmetically unsafe timestamps are denied after ordinary ID
+  token and one-time state validation.
+- Provider `auth_time`, `amr`, `acr`, and `acrs` remain evidence only. Active
+  reauthentication never becomes local MFA without explicit host acceptance.
+- Debug output now redacts complete authorization URLs, OAuth state, nonce,
+  PKCE values, raw validated claims, and external-identity claim snapshots.
+  Provider callback/token error text is not echoed into displayed errors.
+
+### Compatibility / SemVer
+
+- `OAuthLoginState` adds optional `authorization_policy`; missing legacy state
+  deserializes as `None` and means no requested step-up. `OAuthStateStore`
+  signatures are unchanged, but relational schemas and struct literals need an
+  optional field.
+- `OidcAuthorizationRequest`, `ValidatedOidcClaims`, and `OidcLoginResult` gain
+  public fields. `AuthError` gains `InvalidOidcAuthorizationOptions`. These
+  structural public changes make `0.10.0` a pre-1.0 minor release.
+- Microsoft Entra `acrs` issuance in an ID token is not assumed. Hosts need a
+  separately configured and proven tenant/application/token-type contract and
+  an exact local allowlist.
+- This remains a Git-only distribution and is not published to crates.io.
+
 ## 0.9.0
 
 ### Added

@@ -57,6 +57,12 @@ pub use crate::oidc::{
     ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
     hash_oauth_state, pkce_s256_challenge, stable_external_subject,
 };
+pub use crate::oidc_authorization::{
+    MAX_OIDC_AUTHORIZATION_TOTAL_VALUE_LENGTH, MAX_OIDC_AUTHORIZATION_VALUE_LENGTH,
+    MAX_OIDC_AUTHORIZATION_VALUES, MAX_OIDC_CLAIMS_REQUEST_LENGTH, MAX_OIDC_MAX_AGE_SECONDS,
+    OidcAuthorizationOptions, OidcAuthorizationOutcome, OidcAuthorizationPolicy,
+    OidcIdTokenClaimRequest, OidcPrompt,
+};
 pub use crate::principal_reference::{
     CurrentPrincipalResolver, PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal,
 };

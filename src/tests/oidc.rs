@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use percent_encoding::percent_decode_str;
 use serde_json::{Value as JsonValue, json};
 use time::{Duration, OffsetDateTime};
 
@@ -344,6 +345,7 @@ async fn oauth_state_store_contract_returns_pre_consumption_snapshot() {
         code_verifier: "code-verifier".to_string(),
         redirect_uri: REDIRECT_URI.to_string(),
         scopes: vec!["openid".to_string()],
+        authorization_policy: None,
         created_at: OffsetDateTime::now_utc(),
         expires_at: OffsetDateTime::now_utc() + Duration::minutes(10),
         consumed_at: None,
@@ -435,6 +437,7 @@ async fn microsoft_claim_mapper_maps_roles_groups_tenant_and_object_id() {
         auth_time: None,
         amr: None,
         acr: None,
+        acrs: None,
         nonce: "nonce".to_string(),
         tenant_id: Some(TENANT_ID.to_string()),
         object_id: Some(OBJECT_ID.to_string()),
@@ -940,6 +943,556 @@ fn oidc_token_response_debug_redacts_provider_tokens_and_raw_response() {
     assert!(debug.contains("openid profile"));
 }
 
+#[tokio::test]
+async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
+    let (provider, _client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let options = OidcAuthorizationOptions {
+        prompt: vec![OidcPrompt::Login, OidcPrompt::Consent],
+        max_age: Some(0),
+        acr_values: Vec::new(),
+        id_token_claims: vec![
+            OidcIdTokenClaimRequest::EssentialAuthTime,
+            OidcIdTokenClaimRequest::EssentialAcr {
+                values: vec!["urn:example:loa:2&next=evil".to_string()],
+            },
+        ],
+    };
+    let expected = options.validate().unwrap();
+    let request = provider
+        .create_authorization_request_with_options(&store, options)
+        .await
+        .unwrap();
+    let pairs = query_pairs(&request.authorization_url);
+
+    assert_eq!(query_values(&pairs, "prompt"), vec!["login consent"]);
+    assert_eq!(query_values(&pairs, "max_age"), vec!["0"]);
+    assert!(query_values(&pairs, "acr_values").is_empty());
+    let claims = query_values(&pairs, "claims");
+    assert_eq!(claims.len(), 1);
+    let claims_json: JsonValue = serde_json::from_str(claims[0]).unwrap();
+    assert_eq!(claims_json["id_token"]["auth_time"]["essential"], true);
+    assert_eq!(
+        claims_json["id_token"]["acr"]["values"][0],
+        "urn:example:loa:2&next=evil"
+    );
+    assert!(query_values(&pairs, "next").is_empty());
+    assert_eq!(request.authorization_policy.as_ref(), Some(&expected));
+
+    let stored = store
+        .states
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(stored.authorization_policy.as_ref(), Some(&expected));
+    let debug = format!("{request:?} {stored:?}");
+    assert!(!debug.contains(&request.state));
+    assert!(!debug.contains(&request.nonce));
+    assert!(!debug.contains(&request.code_verifier));
+    assert!(!debug.contains(&request.authorization_url));
+    assert!(!debug.contains("urn:example:loa:2&next=evil"));
+}
+
+#[tokio::test]
+async fn default_authorization_request_keeps_standard_semantics_and_no_bound_policy() {
+    let (provider, client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let request = provider.create_authorization_request(&store).await.unwrap();
+    let pairs = query_pairs(&request.authorization_url);
+
+    for name in [
+        "client_id",
+        "redirect_uri",
+        "response_type",
+        "response_mode",
+        "scope",
+        "state",
+        "nonce",
+        "code_challenge",
+        "code_challenge_method",
+    ] {
+        assert_eq!(
+            query_values(&pairs, name).len(),
+            1,
+            "unexpected {name} count"
+        );
+    }
+    for name in ["prompt", "max_age", "acr_values", "claims"] {
+        assert!(query_values(&pairs, name).is_empty());
+    }
+    assert!(request.authorization_policy.is_none());
+
+    client.set_token_response(signed_id_token(valid_claims(&request.nonce), "rsa01"));
+    let outcome = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
+        .unwrap();
+    assert!(!outcome.authorization.is_bound_authorization());
+    let expected = OidcAuthorizationOptions {
+        max_age: Some(0),
+        ..Default::default()
+    }
+    .validate()
+    .unwrap();
+    assert!(
+        outcome
+            .authorization
+            .require_bound_policy(&expected)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn invalid_options_are_rejected_before_state_is_inserted() {
+    let (provider, _client) = provider_and_client();
+    let cases = vec![
+        OidcAuthorizationOptions {
+            prompt: vec![OidcPrompt::None, OidcPrompt::Login],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            prompt: vec![OidcPrompt::Login, OidcPrompt::Login],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            max_age: Some(-1),
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            max_age: Some((MAX_OIDC_MAX_AGE_SECONDS + 1) as i64),
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            acr_values: vec!["".to_string()],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            acr_values: vec!["loa2".to_string(), "loa2".to_string()],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            acr_values: vec!["loa2\nnext=evil".to_string()],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            id_token_claims: vec![
+                OidcIdTokenClaimRequest::EssentialAuthTime,
+                OidcIdTokenClaimRequest::EssentialAuthTime,
+            ],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            acr_values: vec!["loa2".to_string()],
+            id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcr {
+                values: vec!["loa2".to_string()],
+            }],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            acr_values: vec!["x".repeat(MAX_OIDC_AUTHORIZATION_VALUE_LENGTH + 1)],
+            ..Default::default()
+        },
+    ];
+
+    for options in cases {
+        let store = MemoryOAuthStateStore::default();
+        let error = provider
+            .create_authorization_request_with_options(&store, options)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::InvalidOidcAuthorizationOptions(_)
+        ));
+        assert!(store.states.lock().unwrap().is_empty());
+    }
+
+    let malformed = serde_json::from_str::<OidcAuthorizationOptions>(r#"{"max_age":"0"}"#);
+    assert!(malformed.is_err());
+    let overflowing =
+        serde_json::from_str::<OidcAuthorizationOptions>(r#"{"max_age":18446744073709551615}"#);
+    assert!(overflowing.is_err());
+}
+
+#[tokio::test]
+async fn reserved_endpoint_parameter_collision_is_rejected_before_state_insert() {
+    let client = MockOidcHttpClient::new();
+    let mut discovery = discovery_document();
+    discovery["authorization_endpoint"] = json!(format!("{AUTH_ENDPOINT}?st%61te=attacker"));
+    client
+        .get_responses
+        .lock()
+        .unwrap()
+        .insert(DISCOVERY_URL.to_string(), discovery);
+    let provider = OidcProvider::new(
+        MicrosoftEntraConfig::single_tenant(TENANT_ID, CLIENT_ID, REDIRECT_URI)
+            .into_oidc_provider_config()
+            .unwrap(),
+        Arc::new(client),
+    )
+    .unwrap();
+    let store = MemoryOAuthStateStore::default();
+    let error = provider
+        .create_authorization_request_with_options(
+            &store,
+            OidcAuthorizationOptions {
+                max_age: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AuthError::InvalidOidcAuthorizationOptions(_)
+    ));
+    assert!(store.states.lock().unwrap().is_empty());
+}
+
+#[test]
+fn legacy_oauth_state_deserializes_without_authorization_policy() {
+    let value = json!({
+        "provider_name": "generic",
+        "state_hash": "stored-hash",
+        "nonce": "stored-nonce",
+        "code_verifier": "stored-verifier",
+        "redirect_uri": REDIRECT_URI,
+        "scopes": ["openid"],
+        "created_at": OffsetDateTime::now_utc(),
+        "expires_at": OffsetDateTime::now_utc() + Duration::minutes(5),
+        "consumed_at": null
+    });
+    let state: OAuthLoginState = serde_json::from_value(value).unwrap();
+    assert!(state.authorization_policy.is_none());
+    let debug = format!("{state:?}");
+    assert!(!debug.contains("stored-hash"));
+    assert!(!debug.contains("stored-nonce"));
+    assert!(!debug.contains("stored-verifier"));
+}
+
+#[tokio::test]
+async fn unknown_stored_policy_version_fails_closed_before_token_exchange() {
+    let (provider, client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request_with_options(
+            &store,
+            OidcAuthorizationOptions {
+                max_age: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let key = ("microsoft".to_string(), hash_oauth_state(&request.state));
+    {
+        let mut states = store.states.lock().unwrap();
+        let state = states.get_mut(&key).unwrap();
+        let mut policy =
+            serde_json::to_value(state.authorization_policy.as_ref().unwrap()).unwrap();
+        policy["version"] = json!(99);
+        state.authorization_policy = Some(serde_json::from_value(policy).unwrap());
+    }
+
+    let error = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("secret-code", request.state),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AuthError::OidcTokenValidation(_)));
+    assert!(client.posts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn bound_max_age_and_skew_boundaries_are_enforced_with_injected_clock() {
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let options = OidcAuthorizationOptions {
+        max_age: Some(60),
+        ..Default::default()
+    };
+
+    let exact = run_bound_case(now, options.clone(), |claims| {
+        claims["auth_time"] = json!((now - Duration::seconds(65)).unix_timestamp());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        exact.authorization.enforced_auth_time,
+        Some(now - Duration::seconds(65))
+    );
+    exact
+        .authorization
+        .require_bound_policy(&options.validate().unwrap())
+        .unwrap();
+
+    let stale = run_bound_case(now, options.clone(), |claims| {
+        claims["auth_time"] = json!((now - Duration::seconds(66)).unix_timestamp());
+    })
+    .await;
+    assert!(matches!(stale, Err(AuthError::OidcTokenValidation(_))));
+
+    let future_boundary = run_bound_case(now, options.clone(), |claims| {
+        claims["auth_time"] = json!((now + Duration::seconds(5)).unix_timestamp());
+    })
+    .await;
+    assert!(future_boundary.is_ok());
+    let future = run_bound_case(now, options.clone(), |claims| {
+        claims["auth_time"] = json!((now + Duration::seconds(6)).unix_timestamp());
+    })
+    .await;
+    assert!(matches!(future, Err(AuthError::OidcTokenValidation(_))));
+
+    for auth_time in [
+        None,
+        Some(json!("now")),
+        Some(json!(-1)),
+        Some(json!(i64::MAX)),
+    ] {
+        let result = run_bound_case(now, options.clone(), move |claims| {
+            if let Some(value) = auth_time {
+                claims["auth_time"] = value;
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(AuthError::OidcTokenValidation(_))));
+    }
+
+    let zero = OidcAuthorizationOptions {
+        max_age: Some(0),
+        ..Default::default()
+    };
+    assert!(
+        run_bound_case(now, zero, |claims| {
+            claims["auth_time"] = json!(now.unix_timestamp());
+        })
+        .await
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn essential_auth_time_and_exact_standard_acr_fail_closed() {
+    let now = OffsetDateTime::now_utc();
+    let options = OidcAuthorizationOptions {
+        id_token_claims: vec![
+            OidcIdTokenClaimRequest::EssentialAuthTime,
+            OidcIdTokenClaimRequest::EssentialAcr {
+                values: vec!["urn:example:loa:2".to_string()],
+            },
+        ],
+        ..Default::default()
+    };
+
+    let valid = run_bound_case(now, options.clone(), |claims| {
+        claims["auth_time"] = json!(now.unix_timestamp());
+        claims["acr"] = json!("urn:example:loa:2");
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        valid.authorization.matched_acr.as_deref(),
+        Some("urn:example:loa:2")
+    );
+
+    for acr in [
+        None,
+        Some(json!("urn:example:loa:1")),
+        Some(json!(["urn:example:loa:2"])),
+    ] {
+        let result = run_bound_case(now, options.clone(), move |claims| {
+            claims["auth_time"] = json!(now.unix_timestamp());
+            if let Some(acr) = acr {
+                claims["acr"] = acr;
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(AuthError::OidcTokenValidation(_))));
+    }
+
+    let missing_auth_time = run_bound_case(now, options, |claims| {
+        claims["acr"] = json!("urn:example:loa:2");
+    })
+    .await;
+    assert!(matches!(
+        missing_auth_time,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+}
+
+#[tokio::test]
+async fn microsoft_shaped_acrs_is_typed_bounded_and_distinct_from_acr() {
+    let valid = run_validation_case(|claims, _| {
+        claims["acr"] = json!("urn:standard:loa:2");
+        claims["acrs"] = json!(["c1", "c2"]);
+    })
+    .await
+    .unwrap();
+    assert_eq!(valid.claims.acr.as_deref(), Some("urn:standard:loa:2"));
+    assert_eq!(
+        valid.claims.acrs,
+        Some(vec!["c1".to_string(), "c2".to_string()])
+    );
+    assert!(valid.claims.amr.is_none());
+
+    let invalid_values = vec![
+        json!("c1"),
+        json!({"value": "c1"}),
+        json!([["c1"]]),
+        json!(["c1", "c1"]),
+        json!([""]),
+        json!(["c1\n"]),
+        json!(
+            (0..=MAX_OIDC_AUTHORIZATION_VALUES)
+                .map(|i| format!("c{i}"))
+                .collect::<Vec<_>>()
+        ),
+        json!(["x".repeat(MAX_OIDC_AUTHORIZATION_VALUE_LENGTH + 1)]),
+        json!(
+            (0..9)
+                .map(|i| format!("{i}{}", "x".repeat(255)))
+                .collect::<Vec<_>>()
+        ),
+    ];
+    for value in invalid_values {
+        let result = run_validation_case(move |claims, _| claims["acrs"] = value).await;
+        assert!(matches!(result, Err(AuthError::OidcTokenValidation(_))));
+    }
+}
+
+#[tokio::test]
+async fn bound_callback_is_single_use_under_concurrency_and_debug_is_redacted() {
+    let (provider, client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let options = OidcAuthorizationOptions {
+        max_age: Some(60),
+        ..Default::default()
+    };
+    let request = provider
+        .create_authorization_request_with_options(&store, options)
+        .await
+        .unwrap();
+    let mut claims = valid_claims(&request.nonce);
+    claims["auth_time"] = json!(OffsetDateTime::now_utc().unix_timestamp());
+    claims["debug_secret"] = json!("raw-claim-secret");
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+    let input = OidcCallbackInput::code_and_state("secret-code", request.state.clone());
+    let debug = format!("{input:?}");
+    assert!(!debug.contains("secret-code"));
+    assert!(!debug.contains(&request.state));
+
+    let first = tokio::spawn({
+        let provider = provider.clone();
+        let store = store.clone();
+        let input = input.clone();
+        async move { provider.handle_callback(&store, input).await }
+    });
+    let second = tokio::spawn({
+        let provider = provider.clone();
+        let store = store.clone();
+        async move { provider.handle_callback(&store, input).await }
+    });
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    let outcome = results.into_iter().find_map(Result::ok).unwrap();
+    let debug = format!("{outcome:?}");
+    assert!(!debug.contains("opaque-provider-access-token"));
+    assert!(!debug.contains(&request.nonce));
+    assert!(!debug.contains(&request.code_verifier));
+    assert!(!debug.contains("raw-claim-secret"));
+}
+
+#[tokio::test]
+async fn successful_recent_reauthentication_does_not_imply_local_mfa() {
+    let (provider, client) = provider_and_client();
+    let state_store = MemoryOAuthStateStore::default();
+    let identity_store = MemoryExternalIdentityStore::default();
+    let auth = test_auth_service(
+        MemoryUserStore::default(),
+        MemoryRefreshTokenStore::default(),
+    );
+    let options = OidcAuthorizationOptions {
+        prompt: vec![OidcPrompt::Login],
+        max_age: Some(60),
+        id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAuthTime],
+        ..Default::default()
+    };
+    let request = provider
+        .create_authorization_request_with_options(&state_store, options)
+        .await
+        .unwrap();
+    let mut claims = valid_claims(&request.nonce);
+    claims["auth_time"] = json!(OffsetDateTime::now_utc().unix_timestamp());
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+
+    let result = provider
+        .login_with_callback(
+            &auth,
+            &state_store,
+            &identity_store,
+            &StaticProvisioner {
+                user_id: "recent-user".to_string(),
+            },
+            &NoopClaimsMapper,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+            metadata(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.authorization.recent_authentication_was_enforced());
+    assert!(!result.auth.user.session.mfa.satisfied);
+    assert!(result.auth.user.session.assurance.is_none());
+    assert!(result.auth.user.token_claims.auth_time.is_none());
+}
+
+#[tokio::test]
+async fn callback_and_token_endpoint_errors_do_not_echo_provider_input() {
+    let (provider, client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let callback_error = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput {
+                code: None,
+                state: None,
+                error: Some("secret-state-value".to_string()),
+                error_description: Some("secret-code-and-token".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+    let displayed = callback_error.to_string();
+    assert!(!displayed.contains("secret-state-value"));
+    assert!(!displayed.contains("secret-code-and-token"));
+    assert_eq!(callback_error.public_code(), "UNAUTHENTICATED");
+
+    let request = provider.create_authorization_request(&store).await.unwrap();
+    *client.post_response.lock().unwrap() = json!({
+        "error": "secret-client-value",
+        "error_description": "secret-token-value"
+    });
+    let token_error = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("secret-code", request.state),
+        )
+        .await
+        .unwrap_err();
+    let displayed = token_error.to_string();
+    assert!(!displayed.contains("secret-client-value"));
+    assert!(!displayed.contains("secret-token-value"));
+    assert!(!displayed.contains("secret-code"));
+}
+
 async fn run_validation_case(
     mutate_claims: impl FnOnce(&mut JsonValue, &str),
 ) -> crate::AuthResult<OidcCallbackOutcome> {
@@ -958,6 +1511,62 @@ async fn run_validation_case(
             OidcCallbackInput::code_and_state("auth-code", request.state),
         )
         .await
+}
+
+async fn run_bound_case(
+    now: OffsetDateTime,
+    options: OidcAuthorizationOptions,
+    mutate_claims: impl FnOnce(&mut JsonValue),
+) -> crate::AuthResult<OidcCallbackOutcome> {
+    let client = MockOidcHttpClient::new();
+    let mut config = MicrosoftEntraConfig::single_tenant(TENANT_ID, CLIENT_ID, REDIRECT_URI)
+        .into_oidc_provider_config()
+        .unwrap();
+    config.clock_skew = Duration::seconds(5);
+    let provider = OidcProvider::new_with_clock(
+        config,
+        Arc::new(client.clone()),
+        Arc::new(FixedClock::new(now)),
+    )
+    .unwrap();
+    let store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request_with_options(&store, options)
+        .await?;
+    let mut claims = valid_claims(&request.nonce);
+    claims["iat"] = json!(now.unix_timestamp());
+    claims["nbf"] = json!((now - Duration::minutes(1)).unix_timestamp());
+    claims["exp"] = json!((now + Duration::minutes(10)).unix_timestamp());
+    mutate_claims(&mut claims);
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+    provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
+}
+
+fn query_pairs(url: &str) -> Vec<(String, String)> {
+    url.split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| {
+            (
+                percent_decode_str(key).decode_utf8_lossy().into_owned(),
+                percent_decode_str(value).decode_utf8_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+fn query_values<'a>(pairs: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+    pairs
+        .iter()
+        .filter_map(|(key, value)| (key == name).then_some(value.as_str()))
+        .collect()
 }
 
 fn provider_and_client() -> (OidcProvider, MockOidcHttpClient) {

@@ -1117,7 +1117,7 @@ impl Default for TotpOptions {
 }
 
 /// Authorization redirect information returned by [`crate::OidcProvider`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcAuthorizationRequest {
     /// Fully built provider authorization URL.
     pub authorization_url: String,
@@ -1131,12 +1131,31 @@ pub struct OidcAuthorizationRequest {
     pub code_verifier: String,
     /// PKCE S256 challenge sent to the provider.
     pub code_challenge: String,
+    /// Normalized options bound to the stored one-time state. `None` identifies
+    /// the compatibility/default authorization flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_policy: Option<crate::OidcAuthorizationPolicy>,
     /// State expiry time.
     pub expires_at: OffsetDateTime,
 }
 
+impl fmt::Debug for OidcAuthorizationRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcAuthorizationRequest")
+            .field("authorization_url", &"[redacted]")
+            .field("provider_name", &self.provider_name)
+            .field("state", &"[redacted]")
+            .field("nonce", &"[redacted]")
+            .field("code_verifier", &"[redacted]")
+            .field("code_challenge", &"[redacted]")
+            .field("authorization_policy", &self.authorization_policy)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 /// Host-provided OIDC callback data.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcCallbackInput {
     /// Authorization code from the provider callback.
     pub code: Option<String>,
@@ -1146,6 +1165,20 @@ pub struct OidcCallbackInput {
     pub error: Option<String>,
     /// Provider error description.
     pub error_description: Option<String>,
+}
+
+impl fmt::Debug for OidcCallbackInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcCallbackInput")
+            .field("code", &self.code.as_ref().map(|_| "[redacted]"))
+            .field("state", &self.state.as_ref().map(|_| "[redacted]"))
+            .field("error", &self.error.as_ref().map(|_| "[redacted]"))
+            .field(
+                "error_description",
+                &self.error_description.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 impl OidcCallbackInput {
@@ -1201,7 +1234,7 @@ impl fmt::Debug for OidcTokenResponse {
 }
 
 /// Claims accepted after OIDC ID-token validation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ValidatedOidcClaims {
     /// Provider name.
     pub provider_name: String,
@@ -1228,6 +1261,10 @@ pub struct ValidatedOidcClaims {
     /// Provider-reported authentication context class.
     #[serde(default)]
     pub acr: Option<String>,
+    /// Provider-returned `acrs` string list, validated independently from the
+    /// standard scalar `acr`. This is provider evidence, not local MFA.
+    #[serde(default)]
+    pub acrs: Option<Vec<String>>,
     /// Validated nonce.
     pub nonce: String,
     /// Provider tenant ID, when present.
@@ -1249,8 +1286,36 @@ pub struct ValidatedOidcClaims {
     pub raw: JsonValue,
 }
 
+impl fmt::Debug for ValidatedOidcClaims {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ValidatedOidcClaims")
+            .field("provider_name", &self.provider_name)
+            .field("issuer", &self.issuer)
+            .field("audiences", &self.audiences)
+            .field("subject", &self.subject)
+            .field("external_subject", &self.external_subject)
+            .field("expires_at", &self.expires_at)
+            .field("not_before", &self.not_before)
+            .field("issued_at", &self.issued_at)
+            .field("auth_time", &self.auth_time)
+            .field("amr_count", &self.amr.as_ref().map(Vec::len))
+            .field("acr", &self.acr.as_ref().map(|_| "[redacted]"))
+            .field("acrs_count", &self.acrs.as_ref().map(Vec::len))
+            .field("nonce", &"[redacted]")
+            .field("tenant_id", &self.tenant_id)
+            .field("object_id", &self.object_id)
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("preferred_username", &self.preferred_username)
+            .field("role_count", &self.roles.len())
+            .field("group_count", &self.groups.len())
+            .field("raw", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Link between a provider identity and a local user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExternalIdentity {
     /// Provider name.
     pub provider_name: String,
@@ -1273,8 +1338,24 @@ pub struct ExternalIdentity {
     pub updated_at: OffsetDateTime,
 }
 
+impl fmt::Debug for ExternalIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExternalIdentity")
+            .field("provider_name", &self.provider_name)
+            .field("external_subject", &self.external_subject)
+            .field("user_id", &self.user_id)
+            .field("issuer", &self.issuer)
+            .field("tenant_id", &self.tenant_id)
+            .field("provider_user_id", &self.provider_user_id)
+            .field("claims_snapshot", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 /// Stored OIDC authorization state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthLoginState {
     /// Provider name.
     pub provider_name: String,
@@ -1288,12 +1369,33 @@ pub struct OAuthLoginState {
     pub redirect_uri: String,
     /// Requested scopes.
     pub scopes: Vec<String>,
+    /// Versioned normalized request policy. Legacy records omit this field and
+    /// therefore carry no step-up requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_policy: Option<crate::OidcAuthorizationPolicy>,
     /// Creation time.
     pub created_at: OffsetDateTime,
     /// Expiry time.
     pub expires_at: OffsetDateTime,
     /// Consumption time, if consumed.
     pub consumed_at: Option<OffsetDateTime>,
+}
+
+impl fmt::Debug for OAuthLoginState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthLoginState")
+            .field("provider_name", &self.provider_name)
+            .field("state_hash", &"[redacted]")
+            .field("nonce", &"[redacted]")
+            .field("code_verifier", &"[redacted]")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scope_count", &self.scopes.len())
+            .field("authorization_policy", &self.authorization_policy)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("consumed_at", &self.consumed_at)
+            .finish()
+    }
 }
 
 impl OAuthLoginState {
@@ -1359,7 +1461,7 @@ impl TryFrom<&ValidatedOidcClaims> for MicrosoftEntraClaims {
 }
 
 /// Result of a completed OIDC login and local session issuance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OidcLoginResult {
     /// Local `agql-auth` session payload.
     pub auth: AuthPayload,
@@ -1369,4 +1471,18 @@ pub struct OidcLoginResult {
     pub external_identity: ExternalIdentity,
     /// Provider token endpoint response.
     pub token_response: OidcTokenResponse,
+    /// Result of enforcing typed options bound to the one-time state.
+    pub authorization: crate::OidcAuthorizationOutcome,
+}
+
+impl fmt::Debug for OidcLoginResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcLoginResult")
+            .field("auth", &self.auth)
+            .field("claims", &self.claims)
+            .field("external_identity", &self.external_identity)
+            .field("token_response", &self.token_response)
+            .field("authorization", &self.authorization)
+            .finish()
+    }
 }

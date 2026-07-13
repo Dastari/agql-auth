@@ -60,6 +60,9 @@
 //! [`OidcProvider`] owns OIDC discovery, authorization URL generation, token
 //! exchange, JWKS caching, ID-token validation, state and nonce validation, and
 //! the handoff into local [`AuthService`] session issuance.
+//! [`OidcAuthorizationOptions`] adds bounded prompt, max-age, and essential
+//! ID-token claim requests that are stored with one-time state and enforced at
+//! callback. Recent active authentication remains distinct from local MFA.
 //!
 //! Microsoft Entra ID setup starts with [`MicrosoftEntraConfig`]. Host
 //! applications provide an [`OAuthStateStore`] with atomic one-time state
@@ -92,6 +95,7 @@ mod guards;
 mod keys;
 mod models;
 mod oidc;
+mod oidc_authorization;
 pub mod prelude;
 mod principal_reference;
 mod purpose_grant;
@@ -164,6 +168,12 @@ pub use oidc::{
     OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
     ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
     hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+};
+pub use oidc_authorization::{
+    MAX_OIDC_AUTHORIZATION_TOTAL_VALUE_LENGTH, MAX_OIDC_AUTHORIZATION_VALUE_LENGTH,
+    MAX_OIDC_AUTHORIZATION_VALUES, MAX_OIDC_CLAIMS_REQUEST_LENGTH, MAX_OIDC_MAX_AGE_SECONDS,
+    OidcAuthorizationOptions, OidcAuthorizationOutcome, OidcAuthorizationPolicy,
+    OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use principal_reference::{
     CurrentPrincipalResolver, PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal,

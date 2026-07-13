@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -7,13 +8,14 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyOperations, PublicKeyUse};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
+use crate::clock::{Clock, SystemClock};
 use crate::config::{ClientMetadata, OidcProviderConfig, OidcProviderKind};
 use crate::models::{
     ExternalIdentity, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
@@ -23,6 +25,7 @@ use crate::service::AuthService;
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{ExternalIdentityStore, OAuthStateStore, RefreshTokenStore, UserStore};
 use crate::{AuthError, AuthResult};
+use crate::{OidcAuthorizationOptions, OidcAuthorizationOutcome, OidcAuthorizationPolicy};
 
 const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -85,12 +88,21 @@ pub struct OidcDiscoveryDocument {
 }
 
 /// PKCE verifier and S256 challenge pair.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PkcePair {
     /// Random PKCE code verifier.
     pub code_verifier: String,
     /// Base64url-encoded SHA-256 challenge.
     pub code_challenge: String,
+}
+
+impl fmt::Debug for PkcePair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PkcePair")
+            .field("code_verifier", &"[redacted]")
+            .field("code_challenge", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Result of validating an OIDC callback before local user resolution.
@@ -102,6 +114,8 @@ pub struct OidcCallbackOutcome {
     pub token_response: OidcTokenResponse,
     /// Validated ID-token claims.
     pub claims: ValidatedOidcClaims,
+    /// Result of enforcing authorization options bound to the consumed state.
+    pub authorization: OidcAuthorizationOutcome,
 }
 
 /// Local roles, scopes, and optional host-accepted assurance derived from provider claims.
@@ -396,6 +410,7 @@ pub struct OidcProvider {
     discovery_cache: Arc<Mutex<Option<CachedDiscovery>>>,
     jwks_cache: Arc<Mutex<Option<CachedJwks>>>,
     last_forced_jwks_refresh: Arc<Mutex<Option<OffsetDateTime>>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl OidcProvider {
@@ -404,6 +419,16 @@ impl OidcProvider {
         config: OidcProviderConfig,
         http_client: Arc<dyn OidcHttpClient>,
     ) -> AuthResult<Self> {
+        Self::new_with_clock(config, http_client, Arc::new(SystemClock))
+    }
+
+    /// Creates a provider with an injected clock for deterministic state,
+    /// `auth_time`, max-age, skew, and cache-boundary behavior.
+    pub fn new_with_clock(
+        config: OidcProviderConfig,
+        http_client: Arc<dyn OidcHttpClient>,
+        clock: Arc<dyn Clock>,
+    ) -> AuthResult<Self> {
         config.validate()?;
         Ok(Self {
             config,
@@ -411,6 +436,7 @@ impl OidcProvider {
             discovery_cache: Arc::new(Mutex::new(None)),
             jwks_cache: Arc::new(Mutex::new(None)),
             last_forced_jwks_refresh: Arc::new(Mutex::new(None)),
+            clock,
         })
     }
 
@@ -421,7 +447,7 @@ impl OidcProvider {
 
     /// Fetches and caches the OIDC discovery document.
     pub async fn discover(&self) -> AuthResult<OidcDiscoveryDocument> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.clock.now();
         if let Some(cache) = self
             .discovery_cache
             .lock()
@@ -441,7 +467,11 @@ impl OidcProvider {
         let mut document: OidcDiscoveryDocument = serde_json::from_value(raw.clone())
             .map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
         document.raw = raw;
-        let expires_at = now + self.config.discovery_cache_ttl;
+        let expires_at = now
+            .checked_add(self.config.discovery_cache_ttl)
+            .ok_or_else(|| {
+                AuthError::OidcDiscovery("discovery cache expiry overflowed".to_string())
+            })?;
 
         *self
             .discovery_cache
@@ -465,12 +495,42 @@ impl OidcProvider {
     where
         S: OAuthStateStore,
     {
+        self.create_authorization_request_inner(state_store, None)
+            .await
+    }
+
+    /// Creates an authorization URL with validated options bound to the exact
+    /// one-time OAuth state consumed by the callback.
+    pub async fn create_authorization_request_with_options<S>(
+        &self,
+        state_store: &S,
+        options: OidcAuthorizationOptions,
+    ) -> AuthResult<OidcAuthorizationRequest>
+    where
+        S: OAuthStateStore,
+    {
+        let policy = options.validate()?;
+        self.create_authorization_request_inner(state_store, Some(policy))
+            .await
+    }
+
+    async fn create_authorization_request_inner<S>(
+        &self,
+        state_store: &S,
+        authorization_policy: Option<OidcAuthorizationPolicy>,
+    ) -> AuthResult<OidcAuthorizationRequest>
+    where
+        S: OAuthStateStore,
+    {
         let discovery = self.discover().await?;
+        ensure_no_reserved_authorization_parameters(&discovery.authorization_endpoint)?;
         let state = generate_oauth_state();
         let nonce = generate_oidc_nonce();
         let pkce = generate_pkce_pair();
-        let now = OffsetDateTime::now_utc();
-        let expires_at = now + self.config.state_ttl;
+        let now = self.clock.now();
+        let expires_at = now.checked_add(self.config.state_ttl).ok_or_else(|| {
+            AuthError::InvalidConfiguration("OIDC state expiry overflowed".to_string())
+        })?;
         let scopes = self.config.scopes();
         let scope = scopes.join(" ");
         let state_record = OAuthLoginState {
@@ -480,6 +540,7 @@ impl OidcProvider {
             code_verifier: pkce.code_verifier.clone(),
             redirect_uri: self.config.redirect_uri.clone(),
             scopes: scopes.clone(),
+            authorization_policy: authorization_policy.clone(),
             created_at: now,
             expires_at,
             consumed_at: None,
@@ -487,20 +548,32 @@ impl OidcProvider {
 
         state_store.insert_oauth_state(state_record).await?;
 
-        let authorization_url = append_query(
-            &discovery.authorization_endpoint,
-            &[
-                ("client_id", self.config.client_id.as_str()),
-                ("redirect_uri", self.config.redirect_uri.as_str()),
-                ("response_type", "code"),
-                ("response_mode", "query"),
-                ("scope", &scope),
-                ("state", &state),
-                ("nonce", &nonce),
-                ("code_challenge", &pkce.code_challenge),
-                ("code_challenge_method", "S256"),
-            ],
-        );
+        let mut params = vec![
+            ("client_id".to_string(), self.config.client_id.clone()),
+            ("redirect_uri".to_string(), self.config.redirect_uri.clone()),
+            ("response_type".to_string(), "code".to_string()),
+            ("response_mode".to_string(), "query".to_string()),
+            ("scope".to_string(), scope),
+            ("state".to_string(), state.clone()),
+            ("nonce".to_string(), nonce.clone()),
+            ("code_challenge".to_string(), pkce.code_challenge.clone()),
+            ("code_challenge_method".to_string(), "S256".to_string()),
+        ];
+        if let Some(policy) = &authorization_policy {
+            if let Some(prompt) = policy.prompt_parameter() {
+                params.push(("prompt".to_string(), prompt));
+            }
+            if let Some(max_age) = policy.max_age_seconds() {
+                params.push(("max_age".to_string(), max_age.to_string()));
+            }
+            if let Some(acr_values) = policy.acr_values_parameter() {
+                params.push(("acr_values".to_string(), acr_values));
+            }
+            if let Some(claims) = policy.claims_parameter()? {
+                params.push(("claims".to_string(), claims));
+            }
+        }
+        let authorization_url = append_query(&discovery.authorization_endpoint, &params);
 
         Ok(OidcAuthorizationRequest {
             authorization_url,
@@ -509,6 +582,7 @@ impl OidcProvider {
             nonce,
             code_verifier: pkce.code_verifier,
             code_challenge: pkce.code_challenge,
+            authorization_policy,
             expires_at,
         })
     }
@@ -523,11 +597,10 @@ impl OidcProvider {
         S: OAuthStateStore,
     {
         if let Some(error) = input.error {
-            let detail = input
-                .error_description
-                .map(|description| format!("{error}: {description}"))
-                .unwrap_or(error);
-            return Err(AuthError::OidcCallback(detail));
+            let _ = (error, input.error_description);
+            return Err(AuthError::OidcCallback(
+                "provider returned an authorization error".to_string(),
+            ));
         }
 
         let code = input.code.ok_or_else(|| {
@@ -535,7 +608,7 @@ impl OidcProvider {
         })?;
         let raw_state = input.state.ok_or(AuthError::InvalidOAuthState)?;
         let state_hash = hash_oauth_state(&raw_state);
-        let now = OffsetDateTime::now_utc();
+        let now = self.clock.now();
         let state = state_store
             .consume_oauth_state(&self.config.provider_name, &state_hash, now)
             .await?
@@ -549,15 +622,27 @@ impl OidcProvider {
             return Err(AuthError::OAuthStateExpired);
         }
 
+        if let Some(policy) = &state.authorization_policy {
+            policy.validate_stored().map_err(|_| {
+                AuthError::OidcTokenValidation("stored authorization policy is invalid".to_string())
+            })?;
+        }
+
         let token_response = self.exchange_code(&code, &state).await?;
         let claims = self
             .validate_id_token(&token_response.id_token, &state.nonce)
             .await?;
+        let authorization = self.enforce_authorization_policy(
+            state.authorization_policy.as_ref(),
+            &claims,
+            self.clock.now(),
+        )?;
 
         Ok(OidcCallbackOutcome {
             state,
             token_response,
             claims,
+            authorization,
         })
     }
 
@@ -585,7 +670,7 @@ impl OidcProvider {
         M: ClaimsMapper,
     {
         let outcome = self.handle_callback(state_store, input).await?;
-        let now = OffsetDateTime::now_utc();
+        let now = self.clock.now();
         let existing_identity = external_identity_store
             .find_external_identity(
                 &outcome.claims.provider_name,
@@ -671,6 +756,7 @@ impl OidcProvider {
             claims: outcome.claims,
             external_identity,
             token_response: outcome.token_response,
+            authorization: outcome.authorization,
         })
     }
 
@@ -697,15 +783,14 @@ impl OidcProvider {
             .http_client
             .post_form_json(&discovery.token_endpoint, &form)
             .await
-            .map_err(|err| AuthError::OidcTokenExchange(err.to_string()))?;
+            .map_err(|_| {
+                AuthError::OidcTokenExchange("provider token endpoint request failed".to_string())
+            })?;
 
-        if let Some(error) = raw.get("error").and_then(JsonValue::as_str) {
-            let detail = raw
-                .get("error_description")
-                .and_then(JsonValue::as_str)
-                .map(|description| format!("{error}: {description}"))
-                .unwrap_or_else(|| error.to_string());
-            return Err(AuthError::OidcTokenExchange(detail));
+        if raw.get("error").is_some() {
+            return Err(AuthError::OidcTokenExchange(
+                "provider token endpoint returned an error".to_string(),
+            ));
         }
 
         let mut token_response: OidcTokenResponse = serde_json::from_value(raw.clone())
@@ -768,7 +853,7 @@ impl OidcProvider {
     }
 
     async fn jwks(&self, force_refresh: bool) -> AuthResult<JwkSet> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.clock.now();
         if !force_refresh
             && let Some(cache) = self
                 .jwks_cache
@@ -789,7 +874,9 @@ impl OidcProvider {
             .map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
         let jwks: JwkSet =
             serde_json::from_value(raw).map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
-        let expires_at = now + self.config.jwks_cache_ttl;
+        let expires_at = now
+            .checked_add(self.config.jwks_cache_ttl)
+            .ok_or_else(|| AuthError::OidcDiscovery("JWKS cache expiry overflowed".to_string()))?;
 
         *self
             .jwks_cache
@@ -808,14 +895,24 @@ impl OidcProvider {
             return Ok(true);
         }
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.clock.now();
         let mut last_refresh = self.last_forced_jwks_refresh.lock().map_err(|_| {
             AuthError::OidcDiscovery("forced JWKS refresh lock poisoned".to_string())
         })?;
 
-        let allowed = last_refresh
-            .map(|last| now >= last + self.config.jwks_forced_refresh_cooldown)
-            .unwrap_or(true);
+        let allowed = match *last_refresh {
+            Some(last) => {
+                let next = last
+                    .checked_add(self.config.jwks_forced_refresh_cooldown)
+                    .ok_or_else(|| {
+                        AuthError::OidcDiscovery(
+                            "forced JWKS refresh time arithmetic overflowed".to_string(),
+                        )
+                    })?;
+                now >= next
+            }
+            None => true,
+        };
         if allowed {
             *last_refresh = Some(now);
         }
@@ -874,8 +971,13 @@ impl OidcProvider {
             }
         }
 
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        if claims.iat > now + self.config.clock_skew.whole_seconds() {
+        let now_datetime = self.clock.now();
+        let latest = now_datetime
+            .checked_add(self.config.clock_skew)
+            .ok_or_else(|| {
+                AuthError::OidcTokenValidation("OIDC clock-skew arithmetic overflowed".to_string())
+            })?;
+        if claims.iat > latest.unix_timestamp() {
             return Err(AuthError::OidcTokenValidation(
                 "ID token iat is in the future".to_string(),
             ));
@@ -886,9 +988,10 @@ impl OidcProvider {
                 "ID token auth_time must be a non-negative timestamp".to_string(),
             ));
         }
-        if claims.auth_time.is_some_and(|auth_time| {
-            auth_time > now.saturating_add(self.config.clock_skew.whole_seconds())
-        }) {
+        if claims
+            .auth_time
+            .is_some_and(|auth_time| auth_time > latest.unix_timestamp())
+        {
             return Err(AuthError::OidcTokenValidation(
                 "ID token auth_time is in the future".to_string(),
             ));
@@ -902,6 +1005,9 @@ impl OidcProvider {
         )
         .map_err(|error| AuthError::OidcTokenValidation(error.to_string()))?;
         let normalized_amr = claims.amr.as_ref().map(|_| normalized_assurance.methods);
+        if let Some(acrs) = &claims.acrs {
+            crate::oidc_authorization::validate_acrs(acrs)?;
+        }
 
         let external_subject = stable_external_subject(
             &self.config.provider_kind,
@@ -928,6 +1034,7 @@ impl OidcProvider {
                 .transpose()?,
             amr: normalized_amr,
             acr: normalized_assurance.acr,
+            acrs: claims.acrs,
             nonce,
             tenant_id,
             object_id: claims.oid,
@@ -937,6 +1044,91 @@ impl OidcProvider {
             roles: claims.roles,
             groups: claims.groups,
             raw,
+        })
+    }
+
+    fn enforce_authorization_policy(
+        &self,
+        policy: Option<&OidcAuthorizationPolicy>,
+        claims: &ValidatedOidcClaims,
+        now: OffsetDateTime,
+    ) -> AuthResult<OidcAuthorizationOutcome> {
+        let Some(policy) = policy else {
+            return Ok(OidcAuthorizationOutcome {
+                policy: None,
+                enforced_auth_time: None,
+                matched_acr: None,
+            });
+        };
+
+        let requires_auth_time = policy.max_age_seconds().is_some() || policy.essential_auth_time();
+        let enforced_auth_time = if requires_auth_time {
+            let auth_time = claims.auth_time.ok_or_else(|| {
+                AuthError::OidcTokenValidation(
+                    "bound authorization requires ID token auth_time".to_string(),
+                )
+            })?;
+            let skew = self.config.clock_skew.whole_seconds();
+            let latest = now.unix_timestamp().checked_add(skew).ok_or_else(|| {
+                AuthError::OidcTokenValidation(
+                    "bound authorization future-skew arithmetic overflowed".to_string(),
+                )
+            })?;
+            if auth_time.unix_timestamp() > latest {
+                return Err(AuthError::OidcTokenValidation(
+                    "bound authorization auth_time is in the future".to_string(),
+                ));
+            }
+            if let Some(max_age) = policy.max_age_seconds() {
+                let max_age = i64::try_from(max_age).map_err(|_| {
+                    AuthError::OidcTokenValidation(
+                        "bound authorization max_age is invalid".to_string(),
+                    )
+                })?;
+                let oldest = now
+                    .unix_timestamp()
+                    .checked_sub(max_age)
+                    .and_then(|value| value.checked_sub(skew))
+                    .ok_or_else(|| {
+                        AuthError::OidcTokenValidation(
+                            "bound authorization max-age arithmetic overflowed".to_string(),
+                        )
+                    })?;
+                if auth_time.unix_timestamp() < oldest {
+                    return Err(AuthError::OidcTokenValidation(
+                        "bound authorization auth_time is too old".to_string(),
+                    ));
+                }
+            }
+            Some(auth_time)
+        } else {
+            None
+        };
+
+        let matched_acr = if policy.essential_acr_values().is_empty() {
+            None
+        } else {
+            let acr = claims.acr.as_ref().ok_or_else(|| {
+                AuthError::OidcTokenValidation(
+                    "bound authorization requires the standard acr claim".to_string(),
+                )
+            })?;
+            if !policy
+                .essential_acr_values()
+                .iter()
+                .any(|allowed| allowed == acr)
+            {
+                return Err(AuthError::OidcTokenValidation(
+                    "bound authorization standard acr did not match".to_string(),
+                ));
+            }
+            Some(acr.clone())
+        };
+
+        Ok(OidcAuthorizationOutcome {
+            policy: Some(policy.clone()),
+            enforced_auth_time,
+            matched_acr,
         })
     }
 
@@ -1036,6 +1228,7 @@ struct RawOidcIdTokenClaims {
     auth_time: Option<i64>,
     amr: Option<Vec<String>>,
     acr: Option<String>,
+    acrs: Option<Vec<String>>,
     nonce: Option<String>,
     azp: Option<String>,
     tid: Option<String>,
@@ -1179,7 +1372,41 @@ fn generate_urlsafe_secret() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn append_query(base_url: &str, params: &[(&str, &str)]) -> String {
+fn ensure_no_reserved_authorization_parameters(endpoint: &str) -> AuthResult<()> {
+    const RESERVED: &[&str] = &[
+        "client_id",
+        "redirect_uri",
+        "response_type",
+        "response_mode",
+        "scope",
+        "state",
+        "nonce",
+        "code_challenge",
+        "code_challenge_method",
+        "prompt",
+        "max_age",
+        "acr_values",
+        "claims",
+    ];
+
+    let query = endpoint
+        .split_once('?')
+        .map(|(_, remainder)| remainder.split('#').next().unwrap_or_default());
+    if query.is_some_and(|query| {
+        query.split('&').any(|pair| {
+            let encoded_key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            let key = percent_decode_str(encoded_key).decode_utf8_lossy();
+            RESERVED.contains(&key.as_ref())
+        })
+    }) {
+        return Err(AuthError::InvalidOidcAuthorizationOptions(
+            "authorization endpoint contains a reserved query parameter".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn append_query(base_url: &str, params: &[(String, String)]) -> String {
     let separator = if base_url.contains('?') { '&' } else { '?' };
     let query = params
         .iter()

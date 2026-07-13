@@ -121,6 +121,12 @@ pub enum AuthError {
     /// OIDC callback contained an error or was malformed.
     #[error("oidc callback failed: {0}")]
     OidcCallback(String),
+    /// Typed OIDC authorization options were invalid.
+    ///
+    /// The inner string is bounded diagnostic detail and must not contain raw
+    /// state, nonce, PKCE material, URLs, or claim values.
+    #[error("invalid oidc authorization options: {0}")]
+    InvalidOidcAuthorizationOptions(String),
     /// OIDC ID-token validation failed.
     #[error("oidc token validation failed: {0}")]
     OidcTokenValidation(String),
@@ -194,6 +200,7 @@ impl AuthError {
             AuthError::OidcDiscovery(_) => "AUTH_SERVICE_UNAVAILABLE",
             AuthError::OidcTokenExchange(_) => "AUTH_SERVICE_UNAVAILABLE",
             AuthError::OidcCallback(_) => "UNAUTHENTICATED",
+            AuthError::InvalidOidcAuthorizationOptions(_) => "INVALID_CONFIGURATION",
             AuthError::OidcTokenValidation(_) => "UNAUTHENTICATED",
             AuthError::ExternalLoginRejected(_) => "FORBIDDEN",
             AuthError::JwksUnsupported => "INVALID_CONFIGURATION",
@@ -252,6 +259,7 @@ impl AuthError {
             | AuthError::Store(_)
             | AuthError::AuthServiceUnavailable => "authentication service unavailable",
             AuthError::JwksUnsupported
+            | AuthError::InvalidOidcAuthorizationOptions(_)
             | AuthError::InvalidConfiguration(_)
             | AuthError::Config(_) => "invalid configuration",
         }

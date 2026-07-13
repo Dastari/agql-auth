@@ -1,5 +1,78 @@
 # Migration Guide
 
+## 0.9.0 to 0.10.0: bound OIDC reauthentication
+
+Existing calls to `create_authorization_request` retain their standard PKCE,
+nonce, state, scope, redirect, response-type, and response-mode behavior. They
+create no bound policy. Use `create_authorization_request_with_options` only for
+flows that need provider-enforced recent authentication or exact standard ACR
+evidence.
+
+```rust
+use agql_auth::{
+    OidcAuthorizationOptions, OidcIdTokenClaimRequest, OidcPrompt,
+};
+
+let options = OidcAuthorizationOptions {
+    prompt: vec![OidcPrompt::Login],
+    max_age: Some(300),
+    acr_values: Vec::new(),
+    id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAuthTime],
+};
+let expected = options.validate()?;
+let request = provider
+    .create_authorization_request_with_options(&oauth_state_store, options)
+    .await?;
+
+// At the dedicated reauthentication callback endpoint:
+let outcome = provider
+    .handle_callback(&oauth_state_store, callback_input)
+    .await?;
+outcome.authorization.require_bound_policy(&expected)?;
+```
+
+`max_age` and essential `auth_time` cause callback validation to require a
+numeric signed `auth_time`. Exact max age plus configured clock skew is allowed;
+one second older is denied. Future skew uses the same inclusive rule. Use
+`OidcProvider::new_with_clock` for deterministic host tests.
+
+### OAuth state storage
+
+`OAuthLoginState` adds
+`authorization_policy: Option<OidcAuthorizationPolicy>`. The
+`OAuthStateStore` trait methods are unchanged. JSON/document records missing the
+field deserialize as `None`; a legacy in-flight login remains a normal login and
+must not be accepted by an endpoint that calls `require_bound_policy`.
+
+Relational stores should deploy a nullable JSON/typed column reader before
+enabling typed request writers:
+
+```sql
+ALTER TABLE oauth_states
+    ADD COLUMN authorization_policy JSON NULL;
+```
+
+Atomic consume queries must return the optional policy with the same
+pre-consumption state snapshot. Implementations constructing public records
+must add `authorization_policy: None`. Unknown/corrupt versions fail closed.
+
+### Public struct and error changes
+
+- `OidcAuthorizationRequest.authorization_policy`
+- `OAuthLoginState.authorization_policy`
+- `ValidatedOidcClaims.acrs`
+- `OidcLoginResult.authorization`
+- `AuthError::InvalidOidcAuthorizationOptions`
+
+These additions can require changes to exhaustive matches and struct literals,
+which is why this is `0.10.0` rather than a patch release.
+
+Do not map `prompt=login`, `max_age`, `auth_time`, provider kind, standard
+scalar `acr`, or provider `acrs` to MFA implicitly. Entra `acrs` ID-token
+behavior requires a separately configured and proven provider contract. See
+[bound OIDC reauthentication](docs/oidc-step-up.md) for the full trust boundary,
+provider limitations, and long-lived-operation guidance.
+
 ## 0.8.1 to 0.9.0: durable principal lifecycle primitives
 
 No existing call-site, database, token, session, or serialized-record migration

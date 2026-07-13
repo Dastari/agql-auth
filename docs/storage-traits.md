@@ -175,8 +175,10 @@ The consume operation should be atomic to reject replayed codes.
 `OAuthStateStore` is required for OIDC authorization-code flows.
 
 `create_authorization_request` stores an `OAuthLoginState` containing the hashed
-state, nonce, PKCE verifier, redirect URI, requested scopes, and expiry. The
-raw state is returned only to the browser redirect flow.
+state, nonce, PKCE verifier, redirect URI, requested scopes, expiry, and an
+optional versioned `authorization_policy`. The typed-options API binds that
+policy to the exact state; legacy/default requests store `None`. The raw state
+is returned only to the browser redirect flow.
 
 `consume_oauth_state` must consume state exactly once. A replayed callback with
 the same state must not be accepted.
@@ -195,13 +197,16 @@ WHERE provider_name = ?
   AND state_hash = ?
   AND consumed_at IS NULL
 RETURNING provider_name, state_hash, nonce, code_verifier, redirect_uri,
-          scopes, created_at, expires_at, NULL AS consumed_at;
+          scopes, authorization_policy, created_at, expires_at,
+          NULL AS consumed_at;
 ```
 
 Recommended database constraints:
 
 - unique key on `(provider_name, state_hash)`
 - nullable `consumed_at`
+- nullable JSON/typed `authorization_policy`; missing legacy values mean no
+  request, never satisfied step-up
 - compare expiry before accepting the callback
 - update `consumed_at` in the same statement that verifies it is currently null
 

@@ -165,11 +165,20 @@ For custom policy, implement `ClaimsMapper` directly.
 
 Validated standard `auth_time`, `amr`, and `acr` values are available on
 `ValidatedOidcClaims`, but they are evidence rather than local authorization.
+Provider-returned `acrs` is exposed as a separate bounded string list and is
+never merged with standard scalar `acr`.
 Neither `MicrosoftClaimsMapper` nor `NoopClaimsMapper` treats any provider value
 as MFA. A custom mapper may return `MappedClaims.assurance` only after explicit
 host policy accepts the provider's methods/ACR. Do not assume a Microsoft (or
 other provider) claim value universally means MFA. See
 [session assurance](session-assurance.md).
+
+For recent active authentication, use the typed bound authorization API in
+[OIDC reauthentication and step-up](oidc-step-up.md). `prompt=login` and
+`max_age` do not prove MFA. Entra authentication-context/optional-claim behavior
+must be configured and verified for the exact tenant, application, and token
+type; this crate does not assume that an ID token will contain `acrs` or that
+any context identifier universally means MFA.
 
 Do not use email, UPN, name, or preferred username as authorization
 identifiers. For Microsoft work/school accounts, the preferred stable external

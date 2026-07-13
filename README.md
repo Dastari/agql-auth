@@ -294,6 +294,8 @@ let microsoft = OidcProvider::new(
 ```
 
 See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
+For typed recent-authentication requests bound to one-time state, see
+[OIDC reauthentication and step-up](docs/oidc-step-up.md).
 
 ## Documentation
 
@@ -311,9 +313,19 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 - [Public error codes](docs/public-error-codes.md)
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
+- [OIDC reauthentication and step-up](docs/oidc-step-up.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Migration guide](MIGRATION.md)
+
+## 0.10.0 Bound OIDC Reauthentication
+
+`0.10.0` adds typed `prompt`, `max_age`, `acr_values`, and essential ID-token
+claim requests whose normalized policy is stored with one-time OAuth state and
+enforced at callback. Standard scalar `acr` and bounded provider `acrs` remain
+distinct evidence and never imply MFA. Legacy state has no bound policy. See
+[OIDC reauthentication and step-up](docs/oidc-step-up.md) and
+[MIGRATION.md](MIGRATION.md).
 
 ## 0.9.0 Principal Lifecycle
 
