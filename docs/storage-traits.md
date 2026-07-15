@@ -93,10 +93,17 @@ The store receives opaque keys:
 - `bucket`, either `principal` or `client`
 - `value_hash`, a SHA-256 hash of the normalized principal/user/client value
 
-The store should persist `AuthRateLimitState` fields durably, upsert by the full
-key, and delete records only after `expires_at`. For multi-instance safety,
-protect updates with the database's normal transaction, row lock, or upsert
-mechanism so concurrent attempts do not lose increments.
+The store persists `AuthRateLimitSnapshot`: the state plus a fresh UUID
+revision. `compare_exchange_auth_rate_limit_state` must conditionally insert
+when no revision was observed or update only the exact observed revision.
+`clear_auth_rate_limit_state` is also conditional. This lets the service keep
+all policy calculations centralized while preventing lost increments and stale
+success/expiry cleanup from erasing newer failures.
+
+Durable backends need a revision column or equivalent document field. SQLite
+can use a write transaction or conditional insert/update; PostgreSQL can use a
+row lock, conditional update, or revision-guarded upsert. An unconditional
+upsert after `find_auth_rate_limit_state` does not satisfy the contract.
 
 `AuthConfig.rate_limits.credential` controls password login, login-code
 verification, TOTP verification, and password-reset token consumption.
@@ -115,6 +122,9 @@ initiation. Each `AuthRateLimitPolicy` exposes:
 Throttled credential checks return `AuthError::AuthThrottled`; lockouts return
 `AuthError::AuthLocked`. Both map to GraphQL extension codes and include
 `retryAfterSeconds`.
+
+See [atomic abuse protection](abuse-protection.md) for CAS semantics, clock
+injection, clear ordering, migration, and adapter conformance cases.
 
 ## API Tokens
 

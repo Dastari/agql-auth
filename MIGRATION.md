@@ -1,5 +1,95 @@
 # Migration Guide
 
+## 0.10.0 to 0.11.0: atomic durable rate-limit attempts
+
+Version 0.11 replaces the split rate-limit read/save contract with versioned
+compare-and-swap. This prevents concurrent service instances from reading
+attempt count `n` and both replacing it with `n + 1`.
+
+### Store API migration
+
+`find_auth_rate_limit_state` now returns
+`Option<AuthRateLimitSnapshot>`. Replace `save_auth_rate_limit_state` with
+`compare_exchange_auth_rate_limit_state`, and make clear conditional:
+
+```rust
+async fn compare_exchange_auth_rate_limit_state(
+    &self,
+    key: &AuthRateLimitKey,
+    expected_revision: Option<Uuid>,
+    replacement: AuthRateLimitSnapshot,
+) -> AuthResult<bool>;
+
+async fn clear_auth_rate_limit_state(
+    &self,
+    key: &AuthRateLimitKey,
+    expected_revision: Option<Uuid>,
+) -> AuthResult<bool>;
+```
+
+With no expected revision, compare-exchange succeeds only for an absent key.
+With a revision, it succeeds only for an exact match. Conflict returns
+`Ok(false)` without mutation. Conditional clear follows the same rule. The
+service generates a fresh UUID for every replacement, recomputes the state
+transition after conflict, and never falls back to split replacement.
+
+`AuthRateLimitState` itself is unchanged. Durable stores need a UUID revision
+column or equivalent value stored atomically beside it. Backfill every existing
+row with a distinct revision before deploying the 0.11 writer. JSON/document
+stores may wrap the existing state as:
+
+```json
+{
+  "state": { "existing": "AuthRateLimitState fields" },
+  "revision": "one unique UUID per committed version"
+}
+```
+
+For SQLite, use a write transaction or conditional insert/update that tests the
+stored revision; the unique full key resolves first-insert races. For
+PostgreSQL, use `SELECT ... FOR UPDATE`, a conditional update, or an upsert
+whose update predicate matches the expected revision. Clear must delete only
+the matching revision. Do not implement compare-exchange as a read followed by
+an unconditional upsert.
+
+### Service and clock behavior
+
+Existing `AuthService::new` and `new_with_rate_limit_store` remain available
+and use `SystemClock`. Deterministic tests can use:
+
+```rust
+let auth = AuthService::new_with_rate_limit_store_and_clock(
+    config,
+    user_store,
+    refresh_store,
+    rate_limit_store,
+    Arc::new(FixedClock::new(now)),
+)?;
+```
+
+Password-reset and login-code request admission is now linearized with its
+per-key attempt write. The attempt that first activates backoff remains allowed,
+matching 0.10 behavior; later concurrent requests are denied. Credential
+failures always record through CAS, including failures that began before a
+concurrent attempt activated lockout.
+
+A successful credential flow receives an internal observation permit before
+verification and clears only unchanged revisions afterward. If a newer failure
+commits meanwhile, conditional clear returns a conflict and the newer failure
+remains. Expired-state cleanup is no longer an unconditional service delete;
+the next attempt resets it through CAS, and stores may delete expired rows with
+their normal conditional/background cleanup.
+
+Atomicity is per full `AuthRateLimitKey`. Principal and client buckets are
+evaluated independently and are not committed as one cross-key transaction.
+Store failures retain the existing safe `AUTH_SERVICE_UNAVAILABLE` public
+category; backend details remain available only through internal errors.
+
+Memory-store-only consumers need no data migration, but custom trait
+implementations must update before compiling. See
+[atomic abuse protection](docs/abuse-protection.md) for backend and conformance
+guidance.
+
 ## 0.9.0 to 0.10.0: bound OIDC reauthentication
 
 Existing calls to `create_authorization_request` retain their standard PKCE,

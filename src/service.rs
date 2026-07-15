@@ -27,14 +27,14 @@ use crate::assurance::{
     MfaAcceptance, RefreshableTokenMetadata, SessionAssurance, StepUpAuthentication,
 };
 use crate::claims::AccessTokenMetadata;
-use crate::clock::Clock;
+use crate::clock::{Clock, SystemClock};
 use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
 use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
 use crate::models::{
-    AuthPayload, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitState,
-    AuthUser, IssuedPurposeToken, PurposeTokenIssueRequest, PurposeTokenValidation,
-    RefreshTokenRevocationReason, StoredRefreshToken, VerifiedPurposeToken,
+    AuthPayload, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitSnapshot,
+    AuthRateLimitState, AuthUser, IssuedPurposeToken, PurposeTokenIssueRequest,
+    PurposeTokenValidation, RefreshTokenRevocationReason, StoredRefreshToken, VerifiedPurposeToken,
 };
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
@@ -52,6 +52,7 @@ const MIN_HS256_SECRET_BYTES: usize = 32;
 const PASSWORD_RESET_TOKEN_TYPE: &str = "password_reset";
 const PASSWORD_RESET_TOKEN_PURPOSE: &str = "password_reset";
 const PURPOSE_TOKEN_TYPE: &str = "purpose_token";
+const MAX_RATE_LIMIT_CAS_RETRIES: usize = 256;
 const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWdxbC1hdXRoLWR1bW15LXNsdA$8ClNuSX6M3l/dalOcz8a117s1wLv/AbzbJiKA7dS4Ak";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +97,7 @@ pub struct AuthService<U, R> {
     pub(super) user_store: Arc<U>,
     pub(super) refresh_store: Arc<R>,
     pub(super) rate_limit_store: Arc<dyn AuthRateLimitStore>,
+    pub(super) rate_limit_clock: Arc<dyn Clock>,
     pub(super) argon2: Argon2<'static>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
@@ -136,6 +138,31 @@ where
     where
         S: AuthRateLimitStore + 'static,
     {
+        Self::new_with_rate_limit_store_and_clock(
+            config,
+            user_store,
+            refresh_store,
+            rate_limit_store,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// Creates an authentication service with a durable atomic
+    /// abuse-protection store and an injected rate-limit clock.
+    ///
+    /// The store must implement the compare-and-swap and conditional-clear
+    /// contract of [`AuthRateLimitStore`]. The clock controls only rate-limit
+    /// windows, backoff, lockout, expiry, and retry-after calculations.
+    pub fn new_with_rate_limit_store_and_clock<S>(
+        config: AuthConfig,
+        user_store: Arc<U>,
+        refresh_store: Arc<R>,
+        rate_limit_store: Arc<S>,
+        rate_limit_clock: Arc<dyn Clock>,
+    ) -> AuthResult<Self>
+    where
+        S: AuthRateLimitStore + 'static,
+    {
         config.rate_limits.validate()?;
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
         let rate_limit_store: Arc<dyn AuthRateLimitStore> = rate_limit_store;
@@ -152,6 +179,7 @@ where
             user_store,
             refresh_store,
             rate_limit_store,
+            rate_limit_clock,
             argon2: Argon2::default(),
         })
     }
@@ -200,7 +228,8 @@ where
     ) -> AuthResult<AuthPayload> {
         let rate_limit_keys =
             self.rate_limit_keys(AuthRateLimitFlow::PasswordLogin, Some(principal), &metadata);
-        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let rate_limit_permit = self
+            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
             .await?;
 
         let Some(user) = self.user_store.find_user_by_principal(principal).await? else {
@@ -219,7 +248,7 @@ where
                 .await?;
             return Err(err);
         }
-        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
             .await?;
 
         let session_id = Uuid::new_v4();
@@ -964,20 +993,11 @@ where
         metadata: ClientMetadata,
     ) -> AuthResult<bool> {
         let rate_limit_keys = self.rate_limit_keys(flow, Some(principal), &metadata);
-        match self
-            .reject_if_rate_limited(&self.config.rate_limits.request, &rate_limit_keys)
-            .await
-        {
-            Ok(()) => {}
-            Err(AuthError::AuthThrottled { .. } | AuthError::AuthLocked { .. }) => {
-                return Ok(false);
-            }
-            Err(err) => return Err(err),
-        }
-
-        self.record_rate_limit_attempt(&self.config.rate_limits.request, &rate_limit_keys)
-            .await?;
-        Ok(true)
+        self.record_rate_limit_request_if_allowed(
+            &self.config.rate_limits.request,
+            &rate_limit_keys,
+        )
+        .await
     }
 
     pub(super) fn rate_limit_keys(
@@ -1008,28 +1028,35 @@ where
         &self,
         policy: &AuthRateLimitPolicy,
         keys: &[AuthRateLimitKey],
-    ) -> AuthResult<()> {
+    ) -> AuthResult<RateLimitPermit> {
         if !policy.enabled || keys.is_empty() {
-            return Ok(());
+            return Ok(RateLimitPermit::default());
         }
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.rate_limit_clock.now();
         let mut locked_until = None;
         let mut backoff_until = None;
+        let mut observations = Vec::with_capacity(keys.len());
 
         for key in keys {
-            let Some(state) = self
+            let snapshot = self
                 .rate_limit_store
                 .find_auth_rate_limit_state(key)
-                .await?
-            else {
+                .await?;
+            let Some(snapshot) = snapshot else {
+                observations.push(RateLimitObservation {
+                    key: key.clone(),
+                    revision: None,
+                });
                 continue;
             };
+            observations.push(RateLimitObservation {
+                key: key.clone(),
+                revision: Some(snapshot.revision),
+            });
+            let state = snapshot.state;
 
             if state.expires_at <= now {
-                self.rate_limit_store
-                    .clear_auth_rate_limit_state(key)
-                    .await?;
                 continue;
             }
 
@@ -1051,7 +1078,7 @@ where
             });
         }
 
-        Ok(())
+        Ok(RateLimitPermit { observations })
     }
 
     pub(super) async fn record_rate_limit_attempt(
@@ -1063,38 +1090,138 @@ where
             return Ok(());
         }
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.rate_limit_clock.now();
         for key in keys {
+            match self
+                .record_rate_limit_attempt_for_key(policy, key, now, false)
+                .await?
+            {
+                RateLimitRecordOutcome::Recorded => {}
+                RateLimitRecordOutcome::Denied => {
+                    return Err(AuthError::Store(
+                        "credential failure recording was unexpectedly denied".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn record_rate_limit_request_if_allowed(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<bool> {
+        if !policy.enabled || keys.is_empty() {
+            return Ok(true);
+        }
+
+        let now = self.rate_limit_clock.now();
+        for key in keys {
+            if matches!(
+                self.record_rate_limit_attempt_for_key(policy, key, now, true)
+                    .await?,
+                RateLimitRecordOutcome::Denied
+            ) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn record_rate_limit_attempt_for_key(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        key: &AuthRateLimitKey,
+        now: OffsetDateTime,
+        enforce_before_record: bool,
+    ) -> AuthResult<RateLimitRecordOutcome> {
+        for _ in 0..MAX_RATE_LIMIT_CAS_RETRIES {
             let current = self
                 .rate_limit_store
                 .find_auth_rate_limit_state(key)
                 .await?;
-            let next = next_rate_limit_state(key.clone(), current, policy, now);
-            self.rate_limit_store
-                .save_auth_rate_limit_state(next)
-                .await?;
+
+            if enforce_before_record
+                && current
+                    .as_ref()
+                    .is_some_and(|snapshot| active_rate_limit_error(&snapshot.state, now).is_some())
+            {
+                return Ok(RateLimitRecordOutcome::Denied);
+            }
+
+            let expected_revision = current.as_ref().map(|snapshot| snapshot.revision);
+            let current_state = current.map(|snapshot| snapshot.state);
+            let next = next_rate_limit_state(key.clone(), current_state, policy, now)?;
+            let replacement = AuthRateLimitSnapshot {
+                state: next,
+                revision: Uuid::new_v4(),
+            };
+            if self
+                .rate_limit_store
+                .compare_exchange_auth_rate_limit_state(key, expected_revision, replacement)
+                .await?
+            {
+                return Ok(RateLimitRecordOutcome::Recorded);
+            }
         }
 
-        Ok(())
+        Err(AuthError::Store(
+            "rate-limit compare-and-swap retry limit exceeded".to_string(),
+        ))
     }
 
     pub(super) async fn clear_rate_limit_attempts(
         &self,
         policy: &AuthRateLimitPolicy,
-        keys: &[AuthRateLimitKey],
+        permit: &RateLimitPermit,
     ) -> AuthResult<()> {
-        if !policy.enabled || keys.is_empty() {
+        if !policy.enabled || permit.observations.is_empty() {
             return Ok(());
         }
 
-        for key in keys {
-            self.rate_limit_store
-                .clear_auth_rate_limit_state(key)
+        for observation in &permit.observations {
+            let _cleared = self
+                .rate_limit_store
+                .clear_auth_rate_limit_state(&observation.key, observation.revision)
                 .await?;
         }
 
         Ok(())
     }
+}
+
+#[derive(Default)]
+pub(super) struct RateLimitPermit {
+    observations: Vec<RateLimitObservation>,
+}
+
+struct RateLimitObservation {
+    key: AuthRateLimitKey,
+    revision: Option<Uuid>,
+}
+
+enum RateLimitRecordOutcome {
+    Recorded,
+    Denied,
+}
+
+fn active_rate_limit_error(state: &AuthRateLimitState, now: OffsetDateTime) -> Option<AuthError> {
+    if state.expires_at <= now {
+        return None;
+    }
+    if let Some(until) = state.locked_until.filter(|until| *until > now) {
+        return Some(AuthError::AuthLocked {
+            retry_after_seconds: retry_after_seconds(now, until),
+        });
+    }
+    state
+        .backoff_until
+        .filter(|until| *until > now)
+        .map(|until| AuthError::AuthThrottled {
+            retry_after_seconds: retry_after_seconds(now, until),
+        })
 }
 
 fn normalize_principal_bucket(value: &str) -> Option<String> {
@@ -1129,10 +1256,21 @@ fn next_rate_limit_state(
     current: Option<AuthRateLimitState>,
     policy: &AuthRateLimitPolicy,
     now: OffsetDateTime,
-) -> AuthRateLimitState {
-    let reset_window = current.as_ref().is_none_or(|state| {
-        state.expires_at <= now || state.first_attempt_at + policy.window <= now
-    });
+) -> AuthResult<AuthRateLimitState> {
+    let reset_window = match current.as_ref() {
+        None => true,
+        Some(state) => {
+            if state.expires_at <= now {
+                true
+            } else {
+                checked_rate_limit_time_add(
+                    state.first_attempt_at,
+                    policy.window,
+                    "rate-limit window end",
+                )? <= now
+            }
+        }
+    };
     let (attempts, first_attempt_at) = if reset_window {
         (1, now)
     } else {
@@ -1141,15 +1279,33 @@ fn next_rate_limit_state(
     };
 
     let (backoff_until, locked_until) = if attempts >= policy.max_attempts_before_lockout {
-        (None, Some(now + policy.lockout_duration))
+        (
+            None,
+            Some(checked_rate_limit_time_add(
+                now,
+                policy.lockout_duration,
+                "rate-limit lockout end",
+            )?),
+        )
     } else if attempts >= policy.backoff_after_attempts {
-        (Some(now + backoff_duration(policy, attempts)), None)
+        (
+            Some(checked_rate_limit_time_add(
+                now,
+                backoff_duration(policy, attempts),
+                "rate-limit backoff end",
+            )?),
+            None,
+        )
     } else {
         (None, None)
     };
 
-    let mut expires_at = now + policy.state_ttl;
-    expires_at = max_time(Some(expires_at), first_attempt_at + policy.window);
+    let mut expires_at =
+        checked_rate_limit_time_add(now, policy.state_ttl, "rate-limit state expiry")?;
+    expires_at = max_time(
+        Some(expires_at),
+        checked_rate_limit_time_add(first_attempt_at, policy.window, "rate-limit window end")?,
+    );
     if let Some(until) = backoff_until {
         expires_at = max_time(Some(expires_at), until);
     }
@@ -1157,7 +1313,7 @@ fn next_rate_limit_state(
         expires_at = max_time(Some(expires_at), until);
     }
 
-    AuthRateLimitState {
+    Ok(AuthRateLimitState {
         key,
         attempts,
         first_attempt_at,
@@ -1165,7 +1321,17 @@ fn next_rate_limit_state(
         backoff_until,
         locked_until,
         expires_at,
-    }
+    })
+}
+
+fn checked_rate_limit_time_add(
+    value: OffsetDateTime,
+    duration: Duration,
+    operation: &'static str,
+) -> AuthResult<OffsetDateTime> {
+    value.checked_add(duration).ok_or_else(|| {
+        AuthError::InvalidConfiguration(format!("{operation} arithmetic overflowed"))
+    })
 }
 
 fn backoff_duration(policy: &AuthRateLimitPolicy, attempts: u32) -> Duration {
@@ -1200,7 +1366,11 @@ fn max_time(current: Option<OffsetDateTime>, candidate: OffsetDateTime) -> Offse
 }
 
 fn retry_after_seconds(now: OffsetDateTime, until: OffsetDateTime) -> i64 {
-    (until - now).whole_seconds().max(1)
+    until
+        .unix_timestamp()
+        .checked_sub(now.unix_timestamp())
+        .unwrap_or(i64::MAX)
+        .max(1)
 }
 
 fn validate_purpose_token_issue_request(request: &PurposeTokenIssueRequest) -> AuthResult<()> {

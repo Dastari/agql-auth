@@ -1,6 +1,6 @@
 [package]
 name = "agql-auth"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Database-agnostic authentication primitives and async-graphql integration helpers."
@@ -33,4 +33,4 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
