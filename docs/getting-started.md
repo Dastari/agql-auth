@@ -39,6 +39,12 @@ let auth = AuthService::new_with_rate_limit_store(
 )?;
 ```
 
+Durable rate-limit stores implement versioned compare-and-swap and conditional
+clear; a split read followed by an unconditional upsert is not multi-instance
+safe. See [atomic abuse protection](abuse-protection.md). Tests that need exact
+window/backoff boundaries can use
+`AuthService::new_with_rate_limit_store_and_clock` with `FixedClock`.
+
 `AuthConfig::new(secret)` preserves the legacy HS256 signing behavior. For new
 deployments where other services or routers need to validate tokens, prefer
 RS256. HS256 secrets must be at least 32 bytes. See

@@ -95,14 +95,15 @@ where
             Some(principal_id),
             &metadata,
         );
-        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let rate_limit_permit = self
+            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
             .await?;
 
         match self.verify_totp_code_step(secret_base32, code, options, now) {
             Ok(_) => {
                 self.clear_rate_limit_attempts(
                     &self.config.rate_limits.credential,
-                    &rate_limit_keys,
+                    &rate_limit_permit,
                 )
                 .await?;
                 Ok(())
@@ -173,7 +174,8 @@ where
             Some(principal_id),
             &metadata,
         );
-        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let rate_limit_permit = self
+            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
             .await?;
 
         let step = match self.verify_totp_code_step(secret_base32, code, options, now) {
@@ -193,7 +195,7 @@ where
             .consume_totp_step(principal_id, factor_id, step, now)
             .await?;
         if consumed {
-            self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+            self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
                 .await?;
             Ok(())
         } else {

@@ -35,6 +35,11 @@
 //! and MFA acceptance unchanged through refresh rotation. Resource servers can
 //! enforce freshness with [`RecentMfaPolicy`] and an injected [`Clock`].
 //!
+//! [`AuthRateLimitStore`] provides versioned compare-and-swap and conditional
+//! clear for durable abuse state. [`AuthService`] keeps window, backoff, and
+//! lockout transitions centralized so multi-process stores do not reimplement
+//! policy or lose concurrent attempts.
+//!
 //! ## API And Service Tokens
 //!
 //! [`ApiTokenService`] provides long-lived opaque credentials for
@@ -155,10 +160,10 @@ pub use keys::{
 pub use models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
     AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
-    AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken, IssuedLoginChallenge,
-    IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims, OAuthLoginState,
-    OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult, OidcTokenResponse,
-    PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
+    AuthRateLimitSnapshot, AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken,
+    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims,
+    OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult,
+    OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
     StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,

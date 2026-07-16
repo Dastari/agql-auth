@@ -154,7 +154,8 @@ where
             Some(&verified.user_id),
             &metadata,
         );
-        self.reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let rate_limit_permit = self
+            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
             .await?;
 
         let consumed = store
@@ -165,7 +166,7 @@ where
                 .await?;
             return Err(AuthError::PasswordResetTokenReplayed);
         }
-        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_keys)
+        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
             .await?;
         Ok(verified)
     }

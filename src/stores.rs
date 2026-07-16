@@ -6,9 +6,10 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthRateLimitKey, AuthRateLimitState,
-    AuthResult, ExternalIdentity, OAuthLoginState, OidcTokenResponse, RefreshTokenRevocationReason,
-    StoredApiToken, StoredLoginChallenge, StoredRefreshToken, StoredUser,
+    ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthRateLimitKey, AuthRateLimitSnapshot,
+    AuthRateLimitState, AuthResult, ExternalIdentity, OAuthLoginState, OidcTokenResponse,
+    RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
+    StoredUser,
 };
 
 #[async_trait]
@@ -93,22 +94,45 @@ pub trait RefreshTokenStore: Send + Sync {
 #[async_trait]
 /// Persists abuse-protection counters and lockout state.
 ///
-/// Implementations should upsert [`AuthRateLimitState`] durably and may delete
-/// records after `expires_at`. For multi-instance deployments, writes should be
-/// protected by the store's normal transaction or row-locking mechanism so a
-/// burst of concurrent attempts cannot lose updates.
+/// Implementations persist [`AuthRateLimitSnapshot`] durably and may delete
+/// records after `snapshot.state.expires_at`. Compare-and-swap and conditional
+/// clear are the concurrency boundary used by [`crate::AuthService`]; they must
+/// be atomic across processes and must never silently fall back to split
+/// read/replace behavior.
 pub trait AuthRateLimitStore: Send + Sync {
-    /// Finds the current state for a flow/bucket key.
+    /// Finds the current versioned state for a flow/bucket key.
     async fn find_auth_rate_limit_state(
         &self,
         key: &AuthRateLimitKey,
-    ) -> AuthResult<Option<AuthRateLimitState>>;
+    ) -> AuthResult<Option<AuthRateLimitSnapshot>>;
 
-    /// Inserts or replaces the current state for a flow/bucket key.
-    async fn save_auth_rate_limit_state(&self, state: AuthRateLimitState) -> AuthResult<()>;
+    /// Atomically inserts or replaces one versioned state.
+    ///
+    /// With `expected_revision = None`, commit only when the key is absent.
+    /// With `Some(revision)`, commit only when the stored revision exactly
+    /// matches. Return `Ok(true)` only when `replacement` was committed and
+    /// `Ok(false)` on a compare conflict without changing storage.
+    ///
+    /// `replacement.revision` must be persisted with the state. Callers must
+    /// provide a fresh revision for every attempt; stores must reject a
+    /// replacement whose state key differs from `key`.
+    async fn compare_exchange_auth_rate_limit_state(
+        &self,
+        key: &AuthRateLimitKey,
+        expected_revision: Option<Uuid>,
+        replacement: AuthRateLimitSnapshot,
+    ) -> AuthResult<bool>;
 
-    /// Clears state after a successful credential flow.
-    async fn clear_auth_rate_limit_state(&self, key: &AuthRateLimitKey) -> AuthResult<()>;
+    /// Atomically clears state only when the observed revision is unchanged.
+    ///
+    /// `None` succeeds only when the key is still absent. `Some(revision)`
+    /// deletes only the exact observed version. Return `Ok(false)` on conflict
+    /// and leave newer state untouched.
+    async fn clear_auth_rate_limit_state(
+        &self,
+        key: &AuthRateLimitKey,
+        expected_revision: Option<Uuid>,
+    ) -> AuthResult<bool>;
 }
 
 /// In-memory abuse-protection store.
@@ -118,13 +142,17 @@ pub trait AuthRateLimitStore: Send + Sync {
 /// [`AuthRateLimitStore`] with durable storage.
 #[derive(Clone, Default)]
 pub struct MemoryAuthRateLimitStore {
-    states: Arc<Mutex<HashMap<AuthRateLimitKey, AuthRateLimitState>>>,
+    states: Arc<Mutex<HashMap<AuthRateLimitKey, AuthRateLimitSnapshot>>>,
 }
 
 impl MemoryAuthRateLimitStore {
     /// Returns the stored state for tests and diagnostics.
     pub fn get(&self, key: &AuthRateLimitKey) -> Option<AuthRateLimitState> {
-        self.states.lock().unwrap().get(key).cloned()
+        self.states
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|snapshot| snapshot.state.clone())
     }
 }
 
@@ -133,18 +161,43 @@ impl AuthRateLimitStore for MemoryAuthRateLimitStore {
     async fn find_auth_rate_limit_state(
         &self,
         key: &AuthRateLimitKey,
-    ) -> AuthResult<Option<AuthRateLimitState>> {
+    ) -> AuthResult<Option<AuthRateLimitSnapshot>> {
         Ok(self.states.lock().unwrap().get(key).cloned())
     }
 
-    async fn save_auth_rate_limit_state(&self, state: AuthRateLimitState) -> AuthResult<()> {
-        self.states.lock().unwrap().insert(state.key.clone(), state);
-        Ok(())
+    async fn compare_exchange_auth_rate_limit_state(
+        &self,
+        key: &AuthRateLimitKey,
+        expected_revision: Option<Uuid>,
+        replacement: AuthRateLimitSnapshot,
+    ) -> AuthResult<bool> {
+        if replacement.state.key != *key {
+            return Err(crate::AuthError::Store(
+                "rate-limit replacement key does not match compare key".to_string(),
+            ));
+        }
+        let mut states = self.states.lock().unwrap();
+        let current_revision = states.get(key).map(|snapshot| snapshot.revision);
+        if current_revision != expected_revision {
+            return Ok(false);
+        }
+        states.insert(key.clone(), replacement);
+        Ok(true)
     }
 
-    async fn clear_auth_rate_limit_state(&self, key: &AuthRateLimitKey) -> AuthResult<()> {
-        self.states.lock().unwrap().remove(key);
-        Ok(())
+    async fn clear_auth_rate_limit_state(
+        &self,
+        key: &AuthRateLimitKey,
+        expected_revision: Option<Uuid>,
+    ) -> AuthResult<bool> {
+        let mut states = self.states.lock().unwrap();
+        if states.get(key).map(|snapshot| snapshot.revision) != expected_revision {
+            return Ok(false);
+        }
+        if expected_revision.is_some() {
+            states.remove(key);
+        }
+        Ok(true)
     }
 }
 

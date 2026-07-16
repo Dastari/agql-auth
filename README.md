@@ -58,6 +58,10 @@ let auth = AuthService::new_with_rate_limit_store(
 )?;
 ```
 
+The durable contract uses versioned compare-and-swap and conditional clear, so
+concurrent instances cannot lose increments or erase a newer failure. See
+[atomic abuse protection](docs/abuse-protection.md).
+
 HS256 secrets must be at least 32 bytes. Use a random secret from a
 secret manager; prefer RS256 when routers or other services validate tokens.
 
@@ -316,7 +320,18 @@ For typed recent-authentication requests bound to one-time state, see
 - [OIDC reauthentication and step-up](docs/oidc-step-up.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
 - [Session assurance and recent MFA](docs/session-assurance.md)
+- [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
+
+## 0.11.0 Atomic Abuse Protection
+
+`0.11.0` replaces split durable rate-limit writes with an object-safe
+compare-and-swap contract, linearizes request admission with recording, makes
+successful clears revision-conditional, and adds an injected rate-limit clock.
+Custom durable store implementations require a revision field and trait update;
+memory-store-only consumers need no data migration. See
+[atomic abuse protection](docs/abuse-protection.md) and
+[MIGRATION.md](MIGRATION.md).
 
 ## 0.10.0 Bound OIDC Reauthentication
 

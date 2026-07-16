@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0
+
+### Added
+
+- `AuthRateLimitSnapshot`, which pairs persisted abuse state with a fresh,
+  opaque UUID revision for portable compare-and-swap.
+- Required object-safe `AuthRateLimitStore` compare-exchange and conditional
+  clear operations. The service retains all window, reset, backoff, lockout,
+  expiry, and retry calculations and retries compare conflicts.
+- `AuthService::new_with_rate_limit_store_and_clock` for deterministic
+  rate-limit window, expiry, backoff, lockout, and retry-after decisions.
+- Barrier-start, two-service concurrency coverage for first inserts, existing
+  state, request admission, credential failures, reset boundaries, maximum
+  values, and record-versus-clear races.
+
+### Changed
+
+- Request initiation admission and attempt recording now share one linearized
+  per-key compare-and-swap decision. The first request that activates backoff
+  remains admitted; concurrent later requests observe the committed backoff.
+- Successful credential flows clear only the exact revisions observed before
+  verification. A concurrent newer failure is retained.
+- Expired state is ignored during checks and reset by the next successful CAS;
+  stores may continue deleting it as background maintenance.
+- Attempt and timestamp arithmetic is overflow-safe. Attempt counts cap at
+  `u32::MAX`; unsafe time arithmetic returns a safe configuration error rather
+  than wrapping or panicking.
+- `AuthRateLimitKey` Debug output redacts its opaque `value_hash`.
+
+### Compatibility / SemVer
+
+- `AuthRateLimitStore` implementors must migrate from split `find/save/clear`
+  operations to versioned find, compare-exchange, and conditional clear. No
+  unsafe default fallback is provided.
+- Durable stores need a non-reusable UUID revision per key/version. Existing
+  rows require a one-time unique revision backfill. `AuthRateLimitState` fields
+  and public throttled/locked errors are otherwise unchanged.
+- Existing `AuthService` constructors remain available and use `SystemClock`;
+  the in-memory store implements the same atomic contract.
+- Atomicity is per `AuthRateLimitKey`; principal and client buckets are not one
+  cross-key transaction.
+- These public trait and persisted-record changes make `0.11.0` a pre-1.0
+  minor release. Distribution remains Git-only.
+
 ## 0.10.0
 
 ### Added

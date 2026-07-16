@@ -441,7 +441,7 @@ impl AuthRateLimitBucket {
 }
 
 /// Opaque key for a persisted abuse-protection bucket.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct AuthRateLimitKey {
     /// Flow being protected.
     pub flow: AuthRateLimitFlow,
@@ -449,6 +449,16 @@ pub struct AuthRateLimitKey {
     pub bucket: AuthRateLimitBucket,
     /// SHA-256 hash of the normalized bucket value.
     pub value_hash: String,
+}
+
+impl fmt::Debug for AuthRateLimitKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthRateLimitKey")
+            .field("flow", &self.flow)
+            .field("bucket", &self.bucket)
+            .field("value_hash", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Persisted abuse-protection state for one flow/bucket key.
@@ -468,6 +478,19 @@ pub struct AuthRateLimitState {
     pub locked_until: Option<OffsetDateTime>,
     /// Time after which stores may delete this state.
     pub expires_at: OffsetDateTime,
+}
+
+/// Versioned snapshot used for atomic abuse-state compare-and-swap.
+///
+/// Every committed replacement receives a fresh random revision. Revisions
+/// must never be reused for the same key, including after clear and reinsert,
+/// so a stale operation cannot succeed through an ABA cycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthRateLimitSnapshot {
+    /// Persisted rate-limit state.
+    pub state: AuthRateLimitState,
+    /// Opaque, non-secret concurrency revision.
+    pub revision: Uuid,
 }
 
 /// Reason an API token was revoked.
