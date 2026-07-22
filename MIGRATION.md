@@ -1,5 +1,51 @@
 # Migration Guide
 
+## 0.11.0 to 0.12.0: bound list-valued `acrs` step-up
+
+Use the new typed request only when the host has an exact provider context to
+request and a separate local allowlist/mapping for the returned evidence:
+
+```rust
+let options = OidcAuthorizationOptions {
+    prompt: vec![OidcPrompt::Login],
+    max_age: Some(300),
+    acr_values: Vec::new(),
+    id_token_claims: vec![
+        OidcIdTokenClaimRequest::EssentialAuthTime,
+        OidcIdTokenClaimRequest::EssentialAcrs {
+            value: "c1".to_string(),
+        },
+    ],
+};
+let expected = options.validate()?;
+```
+
+This produces one standard OIDC `claims` parameter whose ID-token member asks
+for essential `auth_time` and essential list-valued `acrs` using the singular
+exact `value` form. The callback independently enforces fresh `auth_time` and
+requires the validated `acrs` list to contain `c1`. The exact match is returned
+as `OidcAuthorizationOutcome.matched_acrs`; the host must still call
+`require_bound_policy`, allowlist/map the context, and apply its own endpoint
+authorization and current-session rules.
+
+Policies that request `acrs` use stored representation version 2. Existing
+version 1 policies remain valid only without the new field, so in-flight 0.11
+requests keep their behavior. Legacy/default callbacks and mismatched policies
+cannot satisfy a route expecting the version 2 policy. No OAuth state store
+trait or schema change is required when the policy is already stored as the
+document/JSON representation. Typed relational representations must add the
+optional exact `essential_acrs_value` and retain the version.
+
+`OidcIdTokenClaimRequest` has a new enum variant and
+`OidcAuthorizationOutcome` has a new public field. Update exhaustive matches
+and outcome struct literals. Do not replace this request with `acr_values` or
+standard `EssentialAcr`: those represent standard scalar `acr`, not provider
+list-valued `acrs`.
+
+Tests prove serialization, binding, validation, and redaction boundaries only.
+Live provider challenge behavior, returned evidence, local mapping, endpoint
+approval, activation, and revocation remain deployment gates.
+
 ## 0.10.0 to 0.11.0: atomic durable rate-limit attempts
 
 Version 0.11 replaces the split rate-limit read/save contract with versioned

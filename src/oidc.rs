@@ -463,9 +463,13 @@ impl OidcProvider {
             .http_client
             .get_json(&self.config.discovery_url)
             .await
-            .map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
-        let mut document: OidcDiscoveryDocument = serde_json::from_value(raw.clone())
-            .map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
+            .map_err(|_| {
+                AuthError::OidcDiscovery("provider discovery request failed".to_string())
+            })?;
+        let mut document: OidcDiscoveryDocument =
+            serde_json::from_value(raw.clone()).map_err(|_| {
+                AuthError::OidcDiscovery("provider discovery response was invalid".to_string())
+            })?;
         document.raw = raw;
         let expires_at = now
             .checked_add(self.config.discovery_cache_ttl)
@@ -793,8 +797,10 @@ impl OidcProvider {
             ));
         }
 
-        let mut token_response: OidcTokenResponse = serde_json::from_value(raw.clone())
-            .map_err(|err| AuthError::OidcTokenExchange(err.to_string()))?;
+        let mut token_response: OidcTokenResponse =
+            serde_json::from_value(raw.clone()).map_err(|_| {
+                AuthError::OidcTokenExchange("provider token response was invalid".to_string())
+            })?;
         token_response.raw = raw;
 
         Ok(token_response)
@@ -807,8 +813,9 @@ impl OidcProvider {
         expected_nonce: &str,
     ) -> AuthResult<ValidatedOidcClaims> {
         let discovery = self.discover().await?;
-        let header = decode_header(id_token)
-            .map_err(|err| AuthError::OidcTokenValidation(err.to_string()))?;
+        let header = decode_header(id_token).map_err(|_| {
+            AuthError::OidcTokenValidation("ID token header is invalid".to_string())
+        })?;
         let kid = header.kid.clone().ok_or_else(|| {
             AuthError::OidcTokenValidation("ID token header is missing kid".to_string())
         })?;
@@ -832,8 +839,9 @@ impl OidcProvider {
 
         validate_jwk_for_header(&jwk, header.alg)?;
 
-        let decoding_key = DecodingKey::from_jwk(&jwk)
-            .map_err(|err| AuthError::OidcTokenValidation(err.to_string()))?;
+        let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| {
+            AuthError::OidcTokenValidation("ID token verification key is invalid".to_string())
+        })?;
         let mut validation = Validation::new(header.alg);
         validation.algorithms = allowed_algorithms;
         validation.set_audience(std::slice::from_ref(&self.config.client_id));
@@ -842,7 +850,11 @@ impl OidcProvider {
         validation.leeway = self.clock_skew_seconds()?;
 
         let token_data = decode::<RawOidcIdTokenClaims>(id_token, &decoding_key, &validation)
-            .map_err(|err| AuthError::OidcTokenValidation(err.to_string()))?;
+            .map_err(|_| {
+                AuthError::OidcTokenValidation(
+                    "ID token signature, time, or claim types are invalid".to_string(),
+                )
+            })?;
 
         self.validate_claims(token_data.claims, expected_nonce, &discovery)
     }
@@ -871,9 +883,10 @@ impl OidcProvider {
             .http_client
             .get_json(&discovery.jwks_uri)
             .await
-            .map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
-        let jwks: JwkSet =
-            serde_json::from_value(raw).map_err(|err| AuthError::OidcDiscovery(err.to_string()))?;
+            .map_err(|_| AuthError::OidcDiscovery("provider JWKS request failed".to_string()))?;
+        let jwks: JwkSet = serde_json::from_value(raw).map_err(|_| {
+            AuthError::OidcDiscovery("provider JWKS response was invalid".to_string())
+        })?;
         let expires_at = now
             .checked_add(self.config.jwks_cache_ttl)
             .ok_or_else(|| AuthError::OidcDiscovery("JWKS cache expiry overflowed".to_string()))?;
@@ -1017,8 +1030,9 @@ impl OidcProvider {
             claims.oid.as_deref(),
         );
 
-        let raw = serde_json::to_value(&claims)
-            .map_err(|err| AuthError::OidcTokenValidation(err.to_string()))?;
+        let raw = serde_json::to_value(&claims).map_err(|_| {
+            AuthError::OidcTokenValidation("validated ID token claims were invalid".to_string())
+        })?;
         Ok(ValidatedOidcClaims {
             provider_name: self.config.provider_name.clone(),
             issuer: claims.iss,
@@ -1058,6 +1072,7 @@ impl OidcProvider {
                 policy: None,
                 enforced_auth_time: None,
                 matched_acr: None,
+                matched_acrs: None,
             });
         };
 
@@ -1125,10 +1140,27 @@ impl OidcProvider {
             Some(acr.clone())
         };
 
+        let matched_acrs = if let Some(required) = policy.essential_acrs_value() {
+            let acrs = claims.acrs.as_ref().ok_or_else(|| {
+                AuthError::OidcTokenValidation(
+                    "bound authorization requires the acrs claim".to_string(),
+                )
+            })?;
+            if !acrs.iter().any(|returned| returned == required) {
+                return Err(AuthError::OidcTokenValidation(
+                    "bound authorization acrs did not match".to_string(),
+                ));
+            }
+            Some(required.to_string())
+        } else {
+            None
+        };
+
         Ok(OidcAuthorizationOutcome {
             policy: Some(policy.clone()),
             enforced_auth_time,
             matched_acr,
+            matched_acrs,
         })
     }
 
@@ -1362,8 +1394,9 @@ fn issuer_pattern_matches(pattern: &str, issuer: &str, tenant_id: Option<&str>) 
 }
 
 fn unix_timestamp_to_datetime(timestamp: i64) -> AuthResult<OffsetDateTime> {
-    OffsetDateTime::from_unix_timestamp(timestamp)
-        .map_err(|err| AuthError::OidcTokenValidation(err.to_string()))
+    OffsetDateTime::from_unix_timestamp(timestamp).map_err(|_| {
+        AuthError::OidcTokenValidation("ID token timestamp is outside supported bounds".to_string())
+    })
 }
 
 fn generate_urlsafe_secret() -> String {

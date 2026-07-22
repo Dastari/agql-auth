@@ -323,6 +323,16 @@ For typed recent-authentication requests bound to one-time state, see
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
 
+## 0.12.0 Bound OIDC `acrs` Step-Up
+
+`0.12.0` adds a bounded `EssentialAcrs { value }` ID-token claim request. Its
+exact normalized context is stored with one-time OAuth state and must appear in
+the returned validated list-valued `acrs` claim. The matched context is exposed
+separately on `OidcAuthorizationOutcome`; it never becomes standard scalar
+`acr`, AMR, or local MFA automatically. See
+[OIDC reauthentication and step-up](docs/oidc-step-up.md) and
+[MIGRATION.md](MIGRATION.md).
+
 ## 0.11.0 Atomic Abuse Protection
 
 `0.11.0` replaces split durable rate-limit writes with an object-safe

@@ -944,8 +944,51 @@ fn oidc_token_response_debug_redacts_provider_tokens_and_raw_response() {
 }
 
 #[tokio::test]
-async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
+async fn essential_acrs_authorization_url_is_exact_and_deterministic() {
     let (provider, _client) = provider_and_client();
+    let options = OidcAuthorizationOptions {
+        id_token_claims: vec![
+            OidcIdTokenClaimRequest::EssentialAuthTime,
+            OidcIdTokenClaimRequest::EssentialAcrs {
+                value: "c1".to_string(),
+            },
+        ],
+        ..Default::default()
+    };
+    let first = provider
+        .create_authorization_request_with_options(
+            &MemoryOAuthStateStore::default(),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+    let second = provider
+        .create_authorization_request_with_options(&MemoryOAuthStateStore::default(), options)
+        .await
+        .unwrap();
+    let first_pairs = query_pairs(&first.authorization_url);
+    let second_pairs = query_pairs(&second.authorization_url);
+    let first_claims = query_values(&first_pairs, "claims");
+    let second_claims = query_values(&second_pairs, "claims");
+
+    assert_eq!(first_claims.len(), 1);
+    assert_eq!(second_claims.len(), 1);
+    assert_eq!(first_claims, second_claims);
+    assert_eq!(
+        serde_json::from_str::<JsonValue>(first_claims[0]).unwrap(),
+        json!({
+            "id_token": {
+                "auth_time": { "essential": true },
+                "acrs": { "essential": true, "value": "c1" }
+            }
+        })
+    );
+    assert!(query_values(&first_pairs, "acr_values").is_empty());
+}
+
+#[tokio::test]
+async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
+    let (provider, client) = provider_and_client();
     let store = MemoryOAuthStateStore::default();
     let options = OidcAuthorizationOptions {
         prompt: vec![OidcPrompt::Login, OidcPrompt::Consent],
@@ -956,9 +999,14 @@ async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
             OidcIdTokenClaimRequest::EssentialAcr {
                 values: vec!["urn:example:loa:2&next=evil".to_string()],
             },
+            OidcIdTokenClaimRequest::EssentialAcrs {
+                value: "c1".to_string(),
+            },
         ],
     };
     let expected = options.validate().unwrap();
+    assert_eq!(expected.version(), 2);
+    assert_eq!(expected.essential_acrs_value(), Some("c1"));
     let request = provider
         .create_authorization_request_with_options(&store, options)
         .await
@@ -976,24 +1024,61 @@ async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
         claims_json["id_token"]["acr"]["values"][0],
         "urn:example:loa:2&next=evil"
     );
+    assert_eq!(claims_json["id_token"]["acrs"]["essential"], true);
+    assert_eq!(claims_json["id_token"]["acrs"]["value"], "c1");
     assert!(query_values(&pairs, "next").is_empty());
+    for reserved in [
+        "client_id",
+        "redirect_uri",
+        "response_type",
+        "response_mode",
+        "scope",
+        "state",
+        "nonce",
+        "code_challenge",
+        "code_challenge_method",
+        "prompt",
+        "max_age",
+        "claims",
+    ] {
+        assert_eq!(
+            query_values(&pairs, reserved).len(),
+            1,
+            "unexpected {reserved} count"
+        );
+    }
     assert_eq!(request.authorization_policy.as_ref(), Some(&expected));
 
-    let stored = store
-        .states
-        .lock()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap()
-        .clone();
+    let key = ("microsoft".to_string(), hash_oauth_state(&request.state));
+    let stored = store.states.lock().unwrap().get(&key).unwrap().clone();
     assert_eq!(stored.authorization_policy.as_ref(), Some(&expected));
+    let persisted: OAuthLoginState =
+        serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+    assert_eq!(persisted.authorization_policy.as_ref(), Some(&expected));
+    store.states.lock().unwrap().insert(key, persisted);
+
     let debug = format!("{request:?} {stored:?}");
     assert!(!debug.contains(&request.state));
     assert!(!debug.contains(&request.nonce));
     assert!(!debug.contains(&request.code_verifier));
     assert!(!debug.contains(&request.authorization_url));
     assert!(!debug.contains("urn:example:loa:2&next=evil"));
+
+    let mut provider_claims = valid_claims(&request.nonce);
+    provider_claims["auth_time"] = json!(OffsetDateTime::now_utc().unix_timestamp());
+    provider_claims["acr"] = json!("urn:example:loa:2&next=evil");
+    provider_claims["acrs"] = json!(["other", "c1"]);
+    client.set_token_response(signed_id_token(provider_claims, "rsa01"));
+    let outcome = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.state.authorization_policy.as_ref(), Some(&expected));
+    assert_eq!(outcome.authorization.policy.as_ref(), Some(&expected));
+    assert_eq!(outcome.authorization.matched_acrs.as_deref(), Some("c1"));
 }
 
 #[tokio::test]
@@ -1096,6 +1181,29 @@ async fn invalid_options_are_rejected_before_state_is_inserted() {
         },
         OidcAuthorizationOptions {
             acr_values: vec!["x".repeat(MAX_OIDC_AUTHORIZATION_VALUE_LENGTH + 1)],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            id_token_claims: vec![
+                OidcIdTokenClaimRequest::EssentialAcrs {
+                    value: "c1".to_string(),
+                },
+                OidcIdTokenClaimRequest::EssentialAcrs {
+                    value: "c2".to_string(),
+                },
+            ],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcrs {
+                value: " c1".to_string(),
+            }],
+            ..Default::default()
+        },
+        OidcAuthorizationOptions {
+            id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcrs {
+                value: "x".repeat(MAX_OIDC_AUTHORIZATION_VALUE_LENGTH + 1),
+            }],
             ..Default::default()
         },
     ];
@@ -1209,6 +1317,122 @@ async fn unknown_stored_policy_version_fails_closed_before_token_exchange() {
         .unwrap_err();
     assert!(matches!(error, AuthError::OidcTokenValidation(_)));
     assert!(client.posts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn acrs_policy_version_and_state_boundaries_fail_closed() {
+    let expected = OidcAuthorizationOptions {
+        id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcrs {
+            value: "c1".to_string(),
+        }],
+        ..Default::default()
+    }
+    .validate()
+    .unwrap();
+    assert_eq!(expected.version(), 2);
+
+    let (legacy_provider, legacy_client) = provider_and_client();
+    let legacy_store = MemoryOAuthStateStore::default();
+    let legacy_request = legacy_provider
+        .create_authorization_request(&legacy_store)
+        .await
+        .unwrap();
+    let mut legacy_claims = valid_claims(&legacy_request.nonce);
+    legacy_claims["acrs"] = json!(["c1"]);
+    legacy_client.set_token_response(signed_id_token(legacy_claims, "rsa01"));
+    let legacy_outcome = legacy_provider
+        .handle_callback(
+            &legacy_store,
+            OidcCallbackInput::code_and_state("auth-code", legacy_request.state),
+        )
+        .await
+        .unwrap();
+    assert!(
+        legacy_outcome
+            .authorization
+            .require_bound_policy(&expected)
+            .is_err()
+    );
+
+    let (provider, client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let request = provider
+        .create_authorization_request_with_options(
+            &store,
+            OidcAuthorizationOptions {
+                id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcrs {
+                    value: "c1".to_string(),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let key = ("microsoft".to_string(), hash_oauth_state(&request.state));
+    {
+        let mut states = store.states.lock().unwrap();
+        let state = states.get_mut(&key).unwrap();
+        let mut policy =
+            serde_json::to_value(state.authorization_policy.as_ref().unwrap()).unwrap();
+        policy["version"] = json!(1);
+        state.authorization_policy = Some(serde_json::from_value(policy).unwrap());
+    }
+    let error = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("auth-code", request.state),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AuthError::OidcTokenValidation(_)));
+    assert!(client.posts.lock().unwrap().is_empty());
+
+    let (expired_provider, expired_client) = provider_and_client();
+    let expired_store = MemoryOAuthStateStore::default();
+    let expired_request = expired_provider
+        .create_authorization_request_with_options(
+            &expired_store,
+            OidcAuthorizationOptions {
+                id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcrs {
+                    value: "c1".to_string(),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let expired_key = (
+        "microsoft".to_string(),
+        hash_oauth_state(&expired_request.state),
+    );
+    expired_store
+        .states
+        .lock()
+        .unwrap()
+        .get_mut(&expired_key)
+        .unwrap()
+        .expires_at = OffsetDateTime::now_utc() - Duration::seconds(1);
+    let expired = expired_provider
+        .handle_callback(
+            &expired_store,
+            OidcCallbackInput::code_and_state("auth-code", expired_request.state),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(expired, AuthError::OAuthStateExpired));
+    assert!(expired_client.posts.lock().unwrap().is_empty());
+
+    let (mismatched_provider, mismatched_client) = provider_and_client();
+    let mismatched_store = MemoryOAuthStateStore::default();
+    let mismatched = mismatched_provider
+        .handle_callback(
+            &mismatched_store,
+            OidcCallbackInput::code_and_state("auth-code", "mismatched-state"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(mismatched, AuthError::InvalidOAuthState));
+    assert!(mismatched_client.posts.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1368,6 +1592,126 @@ async fn microsoft_shaped_acrs_is_typed_bounded_and_distinct_from_acr() {
 }
 
 #[tokio::test]
+async fn essential_acrs_requires_an_exact_bounded_list_match() {
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let options = OidcAuthorizationOptions {
+        max_age: Some(60),
+        id_token_claims: vec![
+            OidcIdTokenClaimRequest::EssentialAuthTime,
+            OidcIdTokenClaimRequest::EssentialAcrs {
+                value: "c1".to_string(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let valid = run_bound_case(now, options.clone(), |claims| {
+        claims["auth_time"] = json!(now.unix_timestamp());
+        claims["acr"] = json!("c1");
+        claims["acrs"] = json!(["other", "c1"]);
+    })
+    .await
+    .unwrap();
+    assert_eq!(valid.authorization.matched_acrs.as_deref(), Some("c1"));
+    assert!(valid.authorization.matched_acr.is_none());
+    assert_eq!(
+        valid.claims.acrs,
+        Some(vec!["other".to_string(), "c1".to_string()])
+    );
+    valid
+        .authorization
+        .require_bound_policy(&options.validate().unwrap())
+        .unwrap();
+
+    let invalid_evidence = vec![
+        None,
+        Some(json!("c1")),
+        Some(json!({"value": "c1"})),
+        Some(json!([["c1"]])),
+        Some(json!([1])),
+        Some(json!(["wrong-context"])),
+        Some(json!([""])),
+        Some(json!([" "])),
+        Some(json!(["c1 "])),
+        Some(json!(["c1", "c1"])),
+        Some(json!(
+            (0..=MAX_OIDC_AUTHORIZATION_VALUES)
+                .map(|i| format!("c{i}"))
+                .collect::<Vec<_>>()
+        )),
+        Some(json!(["x".repeat(MAX_OIDC_AUTHORIZATION_VALUE_LENGTH + 1)])),
+        Some(json!(
+            (0..9)
+                .map(|i| format!("{i}{}", "x".repeat(255)))
+                .collect::<Vec<_>>()
+        )),
+    ];
+    for evidence in invalid_evidence {
+        let result = run_bound_case(now, options.clone(), move |claims| {
+            claims["auth_time"] = json!(now.unix_timestamp());
+            if let Some(evidence) = evidence {
+                claims["acrs"] = evidence;
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(AuthError::OidcTokenValidation(_))));
+    }
+
+    let scalar_acr_only = run_bound_case(now, options, |claims| {
+        claims["auth_time"] = json!(now.unix_timestamp());
+        claims["acr"] = json!("c1");
+    })
+    .await;
+    assert!(matches!(
+        scalar_acr_only,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+}
+
+#[tokio::test]
+async fn essential_acrs_does_not_weaken_bound_auth_time_enforcement() {
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let options = OidcAuthorizationOptions {
+        max_age: Some(60),
+        id_token_claims: vec![
+            OidcIdTokenClaimRequest::EssentialAuthTime,
+            OidcIdTokenClaimRequest::EssentialAcrs {
+                value: "c1".to_string(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let invalid_auth_times = [
+        None,
+        Some(json!((now - Duration::seconds(66)).unix_timestamp())),
+        Some(json!((now + Duration::seconds(6)).unix_timestamp())),
+        Some(json!(-1)),
+        Some(json!("now")),
+    ];
+    for auth_time in invalid_auth_times {
+        let result = run_bound_case(now, options.clone(), move |claims| {
+            claims["acrs"] = json!(["c1"]);
+            if let Some(auth_time) = auth_time {
+                claims["auth_time"] = auth_time;
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(AuthError::OidcTokenValidation(_))));
+    }
+
+    let recent_without_context = run_bound_case(now, options, |claims| {
+        claims["auth_time"] = json!(now.unix_timestamp());
+        claims["acrs"] = json!(["wrong-context"]);
+    })
+    .await;
+    assert!(matches!(
+        recent_without_context,
+        Err(AuthError::OidcTokenValidation(_))
+    ));
+}
+
+#[tokio::test]
 async fn bound_callback_is_single_use_under_concurrency_and_debug_is_redacted() {
     let (provider, client) = provider_and_client();
     let store = MemoryOAuthStateStore::default();
@@ -1408,6 +1752,106 @@ async fn bound_callback_is_single_use_under_concurrency_and_debug_is_redacted() 
     assert!(!debug.contains(&request.nonce));
     assert!(!debug.contains(&request.code_verifier));
     assert!(!debug.contains("raw-claim-secret"));
+}
+
+#[tokio::test]
+async fn acrs_context_and_callback_secrets_are_redacted_from_debug_and_errors() {
+    const REQUESTED_CONTEXT: &str = "requested-context-redaction-sentinel";
+    const RETURNED_CONTEXT: &str = "returned-context-redaction-sentinel";
+    const CODE: &str = "authorization-code-redaction-sentinel";
+
+    let (provider, client) = provider_and_client();
+    let store = MemoryOAuthStateStore::default();
+    let claim_request = OidcIdTokenClaimRequest::EssentialAcrs {
+        value: REQUESTED_CONTEXT.to_string(),
+    };
+    let options = OidcAuthorizationOptions {
+        id_token_claims: vec![claim_request.clone()],
+        ..Default::default()
+    };
+    let policy = options.validate().unwrap();
+    let request = provider
+        .create_authorization_request_with_options(&store, options.clone())
+        .await
+        .unwrap();
+
+    for debug in [
+        format!("{claim_request:?}"),
+        format!("{options:?}"),
+        format!("{policy:?}"),
+        format!("{request:?}"),
+    ] {
+        assert!(!debug.contains(REQUESTED_CONTEXT));
+        assert!(!debug.contains(&request.state));
+        assert!(!debug.contains(&request.nonce));
+        assert!(!debug.contains(&request.code_verifier));
+        assert!(!debug.contains(&request.authorization_url));
+    }
+
+    let mut claims = valid_claims(&request.nonce);
+    claims["acrs"] = json!(RETURNED_CONTEXT);
+    client.set_token_response(signed_id_token(claims, "rsa01"));
+    let error = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state(CODE, request.state.clone()),
+        )
+        .await
+        .unwrap_err();
+    let displayed = format!("{error:?} {error}");
+    for secret in [
+        REQUESTED_CONTEXT,
+        RETURNED_CONTEXT,
+        CODE,
+        request.state.as_str(),
+        request.nonce.as_str(),
+        "opaque-provider-access-token",
+    ] {
+        assert!(!displayed.contains(secret));
+    }
+
+    let successful_request = provider
+        .create_authorization_request_with_options(&store, options)
+        .await
+        .unwrap();
+    let mut successful_claims = valid_claims(&successful_request.nonce);
+    successful_claims["acrs"] = json!([REQUESTED_CONTEXT]);
+    client.set_token_response(signed_id_token(successful_claims, "rsa01"));
+    let outcome = provider
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state(CODE, successful_request.state.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.authorization.matched_acrs.as_deref(),
+        Some(REQUESTED_CONTEXT)
+    );
+    let outcome_debug = format!("{outcome:?}");
+    for secret in [
+        REQUESTED_CONTEXT,
+        CODE,
+        successful_request.state.as_str(),
+        successful_request.nonce.as_str(),
+        "opaque-provider-access-token",
+    ] {
+        assert!(!outcome_debug.contains(secret));
+    }
+
+    let invalid = OidcAuthorizationOptions {
+        id_token_claims: vec![OidcIdTokenClaimRequest::EssentialAcrs {
+            value: "invalid context redaction sentinel".to_string(),
+        }],
+        ..Default::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(
+        !invalid
+            .to_string()
+            .contains("invalid context redaction sentinel")
+    );
 }
 
 #[tokio::test]

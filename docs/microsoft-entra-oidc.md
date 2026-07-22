@@ -175,10 +175,14 @@ other provider) claim value universally means MFA. See
 
 For recent active authentication, use the typed bound authorization API in
 [OIDC reauthentication and step-up](oidc-step-up.md). `prompt=login` and
-`max_age` do not prove MFA. Entra authentication-context/optional-claim behavior
-must be configured and verified for the exact tenant, application, and token
-type; this crate does not assume that an ID token will contain `acrs` or that
-any context identifier universally means MFA.
+`max_age` do not prove MFA. When deterministic Conditional Access
+authentication-context step-up is required, use
+`OidcIdTokenClaimRequest::EssentialAcrs { value }` for the exact configured
+context; do not substitute scalar `acr_values` or `EssentialAcr`. Entra
+authentication-context/optional-claim behavior must be configured and verified
+for the exact tenant, application, and token type. A successful bound match is
+provider evidence only; the host must separately allowlist/map it and no
+context identifier universally means MFA.
 
 Do not use email, UPN, name, or preferred username as authorization
 identifiers. For Microsoft work/school accounts, the preferred stable external

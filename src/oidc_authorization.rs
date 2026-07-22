@@ -58,6 +58,12 @@ pub enum OidcIdTokenClaimRequest {
         /// Exact, case-sensitive accepted `acr` values.
         values: Vec<String>,
     },
+    /// Require the provider list-valued `acrs` claim to contain this exact
+    /// authentication-context reference.
+    EssentialAcrs {
+        /// Exact, case-sensitive authentication-context reference.
+        value: String,
+    },
 }
 
 impl fmt::Debug for OidcIdTokenClaimRequest {
@@ -67,6 +73,10 @@ impl fmt::Debug for OidcIdTokenClaimRequest {
             Self::EssentialAcr { values } => f
                 .debug_struct("EssentialAcr")
                 .field("value_count", &values.len())
+                .finish(),
+            Self::EssentialAcrs { .. } => f
+                .debug_struct("EssentialAcrs")
+                .field("value", &"[redacted]")
                 .finish(),
         }
     }
@@ -124,6 +134,8 @@ pub struct OidcAuthorizationPolicy {
     essential_auth_time: bool,
     #[serde(default)]
     essential_acr_values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    essential_acrs_value: Option<String>,
 }
 
 impl fmt::Debug for OidcAuthorizationPolicy {
@@ -138,6 +150,7 @@ impl fmt::Debug for OidcAuthorizationPolicy {
                 "essential_acr_value_count",
                 &self.essential_acr_values.len(),
             )
+            .field("essential_acrs", &self.essential_acrs_value.is_some())
             .finish()
     }
 }
@@ -173,6 +186,11 @@ impl OidcAuthorizationPolicy {
         &self.essential_acr_values
     }
 
+    /// Exact provider list-valued `acrs` context required in the ID token.
+    pub fn essential_acrs_value(&self) -> Option<&str> {
+        self.essential_acrs_value.as_deref()
+    }
+
     pub(crate) fn prompt_parameter(&self) -> Option<String> {
         (!self.prompt.is_empty()).then(|| {
             self.prompt
@@ -188,7 +206,10 @@ impl OidcAuthorizationPolicy {
     }
 
     pub(crate) fn claims_parameter(&self) -> AuthResult<Option<String>> {
-        if !self.essential_auth_time && self.essential_acr_values.is_empty() {
+        if !self.essential_auth_time
+            && self.essential_acr_values.is_empty()
+            && self.essential_acrs_value.is_none()
+        {
             return Ok(None);
         }
         let mut id_token = Map::new();
@@ -199,6 +220,12 @@ impl OidcAuthorizationPolicy {
             id_token.insert(
                 "acr".to_string(),
                 json!({ "essential": true, "values": self.essential_acr_values }),
+            );
+        }
+        if let Some(value) = &self.essential_acrs_value {
+            id_token.insert(
+                "acrs".to_string(),
+                json!({ "essential": true, "value": value }),
             );
         }
         let mut root = Map::new();
@@ -217,8 +244,16 @@ impl OidcAuthorizationPolicy {
     }
 
     pub(crate) fn validate_stored(&self) -> AuthResult<()> {
-        if self.version != 1 {
-            return invalid("stored authorization policy version is unsupported");
+        match self.version {
+            1 if self.essential_acrs_value.is_some() => {
+                return invalid("stored version 1 policy contains an acrs requirement");
+            }
+            1 => {}
+            2 if self.essential_acrs_value.is_none() => {
+                return invalid("stored version 2 policy is missing its acrs requirement");
+            }
+            2 => {}
+            _ => return invalid("stored authorization policy version is unsupported"),
         }
         if self
             .max_age_seconds
@@ -242,6 +277,9 @@ impl OidcAuthorizationPolicy {
             &self.essential_acr_values,
             !self.essential_acr_values.is_empty(),
         )?;
+        if let Some(value) = &self.essential_acrs_value {
+            validate_values("stored essential acrs", std::slice::from_ref(value), true)?;
+        }
         if !self.acr_values.is_empty() && !self.essential_acr_values.is_empty() {
             return invalid("stored policy combines voluntary and essential acr requests");
         }
@@ -283,6 +321,7 @@ impl TryFrom<&OidcAuthorizationOptions> for OidcAuthorizationPolicy {
 
         let mut essential_auth_time = false;
         let mut essential_acr_values = Vec::new();
+        let mut essential_acrs_value = None;
         for claim in &options.id_token_claims {
             match claim {
                 OidcIdTokenClaimRequest::EssentialAuthTime => {
@@ -298,6 +337,13 @@ impl TryFrom<&OidcAuthorizationOptions> for OidcAuthorizationPolicy {
                     validate_values("essential acr", values, true)?;
                     essential_acr_values.clone_from(values);
                 }
+                OidcIdTokenClaimRequest::EssentialAcrs { value } => {
+                    if essential_acrs_value.is_some() {
+                        return invalid("duplicate acrs claim requirement");
+                    }
+                    validate_values("essential acrs", std::slice::from_ref(value), true)?;
+                    essential_acrs_value = Some(value.clone());
+                }
             }
         }
         if !options.acr_values.is_empty() && !essential_acr_values.is_empty() {
@@ -305,12 +351,13 @@ impl TryFrom<&OidcAuthorizationOptions> for OidcAuthorizationPolicy {
         }
 
         let policy = Self {
-            version: 1,
+            version: if essential_acrs_value.is_some() { 2 } else { 1 },
             prompt: options.prompt.clone(),
             max_age_seconds,
             acr_values: options.acr_values.clone(),
             essential_auth_time,
             essential_acr_values,
+            essential_acrs_value,
         };
         let _ = policy.claims_parameter()?;
         Ok(policy)
@@ -329,6 +376,10 @@ pub struct OidcAuthorizationOutcome {
     /// Exact standard scalar ACR that matched an essential request, when any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_acr: Option<String>,
+    /// Exact provider list-valued `acrs` context that matched the bound
+    /// request, when any. This remains provider evidence, not local MFA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_acrs: Option<String>,
 }
 
 impl fmt::Debug for OidcAuthorizationOutcome {
@@ -339,6 +390,10 @@ impl fmt::Debug for OidcAuthorizationOutcome {
             .field(
                 "matched_acr",
                 &self.matched_acr.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "matched_acrs",
+                &self.matched_acrs.as_ref().map(|_| "[redacted]"),
             )
             .finish()
     }

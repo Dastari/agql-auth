@@ -18,8 +18,8 @@ Keep these stages separate:
    signature, issuer, audience, nonce, and time claims, then enforces the bound
    policy.
 5. `OidcAuthorizationOutcome` tells the host whether the callback was bound to
-   typed options and which authentication-time or standard ACR requirement was
-   enforced.
+   typed options and which authentication-time, standard ACR, or exact
+   list-valued `acrs` requirement was enforced.
 6. The host separately decides whether validated `amr`, scalar `acr`, or
    provider-specific `acrs` evidence satisfies its local assurance/MFA policy.
 7. Local session assurance and resource authorization remain authoritative.
@@ -95,6 +95,11 @@ preference parameter and is deliberately not treated as an enforced result.
 The crate rejects combining `acr_values` with an individual essential `acr`
 claim because OpenID Connect leaves that combination's behavior unspecified.
 
+An essential `acrs` request is separate and requires the provider-returned
+bounded string list to contain one exact case-sensitive context. It does not
+conflict with scalar `acr` because the claims have different meanings and
+types. A matching `acrs` value never supplies a missing or stale `auth_time`.
+
 ## Standard `acr` And Provider `acrs`
 
 `ValidatedOidcClaims.acr` is the standard scalar authentication-context class.
@@ -103,16 +108,37 @@ provider-returned authentication-context identifiers. The library never
 merges, translates, or labels either as MFA. Malformed, duplicate, blank,
 controlled, oversized, scalar, object, or nested `acrs` values fail validation.
 
+For a deterministic exact-context request, add the typed claim alongside any
+independent reauthentication requirement:
+
+```rust
+let options = OidcAuthorizationOptions {
+    prompt: vec![OidcPrompt::Login],
+    max_age: Some(300),
+    acr_values: Vec::new(),
+    id_token_claims: vec![
+        OidcIdTokenClaimRequest::EssentialAuthTime,
+        OidcIdTokenClaimRequest::EssentialAcrs {
+            value: "c1".to_string(),
+        },
+    ],
+};
+```
+
+The typed request serializes as an essential `acrs` individual claim request
+with singular `"value": "c1"`. Its exact normalized value is persisted in
+policy version 2 before OAuth state is issued. After ordinary ID-token checks,
+the callback requires the list to contain it and exposes that exact match only
+as `OidcAuthorizationOutcome.matched_acrs`.
+
 Microsoft documents `acrs` principally as authentication-context evidence in
-access tokens. Token-type optional-claim and Conditional Access behavior must
-be configured and proven for the particular tenant and application. This
-release does not generate a provider-specific `acrs` ID-token claims request,
-because the generic OIDC scalar `value`/`values` contract does not safely
-describe that provider-specific list without an independently demonstrated
-provider contract. An Entra-oriented host may consume a validated ID-token
-`acrs` list only when its own separately configured tenant contract is known to
-issue it, then exact-allowlist those identifiers in its `ClaimsMapper`. Absence
-remains absence and never implies MFA.
+access tokens, while Conditional Access authentication context can require an
+explicit claims request to trigger deterministic step-up. Token-type optional
+claim and Conditional Access behavior must still be configured and proven for
+the particular tenant and application. An Entra-oriented host may accept a
+validated ID-token `acrs` match only when its separately configured tenant
+contract is known to issue it, then exact-allowlist and map that identifier.
+Absence remains absence and never implies MFA.
 
 Primary provider references:
 
@@ -138,8 +164,10 @@ ALTER TABLE oauth_states
 
 The `OAuthStateStore` method signatures do not change. Implementations using
 `OAuthLoginState` struct literals must add `authorization_policy: None`.
-Unknown/corrupt stored policy versions fail closed. Deploy readers that accept
-the optional field before writers that create step-up requests.
+Version 1 remains canonical for policies without `acrs`. Policies requesting
+`acrs` use version 2; version 1 with an `acrs` field, version 2 without it, and
+unknown/corrupt versions fail closed. Deploy readers that accept the optional
+field before writers that create these step-up requests.
 
 ## Long-Lived Operations
 

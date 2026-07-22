@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.12.0
+
+### Added
+
+- `OidcIdTokenClaimRequest::EssentialAcrs { value }`, a bounded typed request
+  for one exact provider list-valued `acrs` authentication-context reference.
+- Deterministic OIDC `claims` serialization using the singular exact `value`
+  form, alongside typed `auth_time` and standard scalar `acr` requirements.
+- `OidcAuthorizationOutcome.matched_acrs`, which exposes only the exact context
+  matched for the bound callback and remains distinct from scalar `acr`, AMR,
+  and local MFA acceptance.
+
+### Security
+
+- Policies containing an `acrs` requirement use stored representation version
+  2. Version 1 remains canonical for requests without `acrs`; a version 1
+  record containing the new requirement, a version 2 record missing it, and
+  unknown versions fail closed before token exchange.
+- After ordinary ID-token validation, a bound `acrs` request requires a typed,
+  bounded list containing the exact case-sensitive requested value. Missing,
+  malformed, blank, duplicate, wrong, excessive, per-value oversized, and
+  aggregate-oversized evidence is denied.
+- Provider/JWT decoding failures now use bounded coarse diagnostics so malformed
+  context values and provider responses cannot be echoed through errors. Debug
+  output reports only the presence/count of `acrs` requirements and matches.
+- Matching `acrs` remains provider evidence only and does not bypass independent
+  essential/fresh `auth_time`, host allowlisting, assurance mapping, or local
+  authorization.
+
+### Compatibility / SemVer
+
+- Existing requests without `EssentialAcrs` retain policy version 1 and their
+  authorization URL and callback behavior. Legacy state remains readable and
+  cannot satisfy `require_bound_policy` for a version 2 request.
+- The new public enum variant and `OidcAuthorizationOutcome` field can require
+  updates to exhaustive matches and struct literals. These additive public API
+  and stored-policy changes make `0.12.0` a pre-1.0 minor release.
+- Distribution remains Git-only. Unit and boundary tests do not establish live
+  Microsoft Entra or host-deployment acceptance.
+
 ## 0.11.0
 
 ### Added
