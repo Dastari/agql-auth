@@ -1,5 +1,73 @@
 # Migration Guide
 
+## 0.12.0 to 0.13.0: provider-neutral operation assurance
+
+This change is additive and opt-in. Existing calls to
+`RecentMfaPolicy::evaluate`, existing session/storage rows, ordinary refresh,
+and `step_up_session` continue to behave as before. No database migration is
+required.
+
+### Before: route-local policy and message handling
+
+```rust
+policy.evaluate(&user, clock.as_ref())?;
+// Each resource separately chose how to expose a denial.
+```
+
+### After: stable requirement and server-authored evaluation
+
+```rust
+let policy_id = AssurancePolicyId::new("interactive.recent-auth")?;
+let requirement = AssuranceRequirement::new(policy_id.clone());
+
+let mut policies = AssurancePolicySet::new();
+policies.insert(policy_id, policy);
+
+let evaluation = policies.evaluate(&requirement, user.as_ref(), clock.as_ref());
+if let Some(code) = evaluation.state.graphql_extension_code() {
+    return Err(graphql_error_with_code(code));
+}
+```
+
+The server evaluation time comes from one read of the injected clock. A
+satisfied result carries typed `AuthenticatedAt` and inclusive
+`SatisfiedUntil` values. Unknown policy IDs fail closed as `FORBIDDEN`; absent
+users are `UNAUTHENTICATED`; assurance failures are `STEP_UP_REQUIRED` with a
+detailed `AssuranceDenialCode`.
+
+### Staged adoption
+
+1. Define stable policy IDs and populate an `AssurancePolicySet` beside the
+   existing `RecentMfaPolicy` configuration.
+2. Expose `SessionAssuranceStatus` only if clients need advisory step-up UX.
+   Do not expose `AuthPayload`, token claims, raw provider responses, or stored
+   refresh records as status.
+3. Convert one protected resource at a time to `AssuranceRequirement` and
+   `AssuranceEvaluation`. Keep server-side evaluation immediately before the
+   protected work.
+4. Map `AssuranceEvaluationState::graphql_extension_code()` into the transport
+   error. Retain detailed denial codes for bounded telemetry; stop matching
+   human-readable messages.
+5. After every protected resource is classified, enable any host-level
+   completeness gate. Client manifests remain advisory.
+
+Hosts may continue using provider-neutral evidence including password plus
+TOTP, verified OIDC reauthentication, WebAuthn, or a host-defined method and
+context. The host still verifies all external evidence before calling
+`step_up_session`. Ordinary refresh is never a substitute: it rotates
+credentials but preserves the original authentication time and satisfaction
+deadline.
+
+### Compatibility and rollback
+
+The new public types do not change default enforcement, serialized session
+shape, refresh-store traits, or token claims. Legacy sessions without assurance
+still refresh and fail only at an opted-in assurance policy. To roll back,
+remove requirement evaluation from the affected resources and restore their
+prior direct `RecentMfaPolicy::evaluate` calls; stored sessions and refresh
+tokens need no rewrite. During rollback, remove any client expectation that an
+advisory status or manifest authorizes execution.
+
 ## 0.11.0 to 0.12.0: bound list-valued `acrs` step-up
 
 Use the new typed request only when the host has an exact provider context to

@@ -119,10 +119,12 @@ mod tests;
 
 pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use assurance::{
-    AssuranceDenial, AssuranceDenialCode, AssuranceInputError, AssuranceMatchMode,
-    MAX_ASSURANCE_CONTEXT_LENGTH, MAX_ASSURANCE_METHOD_LENGTH, MAX_ASSURANCE_METHODS,
-    MfaAcceptance, RecentMfaPolicy, RefreshableTokenMetadata, SessionAssurance,
-    StepUpAuthentication,
+    AssuranceDenial, AssuranceDenialCode, AssuranceEvaluation, AssuranceEvaluationState,
+    AssuranceInputError, AssuranceMatchMode, AssurancePolicyId, AssurancePolicyIdError,
+    AssurancePolicySet, AssuranceRequirement, AuthenticatedAt, MAX_ASSURANCE_CONTEXT_LENGTH,
+    MAX_ASSURANCE_METHOD_LENGTH, MAX_ASSURANCE_METHODS, MAX_ASSURANCE_POLICY_ID_LENGTH,
+    MfaAcceptance, RecentMfaPolicy, RefreshableTokenMetadata, SatisfiedUntil, ServerEvaluationTime,
+    SessionAssurance, SessionAssuranceStatus, StepUpAuthentication,
 };
 pub use channel::ChannelIdentity;
 pub use claims::{

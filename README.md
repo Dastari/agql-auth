@@ -21,6 +21,8 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 - Access-token-only grants without refresh-token storage
 - Combined user JWT or API-token principal injection
 - Host-verified channel identity request data and guards
+- Provider-neutral recent-authentication policy IDs, evaluation, and safe
+  client session status
 - `async-graphql` request injection and guards
 - Storage traits instead of built-in database assumptions
 
@@ -28,7 +30,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 ```toml
 [dependencies]
-agql-auth = "0.7"
+agql-auth = "0.13"
 ```
 
 ## Basic Usage
@@ -322,6 +324,40 @@ For typed recent-authentication requests bound to one-time state, see
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
+
+## Provider-Neutral Assurance Contract
+
+Version 0.13 adds the provider-neutral operation-assurance contract.
+
+Resource servers can exchange a stable requirement without exchanging provider
+configuration. The host maps the policy ID to a `RecentMfaPolicy`; the server
+decision remains authoritative:
+
+```rust
+use agql_auth::{
+    AssurancePolicyId, AssurancePolicySet, AssuranceRequirement,
+    SessionAssuranceStatus,
+};
+
+let requirement = AssuranceRequirement::new(
+    AssurancePolicyId::new("interactive.recent-auth")?,
+);
+let evaluation = policies.evaluate(&requirement, user.as_ref(), clock.as_ref());
+
+if let Some(code) = evaluation.state.graphql_extension_code() {
+    // code is UNAUTHENTICATED, STEP_UP_REQUIRED, or FORBIDDEN.
+    return Err(graphql_error_with_code(code));
+}
+
+let client_status = SessionAssuranceStatus::from_user(user.as_ref());
+```
+
+The status and evaluation types are safe projections, not credentials and not
+proof that a future operation will succeed. A client manifest or cached status
+may anticipate step-up UX, but every protected operation must be evaluated
+again on the server with its current policy, user, and clock. See
+[Session assurance and recent MFA](docs/session-assurance.md) and the staged
+[migration guide](MIGRATION.md).
 
 ## 0.12.0 Bound OIDC `acrs` Step-Up
 

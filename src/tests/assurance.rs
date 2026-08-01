@@ -25,6 +25,23 @@ fn policy(maximum_age: Duration) -> RecentMfaPolicy {
     }
 }
 
+fn user_with_assurance(assurance: SessionAssurance) -> AuthUser {
+    AuthUser {
+        user_id: "user-1".to_string(),
+        session_id: uuid::Uuid::new_v4(),
+        roles: vec![],
+        scopes: vec![],
+        session: SessionContext::for_auth_method(AuthMethod::Oidc)
+            .with_assurance(assurance.clone()),
+        token_claims: AccessTokenMetadata {
+            auth_time: Some(assurance.auth_time()),
+            amr: Some(assurance.methods.clone()),
+            acr: assurance.acr.clone(),
+            ..AccessTokenMetadata::default()
+        },
+    }
+}
+
 #[tokio::test]
 async fn refreshable_issuance_and_multiple_rotations_preserve_exact_assurance() {
     let refresh_store = MemoryRefreshTokenStore::default();
@@ -243,6 +260,158 @@ fn recent_mfa_policy_covers_boundaries_missing_values_and_overflow() {
         .evaluate(&make_user(accepted(now)), &overflow_clock)
         .unwrap_err();
     assert_eq!(denial.code(), AssuranceDenialCode::AssurancePolicyError);
+}
+
+#[test]
+fn requirement_evaluation_has_exact_boundaries_and_stable_denial_categories() {
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let clock = FixedClock::new(now);
+    let policy_id = AssurancePolicyId::new("interactive.recent-auth").unwrap();
+    let requirement = AssuranceRequirement::new(policy_id.clone());
+    let mut policies = AssurancePolicySet::new();
+    policies.insert(policy_id, policy(Duration::minutes(5)));
+
+    let exact_time = now - Duration::minutes(5);
+    let exact = user_with_assurance(accepted(exact_time));
+    let evaluation = policies.evaluate(&requirement, Some(&exact), &clock);
+    assert!(evaluation.is_satisfied());
+    assert_eq!(evaluation.server_evaluation_time.get(), now);
+    assert_eq!(evaluation.authenticated_at.unwrap().get(), exact_time);
+    assert_eq!(evaluation.satisfied_until.unwrap().get(), now);
+    assert_eq!(evaluation.state.graphql_extension_code(), None);
+
+    clock.advance_seconds(1);
+    let expired = policies.evaluate(&requirement, Some(&exact), &clock);
+    assert_eq!(
+        expired.state,
+        AssuranceEvaluationState::StepUpRequired {
+            denial_code: AssuranceDenialCode::AuthenticationTooOld,
+        }
+    );
+    assert_eq!(
+        expired.state.graphql_extension_code(),
+        Some("STEP_UP_REQUIRED")
+    );
+
+    let unauthenticated = policies.evaluate(&requirement, None, &clock);
+    assert_eq!(
+        unauthenticated.state.graphql_extension_code(),
+        Some("UNAUTHENTICATED")
+    );
+
+    let missing = AssuranceRequirement::new(AssurancePolicyId::new("missing").unwrap());
+    let forbidden = policies.evaluate(&missing, Some(&exact), &clock);
+    assert_eq!(
+        forbidden.state,
+        AssuranceEvaluationState::Forbidden {
+            denial_code: AssuranceDenialCode::AssurancePolicyError,
+        }
+    );
+    assert_eq!(forbidden.state.graphql_extension_code(), Some("FORBIDDEN"));
+}
+
+#[test]
+fn missing_and_disallowed_evidence_are_machine_readable() {
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let clock = FixedClock::new(now);
+    let requirement =
+        AssuranceRequirement::new(AssurancePolicyId::new("interactive.recent-auth").unwrap());
+    let missing = user_with_assurance(
+        SessionAssurance::new(
+            now,
+            Vec::<String>::new(),
+            None,
+            Some("host-defined".to_string()),
+            MfaAcceptance::Satisfied,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        policy(Duration::minutes(5))
+            .evaluate_requirement(&requirement, Some(&missing), &clock)
+            .state
+            .denial_code(),
+        Some(AssuranceDenialCode::AssuranceMethodNotAllowed)
+    );
+
+    let disallowed = user_with_assurance(
+        SessionAssurance::new(
+            now,
+            ["pwd", "webauthn"],
+            Some("host:a3".to_string()),
+            Some("host-defined".to_string()),
+            MfaAcceptance::Satisfied,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        policy(Duration::minutes(5))
+            .evaluate_requirement(&requirement, Some(&disallowed), &clock)
+            .state
+            .denial_code(),
+        Some(AssuranceDenialCode::AssuranceMethodNotAllowed)
+    );
+}
+
+#[test]
+fn safe_status_projection_contains_no_credentials_or_provider_payloads() {
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let assurance = SessionAssurance::new(
+        now,
+        ["pwd", "totp"],
+        Some("provider-private-acr".to_string()),
+        Some("provider-private-context".to_string()),
+        MfaAcceptance::Satisfied,
+    )
+    .unwrap();
+    let mut user = user_with_assurance(assurance);
+    user.token_claims.additional.insert(
+        "provider_payload".to_string(),
+        serde_json::json!({
+            "access_token": "raw-access-secret",
+            "refresh_token": "raw-refresh-secret",
+        }),
+    );
+
+    let encoded = serde_json::to_string(&SessionAssuranceStatus::from_user(Some(&user))).unwrap();
+    assert!(encoded.contains("authenticated_at"));
+    for forbidden in [
+        "raw-access-secret",
+        "raw-refresh-secret",
+        "provider-private-acr",
+        "provider-private-context",
+        "provider_payload",
+        "session_id",
+        "totp",
+        "methods",
+    ] {
+        assert!(!encoded.contains(forbidden), "status leaked {forbidden}");
+    }
+
+    assert_eq!(
+        SessionAssuranceStatus::from_user(None),
+        SessionAssuranceStatus {
+            authenticated: false,
+            authenticated_at: None,
+            mfa_satisfied: false,
+        }
+    );
+}
+
+#[test]
+fn policy_ids_are_portable_and_bounded() {
+    assert_eq!(
+        AssurancePolicyId::new("interactive/recent-auth:v1")
+            .unwrap()
+            .as_str(),
+        "interactive/recent-auth:v1"
+    );
+    for invalid in ["", "spaces are not portable", "provider@policy"] {
+        assert_eq!(
+            AssurancePolicyId::new(invalid).unwrap_err(),
+            AssurancePolicyIdError
+        );
+    }
 }
 
 #[tokio::test]

@@ -30,6 +30,21 @@ clients by default.
 Additional codes remain available for specific flows (refresh, password reset,
 login challenges, TOTP). Prefer the table above for cross-service contracts.
 
+## Assurance Decisions
+
+`AssuranceEvaluationState::graphql_extension_code()` is the stable mapping for
+operation assurance:
+
+| Evaluation state | `extensions.code` |
+|------------------|-------------------|
+| `Unauthenticated` | `UNAUTHENTICATED` |
+| `StepUpRequired { .. }` | `STEP_UP_REQUIRED` |
+| `Forbidden { .. }` | `FORBIDDEN` |
+
+`AssuranceDenialCode` preserves the detailed policy reason and its own stable
+wire string. Do not parse `AssuranceDenial::public_message()` or internal
+diagnostics to choose a GraphQL code.
+
 ## Before / After
 
 Before (unsafe for clients):

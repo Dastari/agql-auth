@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+
+- Provider-neutral `AssurancePolicyId` / `AssuranceRequirement` declarations,
+  `AssurancePolicySet`, and server-authored `AssuranceEvaluation` results with
+  typed evaluation, authentication, and inclusive satisfaction timestamps.
+- Stable evaluation states for satisfied, step-up-required, unauthenticated,
+  and forbidden decisions. Detailed `AssuranceDenialCode` values map directly
+  to `STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or `FORBIDDEN` GraphQL categories
+  without parsing messages.
+- `SessionAssuranceStatus`, a credential-free client projection that exposes
+  only validated authentication time and MFA satisfaction.
+
+### Security
+
+- Unknown policies fail closed, clocks are read exactly once per evaluation,
+  and all time arithmetic remains checked.
+- Safe status serialization omits session IDs, token claims, ACR/context
+  values, raw credentials, secrets, and provider payloads.
+- Ordinary refresh continues rotating credentials without changing
+  `authenticated_at` or extending recent-authentication eligibility. Only a
+  host-verified `step_up_session` call changes session assurance.
+
+### Compatibility / SemVer
+
+- Existing `RecentMfaPolicy::evaluate`, `SessionAssurance`, refresh, and step-up
+  APIs remain source-compatible. The policy-ID/evaluation/status APIs are
+  additive and opt-in; no storage migration or default enforcement change is
+  required.
+
 ## 0.12.0
 
 ### Added
