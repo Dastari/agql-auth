@@ -134,8 +134,9 @@ pub use claims::{
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
-    AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
-    MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
+    AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
+    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
+    MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -198,7 +199,10 @@ pub use stores::{
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
     RefreshTokenStore, TotpReplayStore, UserStore,
 };
-pub use token_decode::{BearerParseMode, PurposePolicy};
+pub use token_decode::{
+    BearerParseMode, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH, MAX_ACCESS_TOKEN_SCOPE_LENGTH,
+    MAX_ACCESS_TOKEN_SCOPES, PurposePolicy,
+};
 pub use token_status::{
     AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,
     TokenStatusChecker, TokenStatusRequest,

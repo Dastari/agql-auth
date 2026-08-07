@@ -11,7 +11,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 - Store-free access-token validation for resource servers
 - Long-lived opaque API/service tokens for server-to-server calls
 - HS256 compatibility mode and RS256 signing with JWKS export
-- Roles, scopes, and typed session context in access-token claims
+- Roles, standard OAuth `scope`, and typed session context in access-token claims
 - Exact scope matching by default with opt-in hierarchical matching
 - Microsoft Entra ID / OIDC authorization-code + PKCE login
 - Host-controlled external user provisioning and account linking
@@ -30,7 +30,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 ```toml
 [dependencies]
-agql-auth = "0.13"
+agql-auth = "0.14"
 ```
 
 ## Basic Usage
@@ -308,6 +308,7 @@ For typed recent-authentication requests bound to one-time state, see
 - [Getting started](docs/getting-started.md)
 - [Storage traits](docs/storage-traits.md)
 - [Authorization, scopes, and guards](docs/authorization.md)
+- [Access-token scope claims](docs/access-token-scope-claims.md)
 - [Resource servers](docs/resource-servers.md)
 - [Scope matching](docs/scope-matching.md)
 - [Access-token-only grants](docs/access-token-only.md)
@@ -324,6 +325,17 @@ For typed recent-authentication requests bound to one-time state, see
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
+
+## 0.14.0 Standard Access-Token `scope`
+
+Version 0.14 emits access-token scopes in the standard OAuth
+space-delimited `scope` claim. Validation accepts the pre-0.14 `scopes` array
+by default for a bounded rolling migration, and strict rejection can be
+enabled after old tokens expire. This default wire change and the two new
+public `AuthConfig` fields are breaking for consumers that decode JWT payloads
+directly or construct exhaustive config literals. Purpose tokens retain their
+`scopes` array. See [Access-token scope claims](docs/access-token-scope-claims.md)
+and the staged [migration guide](MIGRATION.md).
 
 ## Provider-Neutral Assurance Contract
 

@@ -41,7 +41,7 @@ use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
 use crate::token_decode::{
     ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
-    access_token_claims_to_user, audience_claim, decode_access_token_claims,
+    access_token_claims_to_user, audience_claim, decode_access_token_claims, issued_scope_claims,
 };
 use crate::util::{
     extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
@@ -163,7 +163,7 @@ where
     where
         S: AuthRateLimitStore + 'static,
     {
-        config.rate_limits.validate()?;
+        config.validate()?;
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
         let rate_limit_store: Arc<dyn AuthRateLimitStore> = rate_limit_store;
 
@@ -880,12 +880,17 @@ where
         auth_user.token_claims.expires_at =
             OffsetDateTime::from_unix_timestamp(expires_at.unix_timestamp()).ok();
 
+        let (scope, legacy_scopes) = issued_scope_claims(
+            &auth_user.scopes,
+            self.config.access_token_scope_claim_format,
+        )?;
         let claims = AccessTokenClaims {
             typ: Some(ACCESS_TOKEN_TYPE.to_string()),
             sub: auth_user.user_id.clone(),
             sid: auth_user.session_id.to_string(),
             roles: auth_user.roles.clone(),
-            scopes: auth_user.scopes.clone(),
+            scope,
+            legacy_scopes,
             ctx: auth_user.session.clone(),
             iss: self.config.issuer.clone(),
             aud: audience_claim(&self.config.audience),
@@ -944,6 +949,7 @@ where
             self.decoding_key.clone(),
             self.validation.clone(),
             self.signing_key_id.clone(),
+            self.config.legacy_scope_claims,
         )
     }
 
@@ -1458,6 +1464,7 @@ const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
     "sub",
     "sid",
     "roles",
+    "scope",
     "scopes",
     "ctx",
     "purpose",

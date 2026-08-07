@@ -46,8 +46,13 @@ let grant = auth
 - A unique `jti` is included
 - TTL must be positive and `<= AuthConfig::max_access_token_ttl` (default 24h)
 - Roles and scopes are deterministically deduplicated
+- Scopes use the same standard OAuth `scope` claim and migration policy as
+  session access tokens
 
 ## Validation
 
 Issued tokens validate through both `AuthService` and `AccessTokenValidator`
 using the shared decode core.
+
+See [Access-token scope claims](access-token-scope-claims.md) for legacy-array
+compatibility, strict validation, and rollout guidance.

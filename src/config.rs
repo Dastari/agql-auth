@@ -34,6 +34,19 @@ pub struct AuthConfig {
     pub max_access_token_ttl: Duration,
     /// Refresh-token lifetime.
     pub refresh_token_ttl: Duration,
+    /// Claim shape used for newly issued access-token scopes.
+    ///
+    /// Version 0.14 defaults to [`AccessTokenScopeClaimFormat::Standard`]. Use
+    /// [`AccessTokenScopeClaimFormat::LegacyArray`] only during a staged
+    /// migration for consumers that cannot yet read the OAuth `scope` claim.
+    pub access_token_scope_claim_format: AccessTokenScopeClaimFormat,
+    /// Whether access-token validation accepts the pre-0.14 `scopes` array.
+    ///
+    /// Keep this at [`LegacyScopeClaims::Accept`] until every access token
+    /// issued before the migration has expired, then switch to
+    /// [`LegacyScopeClaims::Reject`]. A token containing conflicting `scope`
+    /// and `scopes` values is rejected in either mode.
+    pub legacy_scope_claims: LegacyScopeClaims,
     /// Abuse-protection settings for credential and request flows.
     pub rate_limits: AuthRateLimitConfig,
 }
@@ -48,6 +61,11 @@ impl fmt::Debug for AuthConfig {
             .field("access_token_ttl", &self.access_token_ttl)
             .field("max_access_token_ttl", &self.max_access_token_ttl)
             .field("refresh_token_ttl", &self.refresh_token_ttl)
+            .field(
+                "access_token_scope_claim_format",
+                &self.access_token_scope_claim_format,
+            )
+            .field("legacy_scope_claims", &self.legacy_scope_claims)
             .field("rate_limits", &self.rate_limits)
             .finish()
     }
@@ -76,6 +94,8 @@ impl AuthConfig {
             access_token_ttl: Duration::minutes(15),
             max_access_token_ttl: Duration::hours(24),
             refresh_token_ttl: Duration::days(30),
+            access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
+            legacy_scope_claims: LegacyScopeClaims::Accept,
             rate_limits: AuthRateLimitConfig::default(),
         }
     }
@@ -101,6 +121,8 @@ impl AuthConfig {
             access_token_ttl: Duration::minutes(15),
             max_access_token_ttl: Duration::hours(24),
             refresh_token_ttl: Duration::days(30),
+            access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
+            legacy_scope_claims: LegacyScopeClaims::Accept,
             rate_limits: AuthRateLimitConfig::default(),
         }
     }
@@ -115,6 +137,59 @@ impl AuthConfig {
         };
         self.jwt_signing = signing;
     }
+
+    /// Selects the claim shape used for newly issued access-token scopes.
+    #[must_use]
+    pub fn with_access_token_scope_claim_format(
+        mut self,
+        format: AccessTokenScopeClaimFormat,
+    ) -> Self {
+        self.access_token_scope_claim_format = format;
+        self
+    }
+
+    /// Selects whether validation accepts the pre-0.14 `scopes` array.
+    #[must_use]
+    pub fn with_legacy_scope_claims(mut self, policy: LegacyScopeClaims) -> Self {
+        self.legacy_scope_claims = policy;
+        self
+    }
+
+    pub(crate) fn validate(&self) -> crate::AuthResult<()> {
+        self.rate_limits.validate()?;
+        if self.access_token_scope_claim_format == AccessTokenScopeClaimFormat::LegacyArray
+            && self.legacy_scope_claims == LegacyScopeClaims::Reject
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "legacy scope issuance requires legacy scope validation during migration"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Claim shape used when issuing access-token scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccessTokenScopeClaimFormat {
+    /// Emit the OAuth space-delimited `scope` string.
+    #[default]
+    Standard,
+    /// Emit the pre-0.14 `scopes` string array.
+    ///
+    /// This exists only for staged migration and should not be selected for a
+    /// new deployment.
+    LegacyArray,
+}
+
+/// Policy for validating the pre-0.14 access-token `scopes` array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LegacyScopeClaims {
+    /// Accept a legacy array when no conflicting standard claim is present.
+    #[default]
+    Accept,
+    /// Reject every token containing the legacy array, including an empty one.
+    Reject,
 }
 
 /// Abuse-protection configuration for authentication flows.

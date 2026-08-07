@@ -11,7 +11,7 @@ Local access tokens preserve this claim shape:
 - `sub`: local user ID
 - `sid`: local session ID
 - `roles`: local roles
-- `scopes`: local scopes
+- `scope`: local scopes as one space-delimited OAuth string
 - `ctx`: typed `SessionContext`
 - `iss`: configured issuer
 - `aud`: configured audience
@@ -20,6 +20,12 @@ Local access tokens preserve this claim shape:
 
 The `ctx` claim contains the local authentication method, MFA state, and
 optional active scope.
+
+After validation, `scope` is normalized into the public
+`AuthUser::scopes: Vec<String>`. This in-process representation and all guard
+APIs are unchanged. During a bounded migration, validators can also read the
+pre-0.14 `scopes` array; see
+[Access-token scope claims](access-token-scope-claims.md).
 
 ## Auth Methods
 

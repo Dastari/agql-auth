@@ -19,8 +19,9 @@ pub use crate::claims::{
 pub use crate::clock::{Clock, FixedClock, SystemClock};
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
-    AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
-    MicrosoftEntraConfig, MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
+    AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
+    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
+    MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -82,7 +83,10 @@ pub use crate::stores::{
     MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
     RefreshTokenStore, TotpReplayStore, UserStore,
 };
-pub use crate::token_decode::{BearerParseMode, PurposePolicy};
+pub use crate::token_decode::{
+    BearerParseMode, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH, MAX_ACCESS_TOKEN_SCOPE_LENGTH,
+    MAX_ACCESS_TOKEN_SCOPES, PurposePolicy,
+};
 pub use crate::token_status::{
     AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,
     TokenStatusChecker, TokenStatusRequest,

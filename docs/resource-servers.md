@@ -35,11 +35,13 @@ let validator = AccessTokenValidator::builder()
 
 `AuthService` and `AccessTokenValidator` share one decode core and agree on the
 access-token claim shape: `typ`, `purpose`, `iss`, `aud`, `sub`, `sid`, `roles`,
-`scopes`, `ctx`, `exp`, `iat`, optional `nbf`, and optional multi-tenant metadata
+standard `scope`, `ctx`, `exp`, `iat`, optional `nbf`, and optional multi-tenant metadata
 (`jti`, `tenant_id`, `organization_id`, `session_family_id`, `actor`, `auth_time`,
 `amr`, `acr`, `cnf`, resource binding, `correlation_id`). New access tokens carry
 `typ = "access"`, `purpose = "access_token"`, and a unique `jti`. Legacy tokens
-missing purpose still validate under the default purpose policy.
+missing purpose still validate under the default purpose policy. The pre-0.14
+`scopes` array is accepted by default during migration; see
+[Access-token scope claims](access-token-scope-claims.md).
 
 ## Validation Policy Highlights
 
@@ -50,6 +52,7 @@ missing purpose still validate under the default purpose policy.
 - Expected `kid` where configured; multi-key JWKS resolves by token `kid`
 - HS256 only with `accept_hs256(true)`
 - Purpose policy: `AccessTokenOrLegacy` (default) or `RequireAccessToken`
+- Legacy scope policy: `Accept` (default migration mode) or `Reject`
 - Claim requirements via `ClaimRequirements`
 - Bearer parse mode: `BearerOrRaw` (default) or `RequireBearer`
 - Basic and other schemes are rejected
@@ -129,3 +132,15 @@ let validator = AccessTokenValidator::builder()
 ```
 
 Exact matching remains the default.
+
+After all pre-0.14 access tokens have expired, disable the legacy array on each
+resource server independently:
+
+```rust
+use agql_auth::LegacyScopeClaims;
+
+let validator = AccessTokenValidator::builder()
+    // issuer, audience, and public-key configuration
+    .legacy_scope_claims(LegacyScopeClaims::Reject)
+    .build()?;
+```

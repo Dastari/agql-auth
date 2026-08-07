@@ -59,7 +59,8 @@ RS256 behavior:
 - access-token headers include the configured `kid`
 - private key material is used only for signing
 - public key material is used for local validation and JWKS export
-- issuer, audience, expiry, roles, scopes, and session claims are unchanged
+- issuer, audience, expiry, roles, scope values, and session claims are
+  independent of the signing algorithm
 - incoming token headers must match the configured algorithm
 - incoming RS256 tokens must contain the expected `kid`
 
@@ -158,18 +159,25 @@ still be valid.
 
 ## Claims Shape
 
-Changing signing modes does not rename or remove access-token claims:
+Changing signing modes does not rename or remove access-token claims. Version
+0.14 access tokens use the standard OAuth `scope` string:
 
 - `typ`
 - `sub`
 - `sid`
 - `roles`
-- `scopes`
+- `scope`
 - `ctx`
 - `iss`
 - `aud`
 - `exp`
 - `iat`
+
+During a bounded migration, validation also accepts the pre-0.14 `scopes`
+array. Issuers can temporarily retain that format, and validators can reject it
+after every old access token has expired. See
+[Access-token scope claims](access-token-scope-claims.md). Purpose tokens remain
+separate and continue using their `scopes` array.
 
 `0.6.0` added `typ = "access"` and `purpose = "access_token"` to newly issued
 access tokens. Validation accepts legacy `0.5.x` access tokens that do not

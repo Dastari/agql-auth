@@ -51,6 +51,11 @@ RS256. HS256 secrets must be at least 32 bytes. See
 [JWT signing and JWKS](jwt-signing-and-jwks.md) and
 [Resource servers](resource-servers.md).
 
+Version 0.14 emits access-token scopes as a standard space-delimited `scope`
+string. Validators accept the older `scopes` array during a rolling migration.
+Read [Access-token scope claims](access-token-scope-claims.md) before upgrading
+any deployment whose consumers decode JWT payloads directly.
+
 ## Password Login
 
 The host stores users using its own schema and returns `StoredUser` from

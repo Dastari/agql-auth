@@ -104,7 +104,7 @@ impl GuardedQuery {
 }
 
 #[tokio::test]
-async fn hs256_auth_config_new_keeps_existing_token_shape() {
+async fn hs256_auth_config_new_emits_standard_scope_claim() {
     let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
     let payload = auth
         .issue_verified_user_session_with_scopes(
@@ -125,7 +125,8 @@ async fn hs256_auth_config_new_keeps_existing_token_shape() {
     assert_claim_shape(&claims);
     assert_eq!(claims["sub"], "user-1");
     assert_eq!(claims["roles"], json!(["CatalogEditor"]));
-    assert_eq!(claims["scopes"], json!(["users.read"]));
+    assert_eq!(claims["scope"], "users.read");
+    assert!(claims.get("scopes").is_none());
 
     let decoded = auth
         .authenticate_access_token(&payload.access_token)
@@ -515,7 +516,8 @@ async fn rs256_tokens_are_issued_and_validated_with_kid() {
     assert_claim_shape(&claims);
     assert_eq!(claims["sub"], "user-1");
     assert_eq!(claims["roles"], json!(["CatalogEditor"]));
-    assert_eq!(claims["scopes"], json!(["users.read"]));
+    assert_eq!(claims["scope"], "users.read");
+    assert!(claims.get("scopes").is_none());
 
     let decoded = auth
         .authenticate_access_token(&payload.access_token)
@@ -756,7 +758,7 @@ fn assert_unset_access_claims_absent(claims: &JsonValue, expected_absent: &[&str
 
 fn assert_claim_shape(claims: &JsonValue) {
     for key in [
-        "sub", "sid", "roles", "scopes", "ctx", "iss", "aud", "exp", "iat",
+        "sub", "sid", "roles", "scope", "ctx", "iss", "aud", "exp", "iat",
     ] {
         assert!(claims.get(key).is_some(), "missing claim {key}");
     }

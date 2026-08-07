@@ -6,6 +6,7 @@ use serde_json::Value as JsonValue;
 
 use crate::claims::ClaimRequirements;
 use crate::clock::{Clock, SystemClock};
+use crate::config::LegacyScopeClaims;
 use crate::keys::{AccessTokenKeyResolver, StaticHs256Key, StaticJwksKeySet, StaticRs256Key};
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::token_decode::{
@@ -29,6 +30,7 @@ pub struct AccessTokenValidator {
     leeway_seconds: u64,
     allowed_algorithms: Vec<Algorithm>,
     purpose_policy: PurposePolicy,
+    legacy_scope_claims: LegacyScopeClaims,
     claim_requirements: ClaimRequirements,
     key_resolver: Arc<dyn AccessTokenKeyResolver>,
     expected_kid: Option<String>,
@@ -48,6 +50,7 @@ pub struct AccessTokenValidatorBuilder {
     accept_hs256: bool,
     allowed_algorithms: Option<Vec<Algorithm>>,
     purpose_policy: PurposePolicy,
+    legacy_scope_claims: LegacyScopeClaims,
     claim_requirements: ClaimRequirements,
     bearer_parse_mode: BearerParseMode,
     clock: Arc<dyn Clock>,
@@ -73,6 +76,7 @@ impl AccessTokenValidatorBuilder {
             accept_hs256: false,
             allowed_algorithms: None,
             purpose_policy: PurposePolicy::AccessTokenOrLegacy,
+            legacy_scope_claims: LegacyScopeClaims::Accept,
             claim_requirements: ClaimRequirements::default(),
             bearer_parse_mode: BearerParseMode::BearerOrRaw,
             clock: Arc::new(SystemClock),
@@ -165,6 +169,16 @@ impl AccessTokenValidatorBuilder {
         self
     }
 
+    /// Controls whether the pre-0.14 access-token `scopes` array is accepted.
+    ///
+    /// The default is [`LegacyScopeClaims::Accept`] for rolling upgrades.
+    /// Select [`LegacyScopeClaims::Reject`] after every legacy token has
+    /// expired. Conflicting standard and legacy claims always fail closed.
+    pub fn legacy_scope_claims(mut self, policy: LegacyScopeClaims) -> Self {
+        self.legacy_scope_claims = policy;
+        self
+    }
+
     /// Sets optional multi-tenant / binding claim requirements.
     pub fn claim_requirements(mut self, requirements: ClaimRequirements) -> Self {
         self.claim_requirements = requirements;
@@ -234,6 +248,7 @@ impl AccessTokenValidatorBuilder {
             leeway_seconds: leeway,
             allowed_algorithms,
             purpose_policy: self.purpose_policy,
+            legacy_scope_claims: self.legacy_scope_claims,
             claim_requirements: self.claim_requirements,
             key_resolver,
             expected_kid,
@@ -373,6 +388,7 @@ impl AccessTokenValidator {
             expected_kid: None,
             leeway_seconds: self.leeway_seconds,
             purpose_policy: self.purpose_policy,
+            legacy_scope_claims: self.legacy_scope_claims,
             claim_requirements: self.claim_requirements.clone(),
             clock: self.clock.clone(),
             allowed_algorithms: self.allowed_algorithms.clone(),

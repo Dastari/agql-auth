@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.14.0
+
+### Added
+
+- `AccessTokenScopeClaimFormat` and
+  `AuthConfig::with_access_token_scope_claim_format` for selecting standard
+  `scope` issuance or temporary pre-0.14 `scopes` array issuance during a
+  rolling migration.
+- `LegacyScopeClaims`, `AuthConfig::with_legacy_scope_claims`, and
+  `AccessTokenValidatorBuilder::legacy_scope_claims` for independently
+  controlling whether locally validated access tokens may contain the legacy
+  array.
+- Public access-token scope bounds:
+  `MAX_ACCESS_TOKEN_SCOPES`, `MAX_ACCESS_TOKEN_SCOPE_LENGTH`, and
+  `MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH`.
+- A long-form [access-token scope claim migration guide](docs/access-token-scope-claims.md)
+  covering staged deployment, rollback, strict-mode activation, and the wire
+  compatibility boundary.
+
+### Changed
+
+- Newly issued access tokens now use the standard OAuth space-delimited
+  `scope` string. Empty scope sets omit the claim. The public
+  `AuthUser::scopes` representation and authorization helpers remain a
+  `Vec<String>` and preserve stable first-seen order.
+- Access-token validation accepts the pre-0.14 `scopes` string array by
+  default so old tokens remain usable during their bounded lifetime. After the
+  migration window, hosts can set `LegacyScopeClaims::Reject` independently on
+  issuers and resource-server validators.
+- Tokens that carry both `scope` and `scopes` validate only when legacy support
+  is enabled and the two claims describe the same set. Conflicting dual claims
+  are rejected.
+- Access-token scope values now use one bounded wire grammar across standard
+  and legacy claims: printable ASCII excluding space, double quote, and
+  backslash; at most 256 values, 512 bytes per value, and 16 KiB aggregate.
+
+### Security
+
+- Malformed, empty, non-ASCII, control-character, over-count, oversized, and
+  conflicting access-token scope claims fail closed before an `AuthUser` is
+  constructed.
+- `scope` and `scopes` are both reserved access-token claim names, preventing
+  flattened custom metadata from shadowing either migration format.
+- Invalid scope values fail token issuance without reflecting the rejected
+  value in the error.
+
+### Breaking Changes / Compatibility
+
+- The default access-token wire representation changes from
+  `"scopes":["users.read"]` to `"scope":"users.read"`. Consumers that decode
+  JWT payloads themselves must accept the standard claim before issuers adopt
+  the new default, or issuers must temporarily select
+  `AccessTokenScopeClaimFormat::LegacyArray`.
+- `AuthConfig` has two new public fields. Code that creates configuration
+  through constructors or builder methods continues to compile;
+  exhaustive `AuthConfig` struct literals must initialize the new fields.
+- Previously issued well-formed legacy access tokens remain valid under the
+  default `LegacyScopeClaims::Accept` policy. No refresh-token, user-store,
+  rate-limit-store, or database migration is required.
+- Purpose tokens retain their purpose-specific `scopes` array. API/service
+  tokens remain opaque, and their scope model is unchanged.
+- These intentional wire and public-struct changes make `0.14.0` a pre-1.0
+  minor release. Follow the staged [migration guide](MIGRATION.md) before
+  enabling strict legacy rejection.
+
 ## 0.13.0
 
 ### Added

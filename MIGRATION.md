@@ -1,5 +1,116 @@
 # Migration Guide
 
+## 0.13.0 to 0.14.0: standard access-token `scope`
+
+Version 0.14 changes newly issued access JWTs from the project-specific
+`scopes` string array to the standard OAuth space-delimited `scope` string.
+The in-process authorization model does not change: successfully validated
+values still become `AuthUser::scopes: Vec<String>`, and guards and scope
+matchers operate as before.
+
+### Wire and source compatibility
+
+Before 0.14, an access-token payload contained:
+
+```json
+{
+  "scopes": ["users.read", "users.write"]
+}
+```
+
+The 0.14 default is:
+
+```json
+{
+  "scope": "users.read users.write"
+}
+```
+
+An empty scope set omits `scope`. Purpose tokens are a separate token type and
+continue using their purpose-specific `scopes` array. Opaque API/service
+tokens, refresh tokens, stored sessions, and provider tokens are unchanged.
+
+`AuthConfig` now has public `access_token_scope_claim_format` and
+`legacy_scope_claims` fields. Constructor and builder users are
+source-compatible. Exhaustive `AuthConfig` struct literals must add both
+fields, normally as `AccessTokenScopeClaimFormat::Standard` and
+`LegacyScopeClaims::Accept` during migration.
+
+### Safe rolling deployment
+
+Do not switch the issuer until every JWT consumer can read `scope`. A safe
+order is:
+
+1. Upgrade issuers and validators to 0.14 while temporarily keeping legacy
+   issuance:
+
+   ```rust
+   use agql_auth::{
+       AccessTokenScopeClaimFormat, AuthConfig, LegacyScopeClaims,
+   };
+
+   let config = AuthConfig::with_rs256_pem(private_pem, public_pem, key_id)
+       .with_access_token_scope_claim_format(
+           AccessTokenScopeClaimFormat::LegacyArray,
+       )
+       .with_legacy_scope_claims(LegacyScopeClaims::Accept);
+   ```
+
+2. Upgrade every router, resource server, worker, and other JWT consumer to
+   accept the standard `scope` string. A 0.14 `AccessTokenValidator` accepts
+   both representations by default.
+3. Change issuers to `AccessTokenScopeClaimFormat::Standard`, or remove the
+   temporary override to use the default. Keep legacy validation enabled.
+4. Wait at least the maximum lifetime of every access token issued before the
+   switch, including any configured validation clock skew. Refresh-token TTL
+   is not the relevant window because refreshed sessions receive newly issued
+   access tokens.
+5. Reject legacy claims on the issuer's local validation path and every
+   independent resource server:
+
+   ```rust
+   let config = config.with_legacy_scope_claims(LegacyScopeClaims::Reject);
+
+   let validator = AccessTokenValidator::builder()
+       // issuer, audience, and public-key configuration
+       .legacy_scope_claims(LegacyScopeClaims::Reject)
+       .build()?;
+   ```
+
+`AuthService::new` rejects the incoherent combination of legacy issuance and
+legacy rejection. Issuance and validation are separate controls so a rolling
+deployment can move forward without accepting new legacy tokens indefinitely.
+
+### Validation behavior
+
+In the default migration mode:
+
+- `scope` alone is accepted;
+- `scopes` alone is accepted;
+- both claims are accepted only when they describe the same set, regardless
+  of order or duplicates; and
+- conflicting dual claims are rejected as an invalid access token.
+
+`LegacyScopeClaims::Reject` rejects every token containing `scopes`, including
+an empty array or an equivalent dual claim. Standard `scope` uses exactly one
+ASCII space as its delimiter. Empty tokens, repeated delimiters, tabs,
+newlines, non-ASCII values, quotes, backslashes, control characters, excessive
+counts, and oversized values fail closed. The exported constants describe the
+enforced count and byte limits.
+
+### Rollback
+
+If a consumer cannot read the standard claim, restore
+`AccessTokenScopeClaimFormat::LegacyArray` on issuers and keep
+`LegacyScopeClaims::Accept` on every validator. This affects only newly issued
+access tokens; there is no storage migration to reverse. Existing standard
+tokens continue to validate while legacy acceptance is enabled. Once the
+consumer is fixed, repeat the staged switch and expiry window before enabling
+strict rejection.
+
+See [Access-token scope claims](docs/access-token-scope-claims.md) for the full
+wire contract, security bounds, deployment inventory, and acceptance checks.
+
 ## 0.12.0 to 0.13.0: provider-neutral operation assurance
 
 This change is additive and opt-in. Existing calls to
