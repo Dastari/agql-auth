@@ -1,5 +1,48 @@
 # Migration Guide
 
+## 0.14.0 to 0.15.0: existing-session-bound delegation
+
+Existing sessionless calls to `issue_access_token_only` remain valid and keep
+their synthetic `sid` semantics. Newly issued sessionless tokens include the
+closed `grant_kind = sessionless` claim. Normal refreshable access tokens use
+`grant_kind = user_session`. Consumers that deserialize JWTs into exhaustive
+wire structs must add the optional `grant_kind`, `session_version`, and
+`operation` fields before upgrading issuers.
+
+The session-bound contract is opt-in and requires no schema migration. To
+adopt it:
+
+1. Implement `VerifiedActiveUserSessionResolver` against the authoritative
+   active-session store. Its read must reject revoked/expired records and load
+   the exact subject, session/family/tenant, current session/security version,
+   roles, scopes, assurance, and absolute/idle expiry without updating idle
+   expiry or interactive last-active time.
+2. Install the resolver during trusted startup with
+   `with_active_user_session_resolver`.
+3. Call `prepare_session_bound_access_token_only` with the initially resolved
+   principal and a mandatory `SessionBoundDelegationBinding`, apply TTL or
+   optional confirmation/custom claims to the returned opaque request, then
+   call `issue_session_bound_access_token_only`. Preparation reads and stamps
+   the authoritative version; issuance reads it again.
+4. At every protected request, validate normal signature/issuer/audience plus
+   the exact actor, resource, correlation, confirmation (when configured),
+   operation binding, session version, and current session status. Reject
+   delegated credentials from login/session-management endpoints with
+   `authenticate_session_management_bearer` or
+   `require_session_management_eligible`.
+
+The issuer rechecks after initial resolution, but it cannot make application
+store verification and JWT signing one transaction. The signed session version
+is therefore mandatory: a revocation/version change after signing is rejected
+by the next current-session assurance check.
+
+`AuthConfig` adds `max_session_bound_delegation_ttl`; constructors default it
+to 15 minutes. Exhaustive literals must initialize it to a positive value no
+greater than `max_access_token_ttl`. `AccessTokenMetadata`,
+`ClaimRequirements`, and `PrincipalReference` also have additive public fields.
+No refresh-token, session-family, or delegated-session row is created, so no
+database migration or backfill is required.
+
 ## 0.13.0 to 0.14.0: standard access-token `scope`
 
 Version 0.14 changes newly issued access JWTs from the project-specific

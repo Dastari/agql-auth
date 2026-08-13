@@ -26,15 +26,22 @@ use crate::AuthResult;
 use crate::assurance::{
     MfaAcceptance, RefreshableTokenMetadata, SessionAssurance, StepUpAuthentication,
 };
-use crate::claims::AccessTokenMetadata;
+use crate::claims::{AccessTokenGrantKind, AccessTokenMetadata};
 use crate::clock::{Clock, SystemClock};
 use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
-use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
+use crate::grant::{
+    AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
+    SessionBoundDelegationBinding,
+};
 use crate::models::{
-    AuthPayload, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitSnapshot,
-    AuthRateLimitState, AuthUser, IssuedPurposeToken, PurposeTokenIssueRequest,
-    PurposeTokenValidation, RefreshTokenRevocationReason, StoredRefreshToken, VerifiedPurposeToken,
+    AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
+    AuthRateLimitSnapshot, AuthRateLimitState, AuthUser, IssuedPurposeToken,
+    PurposeTokenIssueRequest, PurposeTokenValidation, RefreshTokenRevocationReason,
+    StoredRefreshToken, VerifiedPurposeToken,
+};
+use crate::principal_reference::{
+    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSessionResolver,
 };
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
@@ -106,6 +113,7 @@ pub struct AuthService<U, R> {
     signing_key_id: Option<String>,
     jwks: Option<JsonValue>,
     scope_matcher: Arc<dyn ScopeMatch>,
+    active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
 }
 
 impl<U, R> AuthService<U, R>
@@ -175,6 +183,7 @@ where
             signing_key_id: jwt_keys.key_id,
             jwks: jwt_keys.jwks,
             scope_matcher: Arc::new(ExactScopeMatch),
+            active_user_session_resolver: None,
             config,
             user_store,
             refresh_store,
@@ -204,6 +213,19 @@ where
     /// exact; guards use this matcher when [`AuthRuntime`] is injected.
     pub fn with_scope_matcher(mut self, scope_matcher: Arc<dyn ScopeMatch>) -> Self {
         self.scope_matcher = scope_matcher;
+        self
+    }
+
+    /// Installs the trusted read-only active-session resolver used exclusively
+    /// by existing-session-bound delegated issuance.
+    ///
+    /// Configure this once during application startup. Ordinary issuance
+    /// callers cannot supply or replace the verifier per request.
+    pub fn with_active_user_session_resolver<S>(mut self, resolver: Arc<S>) -> Self
+    where
+        S: VerifiedActiveUserSessionResolver + 'static,
+    {
+        self.active_user_session_resolver = Some(resolver);
         self
     }
 
@@ -458,6 +480,17 @@ where
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
         self.authenticate_access_token(token)
+    }
+
+    /// Validates a bearer for a login/session-management endpoint and rejects
+    /// sessionless or delegated access-token-only credentials.
+    pub fn authenticate_session_management_bearer(
+        &self,
+        bearer_or_token: &str,
+    ) -> AuthResult<AuthUser> {
+        let user = self.authenticate_bearer(bearer_or_token)?;
+        user.require_session_management_eligible()?;
+        Ok(user)
     }
 
     /// Returns the public JWKS document for asymmetric signing.
@@ -739,6 +772,8 @@ where
                 tenant_id: request.tenant_id,
                 organization_id: request.organization_id,
                 session_family_id: request.session_family_id,
+                grant_kind: Some(AccessTokenGrantKind::Sessionless),
+                session_version: None,
                 actor: request.actor,
                 auth_time: request.auth_time,
                 amr: request.amr,
@@ -747,6 +782,7 @@ where
                 resource_type: request.resource_type,
                 resource_id: request.resource_id,
                 correlation_id: request.correlation_id,
+                operation: None,
                 purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
                 expires_at: None,
                 additional: request.additional_claims,
@@ -761,6 +797,201 @@ where
             access_token_expires_at,
             user,
         })
+    }
+
+    /// Prepares an opaque request for delegation from an initially resolved
+    /// user session.
+    ///
+    /// This performs the first read through the trusted active-session resolver
+    /// and stamps the request with the authoritative session/security version.
+    /// The issuance method performs a second read, so revocation, expiry,
+    /// identity, version, or authority changes after preparation fail closed.
+    /// Legacy source access tokens may omit a session version because this
+    /// method obtains it from the authoritative record.
+    pub async fn prepare_session_bound_access_token_only(
+        &self,
+        resolved: &ResolvedPrincipal,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        binding: SessionBoundDelegationBinding,
+    ) -> AuthResult<SessionBoundAccessTokenOnlyRequest> {
+        let AuthPrincipal::User(source_user) = resolved.principal() else {
+            return Err(AuthError::Forbidden);
+        };
+        let source_reference = resolved.reference();
+        if source_reference.kind != PrincipalReferenceKind::UserSession
+            || matches!(
+                source_reference.grant_kind,
+                Some(
+                    AccessTokenGrantKind::Sessionless
+                        | AccessTokenGrantKind::SessionBoundDelegation
+                )
+            )
+            || matches!(
+                source_user.token_claims.grant_kind,
+                Some(
+                    AccessTokenGrantKind::Sessionless
+                        | AccessTokenGrantKind::SessionBoundDelegation
+                )
+            )
+        {
+            return Err(AuthError::Forbidden);
+        }
+
+        let resolver = self.active_user_session_resolver.as_ref().ok_or_else(|| {
+            AuthError::InvalidConfiguration(
+                "session-bound delegation requires an active-user-session resolver".to_string(),
+            )
+        })?;
+        let verified = resolver
+            .resolve_active_user_session(source_reference)
+            .await?;
+        if verified.reference() != source_reference {
+            return Err(AuthError::Forbidden);
+        }
+
+        let mut prepared_reference = source_reference.clone();
+        prepared_reference.grant_kind = Some(AccessTokenGrantKind::UserSession);
+        prepared_reference.session_version = Some(verified.session_version().to_string());
+        let request = SessionBoundAccessTokenOnlyRequest::from_prepared_reference(
+            prepared_reference,
+            roles,
+            scopes,
+            binding,
+        );
+        validate_session_bound_access_token_only_request(&request, &self.config)?;
+        self.validate_session_bound_current_authority(verified.user(), &request)?;
+        Ok(request)
+    }
+
+    /// Issues a short-lived access token bound to an existing verified session.
+    ///
+    /// The service re-reads authoritative session state through its configured
+    /// resolver after request construction, preserves its exact
+    /// subject/session/version, and validates current role and scope authority.
+    /// The resolver contract is read-only: issuance must not extend idle expiry
+    /// or last-active state.
+    /// No refresh token, refresh-store row, session family, or new login session
+    /// is created.
+    pub async fn issue_session_bound_access_token_only(
+        &self,
+        request: SessionBoundAccessTokenOnlyRequest,
+    ) -> AuthResult<AccessTokenOnlyGrant> {
+        validate_session_bound_access_token_only_request(&request, &self.config)?;
+        let resolver = self.active_user_session_resolver.as_ref().ok_or_else(|| {
+            AuthError::InvalidConfiguration(
+                "session-bound delegation requires an active-user-session resolver".to_string(),
+            )
+        })?;
+        let verified = resolver
+            .resolve_active_user_session(&request.reference)
+            .await?;
+        if verified.reference() != &request.reference {
+            return Err(AuthError::Forbidden);
+        }
+        let current = verified.user();
+        self.validate_session_bound_current_authority(current, &request)?;
+
+        let now = OffsetDateTime::now_utc();
+        let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
+        let requested_expires_at = now.checked_add(ttl).ok_or_else(|| {
+            AuthError::InvalidConfiguration(
+                "session-bound delegation ttl calculation overflowed".to_string(),
+            )
+        })?;
+        let delegation_ceiling = now
+            .checked_add(self.config.max_session_bound_delegation_ttl)
+            .ok_or_else(|| {
+                AuthError::InvalidConfiguration(
+                    "session-bound delegation ceiling calculation overflowed".to_string(),
+                )
+            })?;
+        let access_token_expires_at = requested_expires_at
+            .min(delegation_ceiling)
+            .min(verified.effective_expires_at());
+        if access_token_expires_at.unix_timestamp() <= now.unix_timestamp() {
+            return Err(AuthError::AccessTokenExpired);
+        }
+
+        let jti = Uuid::new_v4().to_string();
+        let assurance = current.session.assurance.as_ref();
+        let auth_time = assurance.map(SessionAssurance::auth_time);
+        let amr = assurance.map(|value| value.methods.clone());
+        let acr = assurance.and_then(|value| value.acr.clone());
+        let auth_user = AuthUser {
+            user_id: current.user_id.clone(),
+            session_id: current.session_id,
+            roles: request.roles,
+            scopes: request.scopes,
+            session: current.session.clone(),
+            token_claims: AccessTokenMetadata {
+                jti: Some(jti),
+                tenant_id: current.token_claims.tenant_id.clone(),
+                organization_id: current.token_claims.organization_id.clone(),
+                session_family_id: current.token_claims.session_family_id.clone(),
+                grant_kind: Some(AccessTokenGrantKind::SessionBoundDelegation),
+                session_version: Some(verified.session_version().to_string()),
+                actor: Some(request.binding.actor),
+                auth_time,
+                amr,
+                acr,
+                cnf: request.cnf,
+                resource_type: Some(request.binding.resource_type),
+                resource_id: Some(request.binding.resource_id),
+                correlation_id: Some(request.binding.correlation_id),
+                operation: Some(request.binding.operation),
+                purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
+                expires_at: None,
+                additional: request.additional_claims,
+            },
+        };
+        let (access_token, user) =
+            self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
+
+        Ok(AccessTokenOnlyGrant {
+            access_token,
+            access_token_expires_at,
+            user,
+        })
+    }
+
+    fn validate_session_bound_current_authority(
+        &self,
+        current: &AuthUser,
+        request: &SessionBoundAccessTokenOnlyRequest,
+    ) -> AuthResult<()> {
+        if request
+            .roles
+            .iter()
+            .any(|role| !current.roles.contains(role))
+            || request
+                .scopes
+                .iter()
+                .any(|scope| !self.scope_matcher.has_scope(&current.scopes, scope))
+            || current
+                .token_claims
+                .actor
+                .as_ref()
+                .is_some_and(|actor| actor != &request.binding.actor)
+            || current
+                .token_claims
+                .cnf
+                .as_ref()
+                .is_some_and(|confirmation| request.cnf.as_ref() != Some(confirmation))
+            || current
+                .token_claims
+                .resource_type
+                .as_ref()
+                .is_some_and(|resource_type| resource_type != &request.binding.resource_type)
+            || current
+                .token_claims
+                .resource_id
+                .as_ref()
+                .is_some_and(|resource_id| resource_id != &request.binding.resource_id)
+        {
+            return Err(AuthError::Forbidden);
+        }
+        Ok(())
     }
 
     /// Injects an authenticated user into an `async-graphql` request when a token is present.
@@ -817,11 +1048,12 @@ where
 
     async fn issue_tokens_only(
         &self,
-        auth_user: AuthUser,
+        mut auth_user: AuthUser,
         session_family_id: Uuid,
         metadata: ClientMetadata,
         now: OffsetDateTime,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
+        auth_user.token_claims.grant_kind = Some(AccessTokenGrantKind::UserSession);
         let access_token_expires_at = now + self.config.access_token_ttl;
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
@@ -902,6 +1134,8 @@ where
             tenant_id: auth_user.token_claims.tenant_id.clone(),
             organization_id: auth_user.token_claims.organization_id.clone(),
             session_family_id: auth_user.token_claims.session_family_id.clone(),
+            grant_kind: auth_user.token_claims.grant_kind,
+            session_version: auth_user.token_claims.session_version.clone(),
             actor: auth_user.token_claims.actor.clone(),
             auth_time: auth_user.token_claims.auth_time,
             amr: auth_user.token_claims.amr.clone(),
@@ -910,6 +1144,7 @@ where
             resource_type: auth_user.token_claims.resource_type.clone(),
             resource_id: auth_user.token_claims.resource_id.clone(),
             correlation_id: auth_user.token_claims.correlation_id.clone(),
+            operation: auth_user.token_claims.operation.clone(),
             additional: auth_user.token_claims.additional.clone(),
         };
 
@@ -1421,12 +1656,84 @@ fn validate_access_token_only_request(
     request: &AccessTokenOnlyRequest,
     config: &AuthConfig,
 ) -> AuthResult<()> {
-    if request.user_id.trim().is_empty() {
+    validate_access_token_only_common(
+        &request.user_id,
+        request.ttl,
+        &request.additional_claims,
+        config,
+    )
+}
+
+fn validate_session_bound_access_token_only_request(
+    request: &SessionBoundAccessTokenOnlyRequest,
+    config: &AuthConfig,
+) -> AuthResult<()> {
+    validate_access_token_ttl_and_claims(request.ttl, &request.additional_claims, config)?;
+    if request.reference.kind != crate::PrincipalReferenceKind::UserSession
+        || matches!(
+            request.reference.grant_kind,
+            Some(AccessTokenGrantKind::Sessionless | AccessTokenGrantKind::SessionBoundDelegation)
+        )
+    {
+        return Err(AuthError::Forbidden);
+    }
+    if !valid_delegation_binding_value(&request.binding.actor.sub) {
+        return Err(AuthError::InvalidConfiguration(
+            "session-bound access-token-only actor subject must not be empty".to_string(),
+        ));
+    }
+    if request
+        .cnf
+        .as_ref()
+        .is_some_and(|confirmation| confirmation.x5t_s256.is_none() && confirmation.jkt.is_none())
+    {
+        return Err(AuthError::InvalidConfiguration(
+            "session-bound access-token-only confirmation must contain a binding".to_string(),
+        ));
+    }
+    if !valid_delegation_binding_value(&request.binding.resource_type)
+        || !valid_delegation_binding_value(&request.binding.resource_id)
+    {
+        return Err(AuthError::InvalidConfiguration(
+            "session-bound access-token-only resource binding must contain a bounded type and id"
+                .to_string(),
+        ));
+    }
+    if !valid_delegation_binding_value(&request.binding.correlation_id) {
+        return Err(AuthError::InvalidConfiguration(
+            "session-bound access-token-only correlation_id must not be empty".to_string(),
+        ));
+    }
+    if !valid_delegation_binding_value(&request.binding.operation.operation_name)
+        || !valid_delegation_binding_value(&request.binding.operation.document_sha256)
+    {
+        return Err(AuthError::InvalidConfiguration(
+            "session-bound access-token-only exact operation binding is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_access_token_only_common(
+    user_id: &str,
+    ttl: Option<Duration>,
+    additional_claims: &BTreeMap<String, JsonValue>,
+    config: &AuthConfig,
+) -> AuthResult<()> {
+    if user_id.trim().is_empty() {
         return Err(AuthError::InvalidConfiguration(
             "access-token-only user_id must not be empty".to_string(),
         ));
     }
-    if let Some(ttl) = request.ttl {
+    validate_access_token_ttl_and_claims(ttl, additional_claims, config)
+}
+
+fn validate_access_token_ttl_and_claims(
+    ttl: Option<Duration>,
+    additional_claims: &BTreeMap<String, JsonValue>,
+    config: &AuthConfig,
+) -> AuthResult<()> {
+    if let Some(ttl) = ttl {
         if ttl <= Duration::ZERO {
             return Err(AuthError::InvalidConfiguration(
                 "access-token-only ttl must be greater than zero".to_string(),
@@ -1438,14 +1745,24 @@ fn validate_access_token_only_request(
             ));
         }
     }
-    for key in request.additional_claims.keys() {
-        if RESERVED_ACCESS_TOKEN_CLAIMS.contains(&key.as_str()) {
+    for key in additional_claims.keys() {
+        if key.trim().is_empty() || is_reserved_access_token_claim(key) {
             return Err(AuthError::InvalidConfiguration(format!(
                 "access-token-only custom claim '{key}' is reserved"
             )));
         }
     }
     Ok(())
+}
+
+fn valid_delegation_binding_value(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 1024
+}
+
+fn is_reserved_access_token_claim(key: &str) -> bool {
+    RESERVED_ACCESS_TOKEN_CLAIMS
+        .iter()
+        .any(|reserved| key.eq_ignore_ascii_case(reserved))
 }
 
 fn dedupe_stable(values: Vec<String>) -> Vec<String> {
@@ -1461,30 +1778,56 @@ fn dedupe_stable(values: Vec<String>) -> Vec<String> {
 
 const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
     "typ",
+    "token_type",
+    "token_kind",
+    "grant_kind",
     "sub",
+    "subject",
+    "subject_id",
+    "user_id",
     "sid",
+    "session_id",
+    "session_version",
+    "security_version",
     "roles",
+    "role",
     "scope",
     "scopes",
     "ctx",
     "purpose",
     "iss",
     "aud",
+    "audience",
     "exp",
+    "expires_at",
     "iat",
+    "issued_at",
     "nbf",
     "jti",
+    "token_id",
     "tenant_id",
+    "tenant",
+    "tenantid",
     "organization_id",
     "session_family_id",
     "actor",
+    "act",
+    "azp",
+    "authorized_party",
     "auth_time",
+    "authentication_time",
     "amr",
     "acr",
     "cnf",
+    "resource",
     "resource_type",
     "resource_id",
     "correlation_id",
+    "correlationid",
+    "operation",
+    "operation_name",
+    "operation_hash",
+    "document_sha256",
 ];
 
 const RESERVED_PURPOSE_TOKEN_CLAIMS: &[&str] = &[

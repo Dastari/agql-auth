@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::claims::AccessTokenMetadata;
+use crate::claims::{AccessTokenGrantKind, AccessTokenMetadata};
 use crate::scope_match::ScopeMatch;
 use crate::scopes::{
     has_all_scopes as scopes_include_all, has_any_scope as scopes_include_any,
@@ -35,6 +35,25 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
+    /// Returns whether this access token is a session-bound delegation.
+    pub fn is_session_bound_delegation(&self) -> bool {
+        self.token_claims.grant_kind == Some(AccessTokenGrantKind::SessionBoundDelegation)
+    }
+
+    /// Rejects credentials that must not manage, refresh, or further delegate
+    /// an interactive user session.
+    ///
+    /// Legacy tokens without a classification remain eligible for migration
+    /// compatibility. Newly issued sessionless and delegated grants fail.
+    pub fn require_session_management_eligible(&self) -> crate::AuthResult<()> {
+        match self.token_claims.grant_kind {
+            None | Some(AccessTokenGrantKind::UserSession) => Ok(()),
+            Some(
+                AccessTokenGrantKind::Sessionless | AccessTokenGrantKind::SessionBoundDelegation,
+            ) => Err(crate::AuthError::Forbidden),
+        }
+    }
+
     /// Returns `true` when the exact required scope is present.
     pub fn has_scope(&self, required: &str) -> bool {
         scope_exists(&self.scopes, required)

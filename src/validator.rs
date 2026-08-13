@@ -289,6 +289,17 @@ impl AccessTokenValidator {
         self.authenticate_access_token(token)
     }
 
+    /// Validates a bearer for a login/session-management endpoint and rejects
+    /// sessionless or delegated access-token-only credentials.
+    pub fn authenticate_session_management_bearer(
+        &self,
+        bearer_or_token: &str,
+    ) -> AuthResult<AuthUser> {
+        let user = self.authenticate_bearer(bearer_or_token)?;
+        user.require_session_management_eligible()?;
+        Ok(user)
+    }
+
     /// Validates an optional bearer value.
     pub fn authenticate_bearer_opt(
         &self,

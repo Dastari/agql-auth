@@ -5,6 +5,45 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
+/// Closed classification for locally issued access-token grants.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTokenGrantKind {
+    /// Access token belonging to a normal refreshable user session.
+    UserSession,
+    /// Sessionless service, device, or one-shot access-token-only grant.
+    Sessionless,
+    /// Non-refreshable delegation bound to an existing active user session.
+    SessionBoundDelegation,
+}
+
+impl AccessTokenGrantKind {
+    /// Returns whether this credential may be used to manage or further
+    /// delegate a user session.
+    pub const fn permits_session_management(self) -> bool {
+        matches!(self, Self::UserSession)
+    }
+}
+
+/// Exact registered operation bound to a session delegation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExactOperationBinding {
+    /// Stable registered operation name or identifier.
+    pub operation_name: String,
+    /// Exact allowlisted GraphQL document hash.
+    pub document_sha256: String,
+}
+
+impl ExactOperationBinding {
+    /// Creates an exact operation binding. Issuance validates both values.
+    pub fn new(operation_name: impl Into<String>, document_sha256: impl Into<String>) -> Self {
+        Self {
+            operation_name: operation_name.into(),
+            document_sha256: document_sha256.into(),
+        }
+    }
+}
+
 /// Actor / on-behalf-of identity for impersonation or delegation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorIdentity {
@@ -47,6 +86,12 @@ pub struct AccessTokenMetadata {
     /// Session-family identifier used for family-wide revocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_family_id: Option<String>,
+    /// Closed grant classification for newly issued access tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_kind: Option<AccessTokenGrantKind>,
+    /// Authoritative host session/security version, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_version: Option<String>,
     /// Actor / on-behalf-of identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<ActorIdentity>,
@@ -71,6 +116,9 @@ pub struct AccessTokenMetadata {
     /// Authorization/audit correlation identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Exact registered operation binding for delegated execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<ExactOperationBinding>,
     /// Explicit token purpose when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
@@ -107,6 +155,12 @@ pub struct ClaimRequirements {
     pub require_resource_binding: bool,
     /// Require an audit correlation identifier.
     pub require_correlation_id: bool,
+    /// Require one exact grant classification.
+    pub required_grant_kind: Option<AccessTokenGrantKind>,
+    /// Require a non-empty authoritative session/security version.
+    pub require_session_version: bool,
+    /// Require a non-empty exact-operation name and document hash.
+    pub require_operation_binding: bool,
 }
 
 impl ClaimRequirements {
@@ -205,6 +259,28 @@ impl ClaimRequirements {
         {
             return Err(ClaimRequirementError::MissingCorrelationId);
         }
+        if self
+            .required_grant_kind
+            .is_some_and(|required| metadata.grant_kind != Some(required))
+        {
+            return Err(ClaimRequirementError::MissingOrInvalidGrantKind);
+        }
+        if self.require_session_version
+            && metadata
+                .session_version
+                .as_ref()
+                .is_none_or(|version| version.trim().is_empty())
+        {
+            return Err(ClaimRequirementError::MissingSessionVersion);
+        }
+        if self.require_operation_binding
+            && metadata.operation.as_ref().is_none_or(|operation| {
+                operation.operation_name.trim().is_empty()
+                    || operation.document_sha256.trim().is_empty()
+            })
+        {
+            return Err(ClaimRequirementError::MissingOperationBinding);
+        }
         Ok(())
     }
 }
@@ -230,4 +306,10 @@ pub enum ClaimRequirementError {
     MissingResourceBinding,
     /// Missing correlation identifier.
     MissingCorrelationId,
+    /// Grant classification was missing or did not match policy.
+    MissingOrInvalidGrantKind,
+    /// Authoritative session/security version was missing.
+    MissingSessionVersion,
+    /// Exact registered operation binding was missing or empty.
+    MissingOperationBinding,
 }

@@ -8,7 +8,10 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::AuthResult;
-use crate::claims::{AccessTokenMetadata, ActorIdentity, ClaimRequirements, ConfirmationClaims};
+use crate::claims::{
+    AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirements,
+    ConfirmationClaims, ExactOperationBinding,
+};
 use crate::clock::{Clock, SystemClock};
 use crate::config::{AccessTokenScopeClaimFormat, LegacyScopeClaims};
 use crate::errors::AuthError;
@@ -76,6 +79,10 @@ pub(crate) struct AccessTokenClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session_family_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) grant_kind: Option<AccessTokenGrantKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) actor: Option<ActorIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auth_time: Option<i64>,
@@ -91,6 +98,8 @@ pub(crate) struct AccessTokenClaims {
     pub(crate) resource_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) operation: Option<ExactOperationBinding>,
     #[serde(default, flatten)]
     pub(crate) additional: BTreeMap<String, JsonValue>,
 }
@@ -224,6 +233,8 @@ pub(crate) fn claims_to_metadata(claims: &AccessTokenClaims) -> AccessTokenMetad
         tenant_id: claims.tenant_id.clone(),
         organization_id: claims.organization_id.clone(),
         session_family_id: claims.session_family_id.clone(),
+        grant_kind: claims.grant_kind,
+        session_version: claims.session_version.clone(),
         actor: claims.actor.clone(),
         auth_time: claims.auth_time,
         amr: claims.amr.clone(),
@@ -232,6 +243,7 @@ pub(crate) fn claims_to_metadata(claims: &AccessTokenClaims) -> AccessTokenMetad
         resource_type: claims.resource_type.clone(),
         resource_id: claims.resource_id.clone(),
         correlation_id: claims.correlation_id.clone(),
+        operation: claims.operation.clone(),
         purpose: claims.purpose.clone(),
         expires_at,
         additional: claims.additional.clone(),

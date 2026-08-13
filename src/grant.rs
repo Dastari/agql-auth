@@ -4,8 +4,9 @@ use std::fmt;
 use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
 
-use crate::claims::{ActorIdentity, ConfirmationClaims};
+use crate::claims::{ActorIdentity, ConfirmationClaims, ExactOperationBinding};
 use crate::models::AuthUser;
+use crate::principal_reference::PrincipalReference;
 use crate::session::SessionContext;
 
 /// Request to issue a short-lived access token without a refresh token.
@@ -95,6 +96,110 @@ impl AccessTokenOnlyRequest {
     }
 }
 
+/// Required actor, resource, correlation, and exact-operation bindings for a
+/// session-bound delegation.
+#[derive(Debug, Clone)]
+pub struct SessionBoundDelegationBinding {
+    pub(crate) actor: ActorIdentity,
+    pub(crate) resource_type: String,
+    pub(crate) resource_id: String,
+    pub(crate) correlation_id: String,
+    pub(crate) operation: ExactOperationBinding,
+}
+
+impl SessionBoundDelegationBinding {
+    /// Creates the mandatory bindings for one delegated operation.
+    pub fn new(
+        actor: ActorIdentity,
+        resource_type: impl Into<String>,
+        resource_id: impl Into<String>,
+        correlation_id: impl Into<String>,
+        operation: ExactOperationBinding,
+    ) -> Self {
+        Self {
+            actor,
+            resource_type: resource_type.into(),
+            resource_id: resource_id.into(),
+            correlation_id: correlation_id.into(),
+            operation,
+        }
+    }
+}
+
+/// Request for an access-token-only grant bound to an existing user session.
+///
+/// This request stores only a non-secret, authoritatively versioned principal
+/// reference and requested authority. It is created by
+/// [`crate::AuthService::prepare_session_bound_access_token_only`], and
+/// [`crate::AuthService::issue_session_bound_access_token_only`] re-reads the
+/// authoritative session a second time during issuance.
+#[derive(Clone)]
+pub struct SessionBoundAccessTokenOnlyRequest {
+    pub(crate) reference: PrincipalReference,
+    pub(crate) roles: Vec<String>,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) binding: SessionBoundDelegationBinding,
+    pub(crate) ttl: Option<Duration>,
+    pub(crate) cnf: Option<ConfirmationClaims>,
+    pub(crate) additional_claims: BTreeMap<String, JsonValue>,
+}
+
+impl SessionBoundAccessTokenOnlyRequest {
+    pub(crate) fn from_prepared_reference(
+        reference: PrincipalReference,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        binding: SessionBoundDelegationBinding,
+    ) -> Self {
+        Self {
+            reference,
+            roles: dedupe_stable(roles),
+            scopes: dedupe_stable(scopes),
+            binding,
+            ttl: None,
+            cnf: None,
+            additional_claims: BTreeMap::new(),
+        }
+    }
+
+    /// Sets a requested TTL. Final expiry is clamped to the configured
+    /// delegation ceiling and remaining authoritative session lifetime.
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Sets optional confirmation binding material.
+    pub fn with_confirmation(mut self, confirmation: ConfirmationClaims) -> Self {
+        self.cnf = Some(confirmation);
+        self
+    }
+
+    /// Adds one non-reserved custom claim in addition to the mandatory typed
+    /// exact-operation binding.
+    pub fn with_claim(mut self, key: impl Into<String>, value: JsonValue) -> Self {
+        self.additional_claims.insert(key.into(), value);
+        self
+    }
+}
+
+impl fmt::Debug for SessionBoundAccessTokenOnlyRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionBoundAccessTokenOnlyRequest")
+            .field("reference", &self.reference)
+            .field("roles", &self.roles)
+            .field("scopes", &self.scopes)
+            .field("binding", &self.binding)
+            .field("ttl", &self.ttl)
+            .field("cnf", &self.cnf)
+            .field(
+                "additional_claim_names",
+                &self.additional_claims.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 /// Short-lived access-token-only grant.
 #[derive(Clone)]
 pub struct AccessTokenOnlyGrant {
@@ -114,4 +219,15 @@ impl fmt::Debug for AccessTokenOnlyGrant {
             .field("user", &self.user)
             .finish()
     }
+}
+
+fn dedupe_stable(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
 }

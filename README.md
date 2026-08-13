@@ -220,15 +220,24 @@ use agql_auth::{AccessTokenOnlyRequest, AuthMethod, SessionContext};
 use time::Duration;
 
 let grant = auth
-    .issue_access_token_only(AccessTokenOnlyRequest {
-        user_id: "device-user-1".to_string(),
-        roles: vec!["Device".to_string()],
-        scopes: vec!["devices.read".to_string()],
-        session: SessionContext::for_auth_method(AuthMethod::ServiceToken),
-        ttl: Some(Duration::minutes(30)),
-    })
+    .issue_access_token_only(
+        AccessTokenOnlyRequest::new(
+            "device-user-1",
+            vec!["Device".to_string()],
+            vec!["devices.read".to_string()],
+            SessionContext::for_auth_method(AuthMethod::ServiceToken),
+        )
+        .with_ttl(Duration::minutes(30)),
+    )
     .await?;
 ```
+
+For short-lived application-tool delegation that must retain an already
+verified active user session ID, use the separate
+`issue_session_bound_access_token_only` contract. It re-reads authoritative
+session state during issuance, narrows current authority, requires exact
+actor/resource/correlation/operation bindings, and creates no durable delegated
+session. See [Access-token-only grants](docs/access-token-only.md).
 
 ## API And Service Tokens
 
@@ -325,6 +334,16 @@ For typed recent-authentication requests bound to one-time state, see
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
+
+## 0.15.0 Session-Bound Delegation
+
+Version 0.15 adds a separate, opt-in access-token-only contract for registered
+tool execution on behalf of an existing active user session. It preserves the
+real session ID only after a read-only authoritative recheck, binds a closed
+delegation classification and session version, requires actor/resource/
+correlation/exact-operation claims, and creates no new session or refresh row.
+See [Access-token-only grants](docs/access-token-only.md) and the
+[migration guide](MIGRATION.md).
 
 ## 0.14.0 Standard Access-Token `scope`
 

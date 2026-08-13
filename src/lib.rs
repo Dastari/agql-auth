@@ -50,7 +50,11 @@
 //! or an API token.
 //!
 //! Use [`AuthService::issue_access_token_only`] for short-lived user-shaped JWT
-//! grants that should not create refresh-token rows.
+//! grants that should not create refresh-token rows. Use the separate
+//! [`AuthService::issue_session_bound_access_token_only`] contract for narrow,
+//! non-refreshable delegation from an existing active user session; it re-reads
+//! authoritative session state through [`VerifiedActiveUserSessionResolver`]
+//! immediately before issuance.
 //!
 //! ## JWT Signing And JWKS
 //!
@@ -128,8 +132,8 @@ pub use assurance::{
 };
 pub use channel::ChannelIdentity;
 pub use claims::{
-    AccessTokenMetadata, ActorIdentity, ClaimRequirementError, ClaimRequirements,
-    ConfirmationClaims,
+    AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirementError,
+    ClaimRequirements, ConfirmationClaims, ExactOperationBinding,
 };
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
@@ -144,7 +148,10 @@ pub use decision::{
     NoopAuthorizationDecisionHook, emit_decision,
 };
 pub use errors::AuthError;
-pub use grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
+pub use grant::{
+    AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
+    SessionBoundDelegationBinding,
+};
 pub use graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
     auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,
@@ -184,7 +191,9 @@ pub use oidc_authorization::{
     OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use principal_reference::{
-    CurrentPrincipalResolver, PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal,
+    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
+    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    VerifiedActiveUserSessionResolver,
 };
 pub use purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use scope_match::{

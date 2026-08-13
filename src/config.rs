@@ -32,6 +32,11 @@ pub struct AuthConfig {
     ///
     /// Used by access-token-only grants and similar short-lived issuance paths.
     pub max_access_token_ttl: Duration,
+    /// Maximum lifetime of an existing-session-bound delegated access token.
+    ///
+    /// Delegated expiry is also clamped to the requested TTL and the remaining
+    /// authoritative session lifetime. Defaults to 15 minutes.
+    pub max_session_bound_delegation_ttl: Duration,
     /// Refresh-token lifetime.
     pub refresh_token_ttl: Duration,
     /// Claim shape used for newly issued access-token scopes.
@@ -60,6 +65,10 @@ impl fmt::Debug for AuthConfig {
             .field("jwt_signing", &self.jwt_signing)
             .field("access_token_ttl", &self.access_token_ttl)
             .field("max_access_token_ttl", &self.max_access_token_ttl)
+            .field(
+                "max_session_bound_delegation_ttl",
+                &self.max_session_bound_delegation_ttl,
+            )
             .field("refresh_token_ttl", &self.refresh_token_ttl)
             .field(
                 "access_token_scope_claim_format",
@@ -93,6 +102,7 @@ impl AuthConfig {
             jwt_signing: JwtSigningConfig::Hs256 { secret },
             access_token_ttl: Duration::minutes(15),
             max_access_token_ttl: Duration::hours(24),
+            max_session_bound_delegation_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
             legacy_scope_claims: LegacyScopeClaims::Accept,
@@ -120,6 +130,7 @@ impl AuthConfig {
             },
             access_token_ttl: Duration::minutes(15),
             max_access_token_ttl: Duration::hours(24),
+            max_session_bound_delegation_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
             legacy_scope_claims: LegacyScopeClaims::Accept,
@@ -155,8 +166,23 @@ impl AuthConfig {
         self
     }
 
+    /// Sets the maximum lifetime for existing-session-bound delegations.
+    #[must_use]
+    pub fn with_max_session_bound_delegation_ttl(mut self, ttl: Duration) -> Self {
+        self.max_session_bound_delegation_ttl = ttl;
+        self
+    }
+
     pub(crate) fn validate(&self) -> crate::AuthResult<()> {
         self.rate_limits.validate()?;
+        if self.max_session_bound_delegation_ttl <= Duration::ZERO
+            || self.max_session_bound_delegation_ttl > self.max_access_token_ttl
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "session-bound delegation ttl ceiling must be positive and not exceed the access-token maximum"
+                    .to_string(),
+            ));
+        }
         if self.access_token_scope_claim_format == AccessTokenScopeClaimFormat::LegacyArray
             && self.legacy_scope_claims == LegacyScopeClaims::Reject
         {

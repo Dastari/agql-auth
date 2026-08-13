@@ -14,7 +14,8 @@ pub use crate::assurance::{
 };
 pub use crate::channel::ChannelIdentity;
 pub use crate::claims::{
-    AccessTokenMetadata, ActorIdentity, ClaimRequirements, ConfirmationClaims,
+    AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirements,
+    ConfirmationClaims, ExactOperationBinding,
 };
 pub use crate::clock::{Clock, FixedClock, SystemClock};
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
@@ -28,7 +29,10 @@ pub use crate::decision::{
     AuthorizationOutcome, AuthorizationReasonCode, LinkedAuthorizationDecision,
 };
 pub use crate::errors::AuthError;
-pub use crate::grant::{AccessTokenOnlyGrant, AccessTokenOnlyRequest};
+pub use crate::grant::{
+    AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
+    SessionBoundDelegationBinding,
+};
 pub use crate::graphql::{
     GraphqlRefreshCookieConfig, GraphqlRefreshCookieDirective, GraphqlTopLevelField,
     auth_runtime_from_ctx_opt, auth_user_from_ctx, auth_user_from_ctx_opt,
@@ -68,7 +72,9 @@ pub use crate::oidc_authorization::{
     OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use crate::principal_reference::{
-    CurrentPrincipalResolver, PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal,
+    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
+    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    VerifiedActiveUserSessionResolver,
 };
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use crate::scope_match::{

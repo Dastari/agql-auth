@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.15.0
+
+### Added
+
+- `SessionBoundAccessTokenOnlyRequest`,
+  `SessionBoundDelegationBinding`, and
+  `AuthService::prepare_session_bound_access_token_only` /
+  `issue_session_bound_access_token_only` for short-lived, non-refreshable
+  delegation from an existing active user session.
+- `VerifiedActiveUserSessionResolver` and opaque
+  `VerifiedActiveUserSession` for the mandatory read-only authoritative
+  session recheck performed inside `AuthService` immediately before signing.
+- Closed `AccessTokenGrantKind` values, including
+  `session_bound_delegation`, plus authoritative `session_version` and typed
+  `ExactOperationBinding` access-token claims.
+- `AuthConfig::max_session_bound_delegation_ttl`, defaulting to 15 minutes,
+  and the corresponding builder.
+- Resource-server claim requirements for exact grant kind, session version,
+  and operation-binding presence.
+- `AuthUser::require_session_management_eligible` and
+  `AuthUser::is_session_bound_delegation` classification helpers, plus
+  session-management-specific bearer authentication on both issuer and
+  resource-server validators.
+
+### Security
+
+- Session-bound issuance cannot accept an `AuthUser`, `AuthPrincipal`, raw
+  subject, raw session ID, or caller boolean as verification proof. The
+  initially resolved principal supplies only a reference. Preparation reads
+  and stamps the authoritative version; issuance reads it again through the
+  trusted resolver configured at application startup and checks current
+  session status, identity, version, authority, assurance, tenant, and
+  lifetime.
+- Revocation, expiry, subject/session/version changes, and role/scope reductions
+  between initial resolution and issuance fail closed. Roles use exact subset
+  matching; scopes use the trusted `AuthService` matcher configured at startup.
+- Delegated expiry is clamped to requested TTL, the delegation ceiling, and
+  remaining absolute/idle session lifetime. The resolver contract prohibits
+  extending idle expiry or interactive last-active state.
+- Actor, resource, correlation, and exact registered-operation bindings are
+  mandatory signed claims. Confirmation binding remains optional but validated
+  when supplied. Existing actor, confirmation, or resource bindings cannot be
+  replaced by a delegated request. Reserved-claim matching is case-insensitive and includes
+  common identity, session, authority, audience, timing, actor, confirmation,
+  classification, resource, correlation, and operation aliases.
+- Delegated credentials cannot source another delegation and are explicitly
+  ineligible for session-management handlers. Each receives a unique `jti`;
+  underlying session status and version remain authoritative.
+- Focused coverage includes a signed-JWT-to-GraphQL-middleware-to-current-
+  session-to-protected-resolver path, post-resolution races, expiry clamps,
+  authority semantics, no persistence mutation, and diagnostics redaction.
+
+### Compatibility / SemVer
+
+- Existing `issue_access_token_only` behavior remains sessionless and creates
+  no refresh record; newly issued tokens now carry `grant_kind = sessionless`.
+  Normal refreshable access tokens carry `grant_kind = user_session`.
+- The new delegation contract is opt-in. Hosts that do not configure an active
+  session resolver cannot issue session-bound delegations.
+- `AuthConfig`, `AccessTokenMetadata`, `ClaimRequirements`, and
+  `PrincipalReference` have additive public fields. Exhaustive struct literals
+  and exhaustive matches must be updated. These public and JWT-wire additions
+  make this a pre-1.0 minor release.
+- No database or refresh-store migration is required. Hosts adopting the new
+  contract must expose their existing authoritative session/security version
+  through the resolver and compare it on delegated request assurance.
+
 ## 0.14.0
 
 ### Added
