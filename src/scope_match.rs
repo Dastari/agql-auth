@@ -49,6 +49,17 @@ pub struct HierarchicalScopeOptions {
     pub allow_universal_wildcard: bool,
     /// Scopes that satisfy every requirement. Empty by default.
     pub super_scopes: Vec<String>,
+    /// Required scopes that may be satisfied only by an exactly equal grant.
+    ///
+    /// Exact-only requirements are evaluated before super-scope and wildcard
+    /// behavior. Empty by default.
+    pub exact_only_scopes: Vec<String>,
+    /// Required-scope patterns that select exact-only behavior.
+    ///
+    /// Patterns use the configured hierarchical wildcard rules. This lets a
+    /// host declare resource-qualified scope families without enumerating
+    /// every resource identifier. Empty by default.
+    pub exact_only_scope_patterns: Vec<String>,
 }
 
 impl Default for HierarchicalScopeOptions {
@@ -59,6 +70,8 @@ impl Default for HierarchicalScopeOptions {
             wildcard_matches_multi_segment: true,
             allow_universal_wildcard: false,
             super_scopes: Vec::new(),
+            exact_only_scopes: Vec::new(),
+            exact_only_scope_patterns: Vec::new(),
         }
     }
 }
@@ -93,6 +106,20 @@ impl HierarchicalScopeMatch {
 
 impl ScopeMatch for HierarchicalScopeMatch {
     fn matches(&self, granted: &str, required: &str) -> bool {
+        let exact_only = self
+            .options
+            .exact_only_scopes
+            .iter()
+            .any(|scope| scope == required)
+            || self
+                .options
+                .exact_only_scope_patterns
+                .iter()
+                .any(|pattern| self.matches_hierarchy(pattern, required));
+        if exact_only {
+            return granted == required;
+        }
+
         if self
             .options
             .super_scopes
@@ -102,6 +129,16 @@ impl ScopeMatch for HierarchicalScopeMatch {
             return true;
         }
 
+        if granted == required {
+            return true;
+        }
+
+        self.matches_hierarchy(granted, required)
+    }
+}
+
+impl HierarchicalScopeMatch {
+    fn matches_hierarchy(&self, granted: &str, required: &str) -> bool {
         if granted == required {
             return true;
         }

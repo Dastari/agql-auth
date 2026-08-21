@@ -335,6 +335,15 @@ For typed recent-authentication requests bound to one-time state, see
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
 
+## 0.16.0 Exact-Only Scope Requirements
+
+Version 0.16 lets hierarchical-matcher consumers supply an exact-only scope
+set. A required scope in that set accepts only an exactly equal grant, before
+configured super-scope or wildcard behavior is considered. A separate neutral
+pattern list covers resource-qualified scope families. Both are empty by
+default and contain no consumer policy. See [Scope matching](docs/scope-matching.md)
+and the [migration guide](MIGRATION.md).
+
 ## 0.15.0 Session-Bound Delegation
 
 Version 0.15 adds a separate, opt-in access-token-only contract for registered

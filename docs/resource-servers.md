@@ -125,6 +125,7 @@ let validator = AccessTokenValidator::builder()
     .scope_matcher(Arc::new(HierarchicalScopeMatch::new(
         HierarchicalScopeOptions {
             super_scopes: vec!["platform.admin".to_string()],
+            exact_only_scopes: vec!["payments.credentials.release".to_string()],
             ..Default::default()
         },
     )))

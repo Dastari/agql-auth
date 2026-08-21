@@ -42,7 +42,10 @@ let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
     separator: '.',
     wildcard: "*".to_string(),
     wildcard_matches_multi_segment: true,
+    allow_universal_wildcard: false,
     super_scopes: Vec::new(),
+    exact_only_scopes: Vec::new(),
+    exact_only_scope_patterns: Vec::new(),
 });
 ```
 
@@ -53,6 +56,8 @@ Defaults:
 - `wildcard_matches_multi_segment = true`
 - `allow_universal_wildcard = false`
 - `super_scopes = []`
+- `exact_only_scopes = []`
+- `exact_only_scope_patterns = []`
 
 No hidden admin scope is configured by the crate. Scope comparison is
 **case-sensitive**.
@@ -61,15 +66,18 @@ No hidden admin scope is configured by the crate. Scope comparison is
 
 For `matches(granted, required)`:
 
-1. If `granted` is configured in `super_scopes`, allow.
-2. If `granted == required`, allow.
-3. If `granted` equals the bare wildcard, allow only when
+1. If `required` is configured in `exact_only_scopes`, or is selected by a
+   configured `exact_only_scope_patterns` entry under the same wildcard rules,
+   allow only when `granted == required` and stop.
+2. If `granted` is configured in `super_scopes`, allow.
+3. If `granted == required`, allow.
+4. If `granted` equals the bare wildcard, allow only when
    `allow_universal_wildcard` is true.
-4. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
+5. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
    the trailing wildcard and require `required.starts_with(prefix)`.
-5. If `granted` ends with the wildcard and multi-segment mode is disabled, the
+6. If `granted` ends with the wildcard and multi-segment mode is disabled, the
    trailing wildcard consumes exactly one remaining segment.
-6. Otherwise split both strings on the separator. Segment counts must be equal,
+7. Otherwise split both strings on the separator. Segment counts must be equal,
    and each granted segment must equal the required segment or equal the
    wildcard (middle wildcards are whole segments only).
 
@@ -112,6 +120,52 @@ let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
 
 assert!(matcher.has_scope(&["platform.admin".to_string()], "orders.delete"));
 ```
+
+## Exact-Only Scopes
+
+`exact_only_scopes` lets a host declare requirements that blanket authority or
+wildcard grants must never satisfy. The crate supplies no built-in values. A
+consumer can configure a sensitive operation while retaining ordinary
+hierarchical behavior elsewhere:
+
+```rust
+let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
+    super_scopes: vec!["platform.admin".to_string()],
+    exact_only_scopes: vec!["payments.credentials.release".to_string()],
+    ..Default::default()
+});
+
+assert!(!matcher.matches("platform.admin", "payments.credentials.release"));
+assert!(!matcher.matches("payments.*", "payments.credentials.release"));
+assert!(matcher.matches(
+    "payments.credentials.release",
+    "payments.credentials.release",
+));
+```
+
+Membership is an exact, case-sensitive comparison against the required scope.
+Hosts remain responsible for supplying and maintaining the set.
+
+Resource-qualified families can be selected without enumerating identifiers:
+
+```rust
+let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
+    super_scopes: vec!["platform.admin".to_string()],
+    exact_only_scope_patterns: vec![
+        "payments.account.*.credentials.release".to_string(),
+    ],
+    ..Default::default()
+});
+
+assert!(!matcher.matches(
+    "platform.admin",
+    "payments.account.42.credentials.release",
+));
+```
+
+Pattern selection uses the configured separator, wildcard, multi-segment, and
+universal-wildcard options. Pattern values select which requirements are
+exact-only; they never become grants.
 
 ## GraphQL Guards
 

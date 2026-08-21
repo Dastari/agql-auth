@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.16.0
+
+### Added
+
+- `HierarchicalScopeOptions::exact_only_scopes`, a consumer-supplied set of
+  required scopes that accept only an exactly equal grant.
+- `HierarchicalScopeOptions::exact_only_scope_patterns` for selecting
+  resource-qualified exact-only families under the configured wildcard rules.
+- Neutral golden vectors and a super-scope/wildcard/exact-grant matrix for
+  ordinary and exact-only requirements.
+
+### Security
+
+- Exact-only requirements are evaluated before configured super-scopes,
+  universal wildcards, trailing wildcards, or segment wildcards. The crate
+  supplies no policy values and continues to default to an empty set.
+
+### Compatibility / SemVer
+
+- Matcher behavior is unchanged for constructor and default users. Exhaustive
+  `HierarchicalScopeOptions` literals must initialize `exact_only_scopes` and
+  `exact_only_scope_patterns`.
+  This additive public-field change makes a pre-1.0 minor release.
+- No token, database, refresh-store, role, or scope-claim migration is
+  required. Consumers can use the same generic mechanism for sensitive
+  operation scopes while retaining their own naming and policy catalogue.
+
 ## 0.15.0
 
 ### Added

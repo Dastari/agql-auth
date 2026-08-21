@@ -64,6 +64,21 @@ fn hierarchical_matcher_conforms_to_json_golden_file() {
                     .map(|v| v.as_str().unwrap().to_string())
                     .collect();
             }
+            if let Some(exact_only) = opts.get("exact_only_scopes").and_then(|v| v.as_array()) {
+                options.exact_only_scopes = exact_only
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+            }
+            if let Some(patterns) = opts
+                .get("exact_only_scope_patterns")
+                .and_then(|v| v.as_array())
+            {
+                options.exact_only_scope_patterns = patterns
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+            }
         }
         let matcher = HierarchicalScopeMatch::new(options);
         let granted = vector["granted"]
@@ -198,6 +213,56 @@ fn hierarchical_matcher_supports_appendix_b_options() {
     });
     assert!(with_super.matches("platform.admin", "orders.delete"));
     assert!(!multi.matches("platform.admin", "orders.delete"));
+}
+
+#[test]
+fn exact_only_requirements_reject_super_and_wildcard_grants() {
+    let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
+        super_scopes: vec!["platform.admin".to_string()],
+        exact_only_scopes: vec!["payments.credentials.release".to_string()],
+        ..Default::default()
+    });
+
+    let matrix = [
+        ("platform.admin", "orders.read", true),
+        ("orders.*", "orders.read", true),
+        ("orders.read", "orders.read", true),
+        ("platform.admin", "payments.credentials.release", false),
+        ("payments.*", "payments.credentials.release", false),
+        (
+            "payments.credentials.release",
+            "payments.credentials.release",
+            true,
+        ),
+    ];
+
+    for (granted, required, expected) in matrix {
+        assert_eq!(
+            matcher.matches(granted, required),
+            expected,
+            "grant {granted:?} against requirement {required:?}"
+        );
+    }
+}
+
+#[test]
+fn exact_only_patterns_cover_resource_qualified_scope_families() {
+    let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
+        super_scopes: vec!["platform.admin".to_string()],
+        exact_only_scope_patterns: vec!["payments.account.*.credentials.release".to_string()],
+        ..Default::default()
+    });
+
+    assert!(!matcher.matches("platform.admin", "payments.account.42.credentials.release"));
+    assert!(!matcher.matches(
+        "payments.account.*",
+        "payments.account.42.credentials.release"
+    ));
+    assert!(matcher.matches(
+        "payments.account.42.credentials.release",
+        "payments.account.42.credentials.release"
+    ));
+    assert!(matcher.matches("platform.admin", "payments.account.42.read"));
 }
 
 #[tokio::test]
