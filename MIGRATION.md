@@ -1,5 +1,14 @@
 # Migration Guide
 
+## 0.17.0 to 0.17.1: compact default session context
+
+No API, database, or authorization migration is required. Newly serialized
+`SessionContext` documents omit `mfa` when it is the default unsatisfied empty
+state and omit `active_scope` when it is absent. Both fields already deserialize
+with defaults, so typed consumers remain compatible. Consumers that compare raw
+JWT JSON should accept the missing default-valued fields before updating the
+issuer. Non-default MFA, assurance, and active-scope evidence remains explicit.
+
 ## 0.16.0 to 0.17.0: opt-in role-to-scope expansion
 
 The release adds a provider-neutral expansion contract without changing token

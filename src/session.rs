@@ -29,6 +29,12 @@ pub struct MfaState {
     pub methods: Vec<MfaFactor>,
 }
 
+impl MfaState {
+    fn is_default(&self) -> bool {
+        !self.satisfied && self.methods.is_empty()
+    }
+}
+
 /// Supported MFA methods recorded in local session context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MfaFactor {
@@ -56,13 +62,13 @@ pub struct SessionContext {
     #[serde(default)]
     pub auth_method: AuthMethod,
     /// MFA state associated with the session.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MfaState::is_default")]
     pub mfa: MfaState,
     /// Host-authoritative authentication assurance for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assurance: Option<crate::SessionAssurance>,
     /// Optional active business scope.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_scope: Option<ActiveScope>,
 }
 
@@ -82,5 +88,55 @@ impl SessionContext {
         self.mfa = assurance.mfa_state();
         self.assurance = Some(assurance);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn default_session_fields_have_a_compact_golden_wire_shape() {
+        let context = SessionContext::for_auth_method(AuthMethod::MicrosoftOidc);
+
+        assert_eq!(
+            serde_json::to_value(&context).unwrap(),
+            json!({ "auth_method": "MicrosoftOidc" })
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionContext>(json!({
+                "auth_method": "MicrosoftOidc"
+            }))
+            .unwrap(),
+            context
+        );
+    }
+
+    #[test]
+    fn non_default_session_fields_remain_on_the_wire() {
+        let context = SessionContext {
+            auth_method: AuthMethod::TotpStepUp,
+            mfa: MfaState {
+                satisfied: true,
+                methods: vec![MfaFactor::Totp],
+            },
+            assurance: None,
+            active_scope: Some(ActiveScope {
+                tenant_id: Some("tenant-7".to_string()),
+                organization_id: None,
+                catalog_id: None,
+            }),
+        };
+        let encoded = serde_json::to_value(&context).unwrap();
+
+        assert_eq!(encoded["mfa"]["satisfied"], true);
+        assert_eq!(encoded["mfa"]["methods"], json!(["Totp"]));
+        assert_eq!(encoded["active_scope"]["tenant_id"], "tenant-7");
+        assert_eq!(
+            serde_json::from_value::<SessionContext>(encoded).unwrap(),
+            context
+        );
     }
 }
