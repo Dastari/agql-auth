@@ -38,15 +38,7 @@ assert!(user.has_scope_with(&matcher, "orders.items.read"));
 ```rust
 use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    separator: '.',
-    wildcard: "*".to_string(),
-    wildcard_matches_multi_segment: true,
-    allow_universal_wildcard: false,
-    super_scopes: Vec::new(),
-    exact_only_scopes: Vec::new(),
-    exact_only_scope_patterns: Vec::new(),
-});
+let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions::default())?;
 ```
 
 Defaults:
@@ -61,6 +53,10 @@ Defaults:
 
 No hidden admin scope is configured by the crate. Scope comparison is
 **case-sensitive**.
+
+`HierarchicalScopeOptions` is non-exhaustive. Start from `Default` and use its
+`with_*` methods instead of a struct literal so future options remain a
+compatible addition.
 
 ## Normative Algorithm
 
@@ -103,6 +99,8 @@ Summary:
 | 30 | `*` | `orders.read` | allow when `allow_universal_wildcard` |
 | 25 | `orders.*` | `orders.items.read` | deny when single-segment mode |
 | 29 | `platform.admin` | `orders.delete` | allow only as configured super-scope |
+| 35 | `platform.admin` | `payments.account.42.read` | allow when an exact-only pattern does not match |
+| 36 | `*` | `payments.credentials.release` | deny when exact-only, even with universal wildcard enabled |
 
 ## Super-Scopes
 
@@ -113,10 +111,9 @@ satisfies every required scope through that matcher.
 This is a behavioral opt-in. It also affects direct `has_scope_with` calls:
 
 ```rust
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    super_scopes: vec!["platform.admin".to_string()],
-    ..Default::default()
-});
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+)?;
 
 assert!(matcher.has_scope(&["platform.admin".to_string()], "orders.delete"));
 ```
@@ -129,11 +126,11 @@ consumer can configure a sensitive operation while retaining ordinary
 hierarchical behavior elsewhere:
 
 ```rust
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    super_scopes: vec!["platform.admin".to_string()],
-    exact_only_scopes: vec!["payments.credentials.release".to_string()],
-    ..Default::default()
-});
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["platform.admin"])
+        .with_exact_only_scopes(["payments.credentials.release"]),
+)?;
 
 assert!(!matcher.matches("platform.admin", "payments.credentials.release"));
 assert!(!matcher.matches("payments.*", "payments.credentials.release"));
@@ -149,13 +146,13 @@ Hosts remain responsible for supplying and maintaining the set.
 Resource-qualified families can be selected without enumerating identifiers:
 
 ```rust
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    super_scopes: vec!["platform.admin".to_string()],
-    exact_only_scope_patterns: vec![
-        "payments.account.*.credentials.release".to_string(),
-    ],
-    ..Default::default()
-});
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["platform.admin"])
+        .with_exact_only_scope_patterns([
+            "payments.account.*.credentials.release",
+        ]),
+)?;
 
 assert!(!matcher.matches(
     "platform.admin",
@@ -166,6 +163,12 @@ assert!(!matcher.matches(
 Pattern selection uses the configured separator, wildcard, multi-segment, and
 universal-wildcard options. Pattern values select which requirements are
 exact-only; they never become grants.
+
+Validation rejects an exact-only pattern equal to the configured bare
+wildcard. Every other wildcard-bearing exact-only pattern is accepted with a
+[`HierarchicalScopeValidationWarning`](../src/scope_match.rs), because it can
+make an entire requirement subtree exact-only. Configuration loaders should
+surface `matcher.validation_warnings()` rather than hiding those diagnostics.
 
 ## GraphQL Guards
 

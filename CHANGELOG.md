@@ -8,6 +8,9 @@
   required scopes that accept only an exactly equal grant.
 - `HierarchicalScopeOptions::exact_only_scope_patterns` for selecting
   resource-qualified exact-only families under the configured wildcard rules.
+- `HierarchicalScopeOptions::with_*` construction methods and structured
+  validation errors/warnings. The options type is non-exhaustive so adding a
+  future option does not break consumer construction.
 - Neutral golden vectors and a super-scope/wildcard/exact-grant matrix for
   ordinary and exact-only requirements.
 
@@ -16,13 +19,17 @@
 - Exact-only requirements are evaluated before configured super-scopes,
   universal wildcards, trailing wildcards, or segment wildcards. The crate
   supplies no policy values and continues to default to an empty set.
+- Validation rejects a bare-wildcard exact-only pattern and reports every
+  other wildcard-bearing exact-only pattern so hosts can expose subtree-wide
+  policy during configuration loading.
 
 ### Compatibility / SemVer
 
-- Matcher behavior is unchanged for constructor and default users. Exhaustive
-  `HierarchicalScopeOptions` literals must initialize `exact_only_scopes` and
-  `exact_only_scope_patterns`.
-  This additive public-field change makes a pre-1.0 minor release.
+- Matcher behavior is unchanged for valid constructor and default users.
+  `HierarchicalScopeMatch::new` and `ScopeMatcher::hierarchical` now return a
+  validation `Result`; consumers should migrate struct literals to the
+  `Default`-based `with_*` construction methods. This constructor hardening and
+  the exact-only additions make a pre-1.0 minor release.
 - No token, database, refresh-store, role, or scope-claim migration is
   required. Consumers can use the same generic mechanism for sensitive
   operation scopes while retaining their own naming and policy catalogue.

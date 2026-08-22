@@ -121,12 +121,10 @@ guards, configure a matcher and inject it with your auth path:
 use std::sync::Arc;
 use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 
-let auth = auth.with_scope_matcher(Arc::new(HierarchicalScopeMatch::new(
-    HierarchicalScopeOptions {
-        super_scopes: vec!["platform.admin".to_string()],
-        ..Default::default()
-    },
-)));
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+)?;
+let auth = auth.with_scope_matcher(Arc::new(matcher));
 ```
 
 See [Scope matching](docs/scope-matching.md).

@@ -4,18 +4,20 @@
 
 `HierarchicalScopeOptions` adds `exact_only_scopes` and
 `exact_only_scope_patterns`. Constructor and default users retain empty
-compatibility defaults. Exhaustive struct literals must add both fields,
-normally as `Vec::new()` when no requirement needs this policy.
+compatibility defaults. The options type is now non-exhaustive: start from
+`HierarchicalScopeOptions::default()` and use its `with_*` methods so future
+fields do not break consumer construction. `HierarchicalScopeMatch::new` and
+`ScopeMatcher::hierarchical` now return a validation `Result`.
 
 To prevent blanket or wildcard grants from satisfying selected sensitive
 requirements, provide the host-owned set:
 
 ```rust
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    super_scopes: vec!["platform.admin".to_string()],
-    exact_only_scopes: vec!["payments.credentials.release".to_string()],
-    ..Default::default()
-});
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["platform.admin"])
+        .with_exact_only_scopes(["payments.credentials.release"]),
+)?;
 ```
 
 For a required scope in the set, matching stops at exact, case-sensitive grant
@@ -26,7 +28,10 @@ confirming that doing so is acceptable to the host's authorization policy.
 
 Use `exact_only_scope_patterns` when the sensitive requirement contains a
 resource identifier that cannot be enumerated. Pattern selection follows the
-same configured wildcard grammar but never turns the pattern into a grant.
+same configured wildcard grammar but never turns the pattern into a grant. A
+bare-wildcard pattern is rejected. Other wildcard-bearing patterns produce a
+validation warning that hosts should surface because each can select a whole
+requirement subtree.
 
 ## 0.14.0 to 0.15.0: existing-session-bound delegation
 
@@ -756,10 +761,9 @@ Opt in explicitly:
 use std::sync::Arc;
 use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 
-let matcher = Arc::new(HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    super_scopes: vec!["platform.admin".to_string()],
-    ..Default::default()
-}));
+let matcher = Arc::new(HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+)?);
 
 let validator = AccessTokenValidator::builder()
     .issuer("agql-auth")
