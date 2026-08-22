@@ -340,6 +340,14 @@ For typed recent-authentication requests bound to one-time state, see
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
 
+## 0.17.1 Compact Default Session Context
+
+Version 0.17.1 omits default unsatisfied MFA state and an absent active business
+scope when serializing `SessionContext`. Readers continue to reconstruct those
+defaults, and non-default session evidence is unchanged. This output-only patch
+shrinks every ordinary access token without adding consumer policy or changing
+authorization behavior. See the [migration guide](MIGRATION.md).
+
 ## 0.16.0 Exact-Only Scope Requirements
 
 Version 0.16 lets hierarchical-matcher consumers supply an exact-only scope

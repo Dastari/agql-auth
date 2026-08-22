@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.1
+
+### Changed
+
+- Newly serialized `SessionContext` values omit the default unsatisfied MFA
+  object and absent active business scope. Deserialization continues to
+  default both fields, while non-default MFA and active-scope values retain
+  their existing wire shape.
+
+### Compatibility / SemVer
+
+- This output-only patch reduces access-token size for every consumer. Typed
+  `agql-auth` readers and existing stored session documents remain compatible;
+  consumers that assert literal JSON should accept the already-supported
+  omission of these default-valued fields.
+
 ## 0.17.0
 
 ### Added
