@@ -45,7 +45,10 @@ use crate::principal_reference::{
 };
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
-use crate::stores::{AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore, UserStore};
+use crate::stores::{
+    AdditionalTokenRolesProvider, AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore,
+    UserStore,
+};
 use crate::token_decode::{
     ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
     access_token_claims_to_user, audience_claim, decode_access_token_claims, issued_scope_claims,
@@ -114,6 +117,7 @@ pub struct AuthService<U, R> {
     jwks: Option<JsonValue>,
     scope_matcher: Arc<dyn ScopeMatch>,
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
+    additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
 }
 
 impl<U, R> AuthService<U, R>
@@ -184,6 +188,7 @@ where
             jwks: jwt_keys.jwks,
             scope_matcher: Arc::new(ExactScopeMatch),
             active_user_session_resolver: None,
+            additional_token_roles_provider: None,
             config,
             user_store,
             refresh_store,
@@ -226,6 +231,18 @@ where
         S: VerifiedActiveUserSessionResolver + 'static,
     {
         self.active_user_session_resolver = Some(resolver);
+        self
+    }
+
+    /// Installs the host-owned provider for refreshable-session authorization
+    /// roles. Values are re-read for login and every refresh, carried in the
+    /// distinct `authorization_roles` claim, and never mixed into application
+    /// roles.
+    pub fn with_additional_token_roles_provider<S>(mut self, provider: Arc<S>) -> Self
+    where
+        S: AdditionalTokenRolesProvider + 'static,
+    {
+        self.additional_token_roles_provider = Some(provider);
         self
     }
 
@@ -783,6 +800,7 @@ where
                 resource_id: request.resource_id,
                 correlation_id: request.correlation_id,
                 operation: None,
+                authorization_roles: Vec::new(),
                 purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
                 expires_at: None,
                 additional: request.additional_claims,
@@ -940,6 +958,7 @@ where
                 resource_id: Some(request.binding.resource_id),
                 correlation_id: Some(request.binding.correlation_id),
                 operation: Some(request.binding.operation),
+                authorization_roles: Vec::new(),
                 purpose: Some(ACCESS_TOKEN_PURPOSE.to_string()),
                 expires_at: None,
                 additional: request.additional_claims,
@@ -1054,6 +1073,10 @@ where
         now: OffsetDateTime,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         auth_user.token_claims.grant_kind = Some(AccessTokenGrantKind::UserSession);
+        if let Some(provider) = &self.additional_token_roles_provider {
+            let additional = provider.additional_token_roles(&auth_user).await?;
+            auth_user.token_claims.authorization_roles = dedupe_stable(additional);
+        }
         let access_token_expires_at = now + self.config.access_token_ttl;
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
@@ -1116,11 +1139,19 @@ where
             &auth_user.scopes,
             self.config.access_token_scope_claim_format,
         )?;
+        if !crate::token_decode::valid_authorization_role_set(
+            &auth_user.token_claims.authorization_roles,
+        ) {
+            return Err(AuthError::TokenCreation(
+                "access-token authorization roles cannot be represented safely".to_string(),
+            ));
+        }
         let claims = AccessTokenClaims {
             typ: Some(ACCESS_TOKEN_TYPE.to_string()),
             sub: auth_user.user_id.clone(),
             sid: auth_user.session_id.to_string(),
             roles: auth_user.roles.clone(),
+            authorization_roles: auth_user.token_claims.authorization_roles.clone(),
             scope,
             legacy_scopes,
             ctx: auth_user.session.clone(),
@@ -1791,6 +1822,7 @@ const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
     "security_version",
     "roles",
     "role",
+    "authorization_roles",
     "scope",
     "scopes",
     "ctx",

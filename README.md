@@ -135,6 +135,13 @@ For compact role grants, resource servers can use the generic
 keeps membership, transport, signature keys, and cache policy; see
 [Role-to-scope expansion](docs/role-scope-expansion.md).
 
+Issuers can install an `AdditionalTokenRolesProvider` to re-read membership
+for every refreshable-session issuance. Those grants use the distinct
+`authorization_roles` claim and `AccessTokenMetadata` field; application roles
+remain in `roles`. Catalogue expansion rejects unknown authorization-role IDs
+explicitly so a remote consumer can refresh its last-known-good snapshot and
+fail closed rather than dropping inherited authority silently.
+
 Hosts that verify channel credentials outside the crate can attach
 `ChannelIdentity` and use `RequireChannelScheme`:
 

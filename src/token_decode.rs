@@ -21,6 +21,10 @@ use crate::util::map_access_token_decode_error;
 
 pub(crate) const ACCESS_TOKEN_TYPE: &str = "access";
 pub(crate) const ACCESS_TOKEN_PURPOSE: &str = "access_token";
+/// Maximum authorization-role grants carried by one access token.
+pub const MAX_ACCESS_TOKEN_AUTHORIZATION_ROLES: usize = 256;
+/// Maximum byte length of one access-token authorization-role grant.
+pub const MAX_ACCESS_TOKEN_AUTHORIZATION_ROLE_LENGTH: usize = 512;
 
 /// Maximum number of scope values accepted in one access token.
 pub const MAX_ACCESS_TOKEN_SCOPES: usize = 256;
@@ -56,6 +60,12 @@ pub(crate) struct AccessTokenClaims {
     pub(crate) sub: String,
     pub(crate) sid: String,
     pub(crate) roles: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_authorization_roles"
+    )]
+    pub(crate) authorization_roles: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) scope: Option<String>,
     #[serde(default, rename = "scopes", skip_serializing_if = "Option::is_none")]
@@ -244,10 +254,35 @@ pub(crate) fn claims_to_metadata(claims: &AccessTokenClaims) -> AccessTokenMetad
         resource_id: claims.resource_id.clone(),
         correlation_id: claims.correlation_id.clone(),
         operation: claims.operation.clone(),
+        authorization_roles: claims.authorization_roles.clone(),
         purpose: claims.purpose.clone(),
         expires_at,
         additional: claims.additional.clone(),
     }
+}
+
+pub(crate) fn valid_authorization_role_set(roles: &[String]) -> bool {
+    roles.len() <= MAX_ACCESS_TOKEN_AUTHORIZATION_ROLES
+        && roles.iter().all(|role| {
+            !role.is_empty()
+                && role.len() <= MAX_ACCESS_TOKEN_AUTHORIZATION_ROLE_LENGTH
+                && !role
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        })
+}
+
+fn deserialize_authorization_roles<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let roles = Vec::<String>::deserialize(deserializer)?;
+    if !valid_authorization_role_set(&roles) {
+        return Err(serde::de::Error::custom(
+            "invalid access-token authorization roles",
+        ));
+    }
+    Ok(dedupe_stable(roles))
 }
 
 pub(crate) fn access_token_claims_to_user(

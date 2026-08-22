@@ -223,6 +223,38 @@ pub struct RoleScopeCatalogueClaims {
     pub exp: i64,
 }
 
+/// Host-selected time policy for validating a freshly fetched signed
+/// catalogue. Cache refresh cadence is intentionally not part of this policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct RoleScopeCatalogueValidationOptions {
+    maximum_lifetime_seconds: i64,
+    clock_skew_leeway_seconds: i64,
+}
+
+impl Default for RoleScopeCatalogueValidationOptions {
+    fn default() -> Self {
+        Self {
+            maximum_lifetime_seconds: 24 * 60 * 60,
+            clock_skew_leeway_seconds: 0,
+        }
+    }
+}
+
+impl RoleScopeCatalogueValidationOptions {
+    /// Sets the longest signed lifetime accepted from an issuer.
+    pub fn with_maximum_lifetime_seconds(mut self, seconds: i64) -> Self {
+        self.maximum_lifetime_seconds = seconds;
+        self
+    }
+
+    /// Sets symmetric clock-skew leeway for `iat` and `exp` validation.
+    pub fn with_clock_skew_leeway_seconds(mut self, seconds: i64) -> Self {
+        self.clock_skew_leeway_seconds = seconds;
+        self
+    }
+}
+
 impl RoleScopeCatalogueClaims {
     /// Creates claims with the stable catalogue purpose.
     pub fn new(
@@ -251,6 +283,26 @@ impl RoleScopeCatalogueClaims {
         now: i64,
         maximum_lifetime_seconds: i64,
     ) -> Result<(), RoleScopeCatalogueError> {
+        self.validate_binding_with_options(
+            envelope,
+            expected_issuer,
+            expected_audience,
+            now,
+            RoleScopeCatalogueValidationOptions::default()
+                .with_maximum_lifetime_seconds(maximum_lifetime_seconds),
+        )
+    }
+
+    /// Validates binding and a host-selected signed-lifetime policy after a
+    /// host cryptographically verifies the signature.
+    pub fn validate_binding_with_options(
+        &self,
+        envelope: &SignedRoleScopeCatalogue,
+        expected_issuer: &str,
+        expected_audience: &str,
+        now: i64,
+        options: RoleScopeCatalogueValidationOptions,
+    ) -> Result<(), RoleScopeCatalogueError> {
         envelope.validate_structure()?;
         self.catalogue.validate()?;
         if self.purpose != ROLE_SCOPE_CATALOGUE_PURPOSE
@@ -260,11 +312,12 @@ impl RoleScopeCatalogueClaims {
         {
             return invalid("catalogue signature claims do not match the envelope");
         }
-        if maximum_lifetime_seconds <= 0
-            || self.iat > now
-            || self.exp <= now
+        if options.maximum_lifetime_seconds <= 0
+            || options.clock_skew_leeway_seconds < 0
+            || self.iat > now.saturating_add(options.clock_skew_leeway_seconds)
+            || self.exp <= now.saturating_sub(options.clock_skew_leeway_seconds)
             || self.exp <= self.iat
-            || self.exp.saturating_sub(self.iat) > maximum_lifetime_seconds
+            || self.exp.saturating_sub(self.iat) > options.maximum_lifetime_seconds
         {
             return invalid("catalogue signature lifetime is invalid");
         }
@@ -287,6 +340,9 @@ pub enum RoleScopeExpansionError {
     /// Required verified expansion state is not currently available.
     #[error("role-scope expansion is unavailable")]
     Unavailable,
+    /// A token referenced a role absent from the verified catalogue.
+    #[error("role-scope catalogue does not contain role `{0}`")]
+    UnknownRole(String),
     /// Expansion state violated the bounded catalogue contract.
     #[error("invalid role-scope catalogue: {0}")]
     InvalidCatalogue(&'static str),
@@ -310,9 +366,9 @@ impl From<RoleScopeCatalogueError> for RoleScopeExpansionError {
 
 /// Host-supplied expansion provider used after token roles are verified.
 pub trait RoleScopeExpansionProvider: Send + Sync + fmt::Debug {
-    /// Resolves all known roles to one catalogue version and scope set.
-    /// Unknown roles contribute no scopes. Unavailable or invalid state must
-    /// return an error so callers can fail closed.
+    /// Resolves every supplied authorization role to one catalogue version
+    /// and scope set. Unknown roles return an explicit error so a remote cache
+    /// can refresh immediately and callers can fail closed.
     fn expand_roles(&self, roles: &[String])
     -> Result<RoleScopeExpansion, RoleScopeExpansionError>;
 }
@@ -357,7 +413,13 @@ impl RoleScopeExpansionProvider for StaticRoleScopeExpansion {
     ) -> Result<RoleScopeExpansion, RoleScopeExpansionError> {
         let scopes = roles
             .iter()
-            .filter_map(|role| self.role_scopes.get(role))
+            .map(|role| {
+                self.role_scopes
+                    .get(role)
+                    .ok_or_else(|| RoleScopeExpansionError::UnknownRole(role.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .flat_map(|scopes| scopes.iter().cloned())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -439,7 +501,6 @@ mod tests {
         let expansion = provider
             .expand_roles(&[
                 "operator".to_owned(),
-                "unknown".to_owned(),
                 "support".to_owned(),
                 "support".to_owned(),
             ])
@@ -457,6 +518,15 @@ mod tests {
                 "inventory.write",
                 "profile.read"
             ]
+        );
+    }
+
+    #[test]
+    fn unknown_authorization_role_fails_explicitly() {
+        let provider = StaticRoleScopeExpansion::new(&catalogue()).unwrap();
+        assert_eq!(
+            provider.expand_roles(&["unknown".to_owned()]),
+            Err(RoleScopeExpansionError::UnknownRole("unknown".to_owned()))
         );
     }
 
@@ -519,5 +589,16 @@ mod tests {
                 )
                 .is_err()
         );
+        claims
+            .validate_binding_with_options(
+                &envelope,
+                "https://issuer.test",
+                "resource-servers",
+                999,
+                RoleScopeCatalogueValidationOptions::default()
+                    .with_maximum_lifetime_seconds(300)
+                    .with_clock_skew_leeway_seconds(2),
+            )
+            .unwrap();
     }
 }

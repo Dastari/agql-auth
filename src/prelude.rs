@@ -79,8 +79,9 @@ pub use crate::principal_reference::{
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use crate::role_scope::{
     ROLE_SCOPE_CATALOGUE_PURPOSE, RoleScopeCatalogue, RoleScopeCatalogueClaims,
-    RoleScopeDefinition, RoleScopeExpansion, RoleScopeExpansionError, RoleScopeExpansionProvider,
-    RoleScopeGrant, SignedRoleScopeCatalogue, StaticRoleScopeExpansion, effective_scopes,
+    RoleScopeCatalogueValidationOptions, RoleScopeDefinition, RoleScopeExpansion,
+    RoleScopeExpansionError, RoleScopeExpansionProvider, RoleScopeGrant, SignedRoleScopeCatalogue,
+    StaticRoleScopeExpansion, effective_scopes,
 };
 pub use crate::scope_match::{
     AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions,
@@ -90,9 +91,9 @@ pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use crate::service::AuthService;
 pub use crate::session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use crate::stores::{
-    ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
-    MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
-    RefreshTokenStore, TotpReplayStore, UserStore,
+    AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,
+    LoginChallengeStore, MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore,
+    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
 };
 pub use crate::token_decode::{
     BearerParseMode, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH, MAX_ACCESS_TOKEN_SCOPE_LENGTH,
