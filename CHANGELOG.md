@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.17.0
+
+### Added
+
+- `RoleScopeExpansionProvider`, `StaticRoleScopeExpansion`, and
+  `effective_scopes` for deterministic host-supplied role expansion.
+- Bounded, versioned `RoleScopeCatalogue` scope/role definitions plus neutral
+  signed-envelope and claims types for host-owned transport and verification.
+
+### Security
+
+- Catalogue validation rejects duplicate IDs, unregistered role scope
+  references, invalid values, excessive counts, mismatched signed claims, and
+  invalid lifetimes. Unknown token roles contribute no authority, and providers
+  have an explicit unavailable result for fail-closed caches.
+- The crate supplies no policy values, network client, signing key, membership
+  schema, cache authority, or consumer-specific identifier.
+
+### Compatibility / SemVer
+
+- The new contract is additive and opt-in. Existing role claims, direct scopes,
+  validators, guards, stores, and exact/hierarchical matchers are unchanged.
+- Hosts choose whether and where to expand verified roles. This capability is a
+  pre-1.0 minor release and requires no default database or token-wire migration.
+
 ## 0.16.0
 
 ### Added

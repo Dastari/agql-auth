@@ -1,5 +1,23 @@
 # Migration Guide
 
+## 0.16.0 to 0.17.0: opt-in role-to-scope expansion
+
+The release adds a provider-neutral expansion contract without changing token
+issuance or validation defaults. Existing consumers need no changes.
+
+Hosts adopting compact role grants should publish a bounded
+`RoleScopeCatalogue`, verify its signature and binding outside `agql-auth`, and
+construct `StaticRoleScopeExpansion` only from that verified snapshot. Union
+the returned scopes with direct token scopes through `effective_scopes` before
+authorization. A remote cache should implement `RoleScopeExpansionProvider`
+and return `RoleScopeExpansionError::Unavailable` when it has no current,
+verified snapshot. Unknown roles grant nothing.
+
+Roll out resource-server expansion before issuers stop placing expanded scopes
+in tokens. Roll back by restoring expanded scope issuance while leaving the
+additive provider contract unused. Membership persistence, catalogue URLs,
+signing keys, and cache timing remain host-owned.
+
 ## 0.15.0 to 0.16.0: exact-only hierarchical requirements
 
 `HierarchicalScopeOptions` adds `exact_only_scopes` and

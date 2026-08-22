@@ -12,6 +12,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 - Long-lived opaque API/service tokens for server-to-server calls
 - HS256 compatibility mode and RS256 signing with JWKS export
 - Roles, standard OAuth `scope`, and typed session context in access-token claims
+- Bounded provider-neutral role-to-scope catalogue and expansion contracts
 - Exact scope matching by default with opt-in hierarchical matching
 - Microsoft Entra ID / OIDC authorization-code + PKCE login
 - Host-controlled external user provisioning and account linking
@@ -128,6 +129,11 @@ let auth = auth.with_scope_matcher(Arc::new(matcher));
 ```
 
 See [Scope matching](docs/scope-matching.md).
+
+For compact role grants, resource servers can use the generic
+`RoleScopeExpansionProvider` contract with a host-verified catalogue. The host
+keeps membership, transport, signature keys, and cache policy; see
+[Role-to-scope expansion](docs/role-scope-expansion.md).
 
 Hosts that verify channel credentials outside the crate can attach
 `ChannelIdentity` and use `RequireChannelScheme`:
@@ -318,6 +324,7 @@ For typed recent-authentication requests bound to one-time state, see
 - [Access-token scope claims](docs/access-token-scope-claims.md)
 - [Resource servers](docs/resource-servers.md)
 - [Scope matching](docs/scope-matching.md)
+- [Role-to-scope expansion](docs/role-scope-expansion.md)
 - [Access-token-only grants](docs/access-token-only.md)
 - [Multi-tenant claims](docs/multi-tenant-claims.md)
 - [Key rotation and JWKS](docs/key-rotation.md)
