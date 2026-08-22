@@ -77,6 +77,11 @@ pub use crate::principal_reference::{
     VerifiedActiveUserSessionResolver,
 };
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
+pub use crate::role_scope::{
+    ROLE_SCOPE_CATALOGUE_PURPOSE, RoleScopeCatalogue, RoleScopeCatalogueClaims,
+    RoleScopeDefinition, RoleScopeExpansion, RoleScopeExpansionError, RoleScopeExpansionProvider,
+    RoleScopeGrant, SignedRoleScopeCatalogue, StaticRoleScopeExpansion, effective_scopes,
+};
 pub use crate::scope_match::{
     AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions,
     HierarchicalScopeValidationError, HierarchicalScopeValidationWarning, ScopeMatch, ScopeMatcher,
