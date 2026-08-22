@@ -1,5 +1,28 @@
 # Migration Guide
 
+## 0.17.1 to 0.18.0: typed authorization roles and resilient catalogue policy
+
+Existing issuers and validators need no configuration change. The new
+`authorization_roles` claim defaults to an empty set and remains separate from
+application `roles`.
+
+An issuer adopting compact grants implements `AdditionalTokenRolesProvider`
+and installs it with `AuthService::with_additional_token_roles_provider`. The
+provider is called for login and every refreshable-session rotation. It is not
+called for sessionless or session-bound delegated tokens. Resource servers
+expand `AuthUser::token_claims.authorization_roles`, not application roles.
+
+`StaticRoleScopeExpansion` now rejects unknown identifiers. Remote caches
+should request an immediate refresh on that error, preserve their last
+signature-verified snapshot when refresh fails, and fail the affected request
+if the identifier remains unknown. Use
+`RoleScopeCatalogueValidationOptions::default().with_*` to configure the
+issuer's maximum signed lifetime and clock leeway independently of local
+refresh frequency.
+
+No database migration is implied. Membership storage, catalogue transport,
+retry policy, and stale-while-revalidate bounds remain host-owned.
+
 ## 0.17.0 to 0.17.1: compact default session context
 
 No API, database, or authorization migration is required. Newly serialized
@@ -20,7 +43,8 @@ construct `StaticRoleScopeExpansion` only from that verified snapshot. Union
 the returned scopes with direct token scopes through `effective_scopes` before
 authorization. A remote cache should implement `RoleScopeExpansionProvider`
 and return `RoleScopeExpansionError::Unavailable` when it has no current,
-verified snapshot. Unknown roles grant nothing.
+verified snapshot. Unknown roles now fail explicitly so a consumer can refresh
+and deny safely.
 
 Roll out resource-server expansion before issuers stop placing expanded scopes
 in tokens. Roll back by restoring expanded scope issuance while leaving the

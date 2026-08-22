@@ -28,7 +28,8 @@
 //! ## Local Sessions
 //!
 //! Access tokens are short-lived JWTs containing the local user ID, session ID,
-//! roles, scopes, and [`SessionContext`]. Refresh tokens are opaque, hashed
+//! application roles, scopes, optional typed authorization roles, and
+//! [`SessionContext`]. Refresh tokens are opaque, hashed
 //! before storage, and rotated on refresh. A replayed refresh token revokes the
 //! token family through the host's [`RefreshTokenStore`].
 //! [`SessionAssurance`] carries host-accepted authentication time, AMR, ACR,
@@ -201,9 +202,9 @@ pub use role_scope::{
     MAX_ROLE_SCOPE_CATALOGUE_EXACT_ONLY_PATTERNS, MAX_ROLE_SCOPE_CATALOGUE_ROLES,
     MAX_ROLE_SCOPE_CATALOGUE_SCOPES, MAX_ROLE_SCOPE_CATALOGUE_SCOPES_PER_ROLE,
     MAX_ROLE_SCOPE_CATALOGUE_VALUE_LENGTH, ROLE_SCOPE_CATALOGUE_PURPOSE, RoleScopeCatalogue,
-    RoleScopeCatalogueClaims, RoleScopeCatalogueError, RoleScopeDefinition, RoleScopeExpansion,
-    RoleScopeExpansionError, RoleScopeExpansionProvider, RoleScopeGrant, SignedRoleScopeCatalogue,
-    StaticRoleScopeExpansion, effective_scopes,
+    RoleScopeCatalogueClaims, RoleScopeCatalogueError, RoleScopeCatalogueValidationOptions,
+    RoleScopeDefinition, RoleScopeExpansion, RoleScopeExpansionError, RoleScopeExpansionProvider,
+    RoleScopeGrant, SignedRoleScopeCatalogue, StaticRoleScopeExpansion, effective_scopes,
 };
 pub use scope_match::{
     AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions,
@@ -213,13 +214,14 @@ pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;
 pub use session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use stores::{
-    ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore, LoginChallengeStore,
-    MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore, PasswordResetTokenStore,
-    RefreshTokenStore, TotpReplayStore, UserStore,
+    AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,
+    LoginChallengeStore, MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore,
+    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
 };
 pub use token_decode::{
-    BearerParseMode, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH, MAX_ACCESS_TOKEN_SCOPE_LENGTH,
-    MAX_ACCESS_TOKEN_SCOPES, PurposePolicy,
+    BearerParseMode, MAX_ACCESS_TOKEN_AUTHORIZATION_ROLE_LENGTH,
+    MAX_ACCESS_TOKEN_AUTHORIZATION_ROLES, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH,
+    MAX_ACCESS_TOKEN_SCOPE_LENGTH, MAX_ACCESS_TOKEN_SCOPES, PurposePolicy,
 };
 pub use token_status::{
     AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,

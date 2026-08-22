@@ -7,10 +7,21 @@ use uuid::Uuid;
 
 use crate::{
     ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthRateLimitKey, AuthRateLimitSnapshot,
-    AuthRateLimitState, AuthResult, ExternalIdentity, OAuthLoginState, OidcTokenResponse,
+    AuthRateLimitState, AuthResult, AuthUser, ExternalIdentity, OAuthLoginState, OidcTokenResponse,
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
     StoredUser,
 };
+
+#[async_trait]
+/// Supplies host-owned authorization roles for refreshable access tokens.
+///
+/// The returned values are carried in the distinct `authorization_roles`
+/// claim. They are not application roles and grant no authority until a
+/// resource server expands them through a separately verified catalogue.
+pub trait AdditionalTokenRolesProvider: Send + Sync {
+    /// Loads the current authorization-role grants for one user session.
+    async fn additional_token_roles(&self, user: &AuthUser) -> AuthResult<Vec<String>>;
+}
 
 #[async_trait]
 /// Loads local users for password login, refresh, and verified-session flows.

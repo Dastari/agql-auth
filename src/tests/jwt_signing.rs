@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema};
+use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, decode_header, encode};
@@ -9,6 +10,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{MemoryRefreshTokenStore, MemoryUserStore, TEST_HS256_SECRET, metadata, stored_user};
+use crate::AuthResult;
 use crate::prelude::*;
 
 pub(super) const RSA_PRIVATE_KEY_A: &str = r#"-----BEGIN RSA PRIVATE KEY-----
@@ -90,6 +92,20 @@ const OTHER_HS256_SECRET: &str = "different-test-secret-with-32-bytes";
 
 struct GuardedQuery;
 
+struct FixedAdditionalRoles;
+
+#[async_trait]
+impl AdditionalTokenRolesProvider for FixedAdditionalRoles {
+    async fn additional_token_roles(&self, user: &AuthUser) -> AuthResult<Vec<String>> {
+        assert_eq!(user.user_id, "user-1");
+        Ok(vec![
+            "support-reader".to_owned(),
+            "support-reader".to_owned(),
+            "billing-operator".to_owned(),
+        ])
+    }
+}
+
 #[Object]
 impl GuardedQuery {
     #[graphql(guard = "RequireAnyRole::new([\"CatalogEditor\"])")]
@@ -133,6 +149,37 @@ async fn hs256_auth_config_new_emits_standard_scope_claim() {
         .unwrap();
     assert_eq!(decoded.user_id, "user-1");
     assert!(matches!(auth.jwks(), Err(AuthError::JwksUnsupported)));
+}
+
+#[tokio::test]
+async fn additional_authorization_roles_use_a_distinct_typed_claim() {
+    let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET))
+        .with_additional_token_roles_provider(Arc::new(FixedAdditionalRoles));
+    let payload = auth
+        .issue_verified_user_session_with_scopes(
+            "user-1",
+            vec!["CatalogEditor".to_owned()],
+            vec!["users.read".to_owned()],
+            AuthMethod::Password,
+            metadata(),
+        )
+        .await
+        .unwrap();
+
+    let claims = decode_payload(&payload.access_token);
+    assert_eq!(claims["roles"], json!(["CatalogEditor"]));
+    assert_eq!(
+        claims["authorization_roles"],
+        json!(["support-reader", "billing-operator"])
+    );
+    let decoded = auth
+        .authenticate_access_token(&payload.access_token)
+        .unwrap();
+    assert_eq!(decoded.roles, ["CatalogEditor"]);
+    assert_eq!(
+        decoded.token_claims.authorization_roles,
+        ["support-reader", "billing-operator"]
+    );
 }
 
 #[test]

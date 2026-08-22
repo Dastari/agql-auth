@@ -119,6 +119,10 @@ pub struct AccessTokenMetadata {
     /// Exact registered operation binding for delegated execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<ExactOperationBinding>,
+    /// Host-defined authorization-role grants carried separately from
+    /// application roles and expanded by a verified resource-server catalogue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorization_roles: Vec<String>,
     /// Explicit token purpose when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,

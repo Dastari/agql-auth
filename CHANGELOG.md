@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.18.0
+
+### Added
+
+- `AdditionalTokenRolesProvider` for host-owned refreshable-session membership
+  resolution and a distinct typed `authorization_roles` access-token claim.
+- Default-and-builder-based signed-catalogue validation options that decouple
+  maximum issuer lifetime from refresh cadence and allow bounded clock skew.
+
+### Security and availability
+
+- Static expansion now returns an explicit unknown-role error. Remote
+  consumers can refresh immediately and fail closed instead of silently
+  authenticating with none of an unknown role's scopes.
+- Sessionless and session-bound delegation issuance do not invoke the
+  additional-role provider, so the new hook cannot widen those grants.
+
+### Compatibility / SemVer
+
+- The provider and claim are opt-in. Existing issuers emit no new claim and
+  existing tokens decode with an empty authorization-role set. Consumers that
+  use exhaustive `AccessTokenMetadata` literals must initialize the additive
+  field or construct from `Default`.
+- Hosts using role expansion should pass only the distinct authorization-role
+  set. Unknown identifiers now return an error instead of being ignored.
+
 ## 0.17.1
 
 ### Changed
@@ -29,8 +55,9 @@
 
 - Catalogue validation rejects duplicate IDs, unregistered role scope
   references, invalid values, excessive counts, mismatched signed claims, and
-  invalid lifetimes. Unknown token roles contribute no authority, and providers
-  have an explicit unavailable result for fail-closed caches.
+  invalid lifetimes. At this release, unknown token roles contributed no
+  authority; 0.18.0 tightens that case to an explicit error. Providers have an
+  explicit unavailable result for fail-closed caches.
 - The crate supplies no policy values, network client, signing key, membership
   schema, cache authority, or consumer-specific identifier.
 

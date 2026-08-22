@@ -1,8 +1,9 @@
 # Role-to-scope expansion
 
-`agql-auth` access tokens already carry roles and scopes. A host that grants
-reusable roles can keep tokens compact by carrying role IDs plus exceptional
-direct scopes, then expanding those role IDs at each resource server.
+`agql-auth` access tokens carry application roles and scopes. A host that
+grants reusable authorization roles can keep tokens compact by carrying their
+IDs in the distinct `authorization_roles` claim plus exceptional direct scopes,
+then expanding only those IDs at each resource server.
 
 The crate provides a provider-neutral, bounded contract for that expansion:
 
@@ -35,11 +36,18 @@ assert_eq!(
 ```
 
 `StaticRoleScopeExpansion` accepts only a validated catalogue, sorts and
-deduplicates output, and gives unknown roles no authority. Hosts that retrieve
-catalogues remotely implement `RoleScopeExpansionProvider` over their own
-verified cache and return `Unavailable` when no current verified snapshot is
-usable. That makes stale, missing, or forged state fail closed without putting
-HTTP or database policy into this crate.
+deduplicates output, and returns `UnknownRole` for an identifier absent from the
+snapshot. Hosts that retrieve catalogues remotely implement
+`RoleScopeExpansionProvider` over their own verified cache, refresh immediately
+on that error, and return `Unavailable` when no signature-verified snapshot is
+usable. This avoids silently dropping inherited scopes without putting HTTP or
+database policy into this crate.
+
+Issuers can install `AdditionalTokenRolesProvider` to load current membership
+for refreshable sessions. The hook runs on initial issuance and every refresh,
+but never for sessionless or session-bound delegated grants. Decoded values are
+available at `AuthUser::token_claims.authorization_roles`; ordinary
+`AuthUser::roles` keep their application-defined meaning.
 
 ## Signed transport
 
@@ -51,10 +59,12 @@ issued-at time, expiry, and the fixed `role_scope_catalogue` purpose. A host:
 2. publishes the clear catalogue and compact signature as one envelope;
 3. verifies the signature, algorithm, key, issuer, and audience at the
    resource server; and
-4. calls `validate_binding` before constructing expansion state.
+4. calls `validate_binding_with_options` before constructing expansion state.
 
 The crate intentionally does not fetch URLs, choose keys, assign memberships,
-or name roles/scopes. Cache TTLs must be no longer than the signed lifetime.
-Role-definition edits take effect according to the host's token and catalogue
-refresh policy; direct scopes remain separate from expanded scopes.
-
+or name roles/scopes. Signed maximum lifetime and clock leeway are independent
+of local refresh cadence. A remote cache can retain a previously verified
+snapshot for stale-while-revalidate service while loudly reporting staleness;
+the transport and stale policy remain host concerns. Role-definition edits take
+effect according to the host's token and catalogue refresh policy; direct
+scopes remain separate from expanded scopes.
