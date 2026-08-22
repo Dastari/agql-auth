@@ -78,8 +78,8 @@ pub use crate::principal_reference::{
 };
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use crate::scope_match::{
-    AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions, ScopeMatch,
-    ScopeMatcher,
+    AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions,
+    HierarchicalScopeValidationError, HierarchicalScopeValidationWarning, ScopeMatch, ScopeMatcher,
 };
 pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use crate::service::AuthService;

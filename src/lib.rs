@@ -197,8 +197,8 @@ pub use principal_reference::{
 };
 pub use purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use scope_match::{
-    AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions, ScopeMatch,
-    ScopeMatcher,
+    AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions,
+    HierarchicalScopeValidationError, HierarchicalScopeValidationWarning, ScopeMatch, ScopeMatcher,
 };
 pub use scopes::{has_all_scopes, has_any_scope, has_scope};
 pub use service::AuthService;

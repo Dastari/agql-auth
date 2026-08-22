@@ -38,12 +38,7 @@ assert!(user.has_scope_with(&matcher, "orders.items.read"));
 ```rust
 use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    separator: '.',
-    wildcard: "*".to_string(),
-    wildcard_matches_multi_segment: true,
-    super_scopes: Vec::new(),
-});
+let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions::default())?;
 ```
 
 Defaults:
@@ -53,23 +48,32 @@ Defaults:
 - `wildcard_matches_multi_segment = true`
 - `allow_universal_wildcard = false`
 - `super_scopes = []`
+- `exact_only_scopes = []`
+- `exact_only_scope_patterns = []`
 
 No hidden admin scope is configured by the crate. Scope comparison is
 **case-sensitive**.
+
+`HierarchicalScopeOptions` is non-exhaustive. Start from `Default` and use its
+`with_*` methods instead of a struct literal so future options remain a
+compatible addition.
 
 ## Normative Algorithm
 
 For `matches(granted, required)`:
 
-1. If `granted` is configured in `super_scopes`, allow.
-2. If `granted == required`, allow.
-3. If `granted` equals the bare wildcard, allow only when
+1. If `required` is configured in `exact_only_scopes`, or is selected by a
+   configured `exact_only_scope_patterns` entry under the same wildcard rules,
+   allow only when `granted == required` and stop.
+2. If `granted` is configured in `super_scopes`, allow.
+3. If `granted == required`, allow.
+4. If `granted` equals the bare wildcard, allow only when
    `allow_universal_wildcard` is true.
-4. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
+5. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
    the trailing wildcard and require `required.starts_with(prefix)`.
-5. If `granted` ends with the wildcard and multi-segment mode is disabled, the
+6. If `granted` ends with the wildcard and multi-segment mode is disabled, the
    trailing wildcard consumes exactly one remaining segment.
-6. Otherwise split both strings on the separator. Segment counts must be equal,
+7. Otherwise split both strings on the separator. Segment counts must be equal,
    and each granted segment must equal the required segment or equal the
    wildcard (middle wildcards are whole segments only).
 
@@ -95,6 +99,8 @@ Summary:
 | 30 | `*` | `orders.read` | allow when `allow_universal_wildcard` |
 | 25 | `orders.*` | `orders.items.read` | deny when single-segment mode |
 | 29 | `platform.admin` | `orders.delete` | allow only as configured super-scope |
+| 35 | `platform.admin` | `payments.account.42.read` | allow when an exact-only pattern does not match |
+| 36 | `*` | `payments.credentials.release` | deny when exact-only, even with universal wildcard enabled |
 
 ## Super-Scopes
 
@@ -105,13 +111,64 @@ satisfies every required scope through that matcher.
 This is a behavioral opt-in. It also affects direct `has_scope_with` calls:
 
 ```rust
-let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-    super_scopes: vec!["platform.admin".to_string()],
-    ..Default::default()
-});
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+)?;
 
 assert!(matcher.has_scope(&["platform.admin".to_string()], "orders.delete"));
 ```
+
+## Exact-Only Scopes
+
+`exact_only_scopes` lets a host declare requirements that blanket authority or
+wildcard grants must never satisfy. The crate supplies no built-in values. A
+consumer can configure a sensitive operation while retaining ordinary
+hierarchical behavior elsewhere:
+
+```rust
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["platform.admin"])
+        .with_exact_only_scopes(["payments.credentials.release"]),
+)?;
+
+assert!(!matcher.matches("platform.admin", "payments.credentials.release"));
+assert!(!matcher.matches("payments.*", "payments.credentials.release"));
+assert!(matcher.matches(
+    "payments.credentials.release",
+    "payments.credentials.release",
+));
+```
+
+Membership is an exact, case-sensitive comparison against the required scope.
+Hosts remain responsible for supplying and maintaining the set.
+
+Resource-qualified families can be selected without enumerating identifiers:
+
+```rust
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["platform.admin"])
+        .with_exact_only_scope_patterns([
+            "payments.account.*.credentials.release",
+        ]),
+)?;
+
+assert!(!matcher.matches(
+    "platform.admin",
+    "payments.account.42.credentials.release",
+));
+```
+
+Pattern selection uses the configured separator, wildcard, multi-segment, and
+universal-wildcard options. Pattern values select which requirements are
+exact-only; they never become grants.
+
+Validation rejects an exact-only pattern equal to the configured bare
+wildcard. Every other wildcard-bearing exact-only pattern is accepted with a
+[`HierarchicalScopeValidationWarning`](../src/scope_match.rs), because it can
+make an entire requirement subtree exact-only. Configuration loaders should
+surface `matcher.validation_warnings()` rather than hiding those diagnostics.
 
 ## GraphQL Guards
 

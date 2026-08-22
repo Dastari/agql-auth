@@ -123,11 +123,10 @@ let validator = AccessTokenValidator::builder()
     .audience("agql-auth-clients")
     .rs256_public_pem(public_key_pem)
     .scope_matcher(Arc::new(HierarchicalScopeMatch::new(
-        HierarchicalScopeOptions {
-            super_scopes: vec!["platform.admin".to_string()],
-            ..Default::default()
-        },
-    )))
+        HierarchicalScopeOptions::default()
+            .with_super_scopes(["platform.admin"])
+            .with_exact_only_scopes(["payments.credentials.release"]),
+    )?))
     .build()?;
 ```
 

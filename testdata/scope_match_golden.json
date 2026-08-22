@@ -6,7 +6,9 @@
     "wildcard": "*",
     "wildcard_matches_multi_segment": true,
     "allow_universal_wildcard": false,
-    "super_scopes": []
+    "super_scopes": [],
+    "exact_only_scopes": [],
+    "exact_only_scope_patterns": []
   },
   "case_sensitive": true,
   "matcher_vectors": [
@@ -200,6 +202,70 @@
       "required": "orders.read",
       "expected": true,
       "options": { "allow_universal_wildcard": true }
+    },
+    {
+      "id": 31,
+      "granted": ["platform.admin"],
+      "required": "payments.credentials.release",
+      "expected": false,
+      "options": {
+        "super_scopes": ["platform.admin"],
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "exact-only requirements reject configured super-scopes"
+    },
+    {
+      "id": 32,
+      "granted": ["payments.*"],
+      "required": "payments.credentials.release",
+      "expected": false,
+      "options": {
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "exact-only requirements reject wildcard grants"
+    },
+    {
+      "id": 33,
+      "granted": ["payments.credentials.release"],
+      "required": "payments.credentials.release",
+      "expected": true,
+      "options": {
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "exact-only requirements accept an exactly equal grant"
+    },
+    {
+      "id": 34,
+      "granted": ["platform.admin"],
+      "required": "payments.account.42.credentials.release",
+      "expected": false,
+      "options": {
+        "super_scopes": ["platform.admin"],
+        "exact_only_scope_patterns": ["payments.account.*.credentials.release"]
+      },
+      "notes": "exact-only patterns cover resource-qualified scope families"
+    },
+    {
+      "id": 35,
+      "granted": ["platform.admin"],
+      "required": "payments.account.42.read",
+      "expected": true,
+      "options": {
+        "super_scopes": ["platform.admin"],
+        "exact_only_scope_patterns": ["payments.account.*.credentials.release"]
+      },
+      "notes": "a non-matching exact-only pattern leaves ordinary super-scope behavior intact"
+    },
+    {
+      "id": 36,
+      "granted": ["*"],
+      "required": "payments.credentials.release",
+      "expected": false,
+      "options": {
+        "allow_universal_wildcard": true,
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "exact-only requirements reject the universal wildcard even when it is enabled"
     }
   ]
 }

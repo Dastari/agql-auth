@@ -64,8 +64,23 @@ fn hierarchical_matcher_conforms_to_json_golden_file() {
                     .map(|v| v.as_str().unwrap().to_string())
                     .collect();
             }
+            if let Some(exact_only) = opts.get("exact_only_scopes").and_then(|v| v.as_array()) {
+                options.exact_only_scopes = exact_only
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+            }
+            if let Some(patterns) = opts
+                .get("exact_only_scope_patterns")
+                .and_then(|v| v.as_array())
+            {
+                options.exact_only_scope_patterns = patterns
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+            }
         }
-        let matcher = HierarchicalScopeMatch::new(options);
+        let matcher = HierarchicalScopeMatch::new(options).unwrap();
         let granted = vector["granted"]
             .as_array()
             .unwrap()
@@ -84,10 +99,10 @@ fn hierarchical_matcher_conforms_to_json_golden_file() {
 
 #[test]
 fn hierarchical_matcher_satisfies_guard_golden_vectors() {
-    let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-        super_scopes: vec!["platform.admin".to_string()],
-        ..Default::default()
-    });
+    let matcher = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+    )
+    .unwrap();
     let vectors = [
         (
             "G1",
@@ -171,10 +186,10 @@ fn hierarchical_matcher_satisfies_guard_golden_vectors() {
 #[test]
 fn hierarchical_matcher_supports_appendix_b_options() {
     let multi = HierarchicalScopeMatch::with_defaults();
-    let single = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-        wildcard_matches_multi_segment: false,
-        ..Default::default()
-    });
+    let single = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default().with_wildcard_matches_multi_segment(false),
+    )
+    .unwrap();
 
     assert!(multi.matches("orders.read", "orders.read"));
     assert!(!multi.matches("orders.read", "orders.write"));
@@ -186,18 +201,96 @@ fn hierarchical_matcher_supports_appendix_b_options() {
     assert!(!multi.matches("orders.*", "billing.read"));
     assert!(!multi.matches("orders.read", "orders.read.extra"));
     assert!(!multi.matches("*", "orders.read"));
-    let universal = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-        allow_universal_wildcard: true,
-        ..Default::default()
-    });
+    let universal = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default().with_allow_universal_wildcard(true),
+    )
+    .unwrap();
     assert!(universal.matches("*", "orders.read"));
 
-    let with_super = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-        super_scopes: vec!["platform.admin".to_string()],
-        ..Default::default()
-    });
+    let with_super = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+    )
+    .unwrap();
     assert!(with_super.matches("platform.admin", "orders.delete"));
     assert!(!multi.matches("platform.admin", "orders.delete"));
+}
+
+#[test]
+fn exact_only_requirements_reject_super_and_wildcard_grants() {
+    let matcher = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default()
+            .with_super_scopes(["platform.admin"])
+            .with_exact_only_scopes(["payments.credentials.release"]),
+    )
+    .unwrap();
+
+    let matrix = [
+        ("platform.admin", "orders.read", true),
+        ("orders.*", "orders.read", true),
+        ("orders.read", "orders.read", true),
+        ("platform.admin", "payments.credentials.release", false),
+        ("payments.*", "payments.credentials.release", false),
+        (
+            "payments.credentials.release",
+            "payments.credentials.release",
+            true,
+        ),
+    ];
+
+    for (granted, required, expected) in matrix {
+        assert_eq!(
+            matcher.matches(granted, required),
+            expected,
+            "grant {granted:?} against requirement {required:?}"
+        );
+    }
+}
+
+#[test]
+fn exact_only_patterns_cover_resource_qualified_scope_families() {
+    let matcher = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default()
+            .with_super_scopes(["platform.admin"])
+            .with_exact_only_scope_patterns(["payments.account.*.credentials.release"]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        matcher.validation_warnings(),
+        &[
+            HierarchicalScopeValidationWarning::WildcardExactOnlyPattern {
+                pattern: "payments.account.*.credentials.release".to_string(),
+            }
+        ]
+    );
+
+    assert!(!matcher.matches("platform.admin", "payments.account.42.credentials.release"));
+    assert!(!matcher.matches(
+        "payments.account.*",
+        "payments.account.42.credentials.release"
+    ));
+    assert!(matcher.matches(
+        "payments.account.42.credentials.release",
+        "payments.account.42.credentials.release"
+    ));
+    assert!(matcher.matches("platform.admin", "payments.account.42.read"));
+}
+
+#[test]
+fn bare_wildcard_exact_only_pattern_is_rejected() {
+    let error = HierarchicalScopeMatch::new(
+        HierarchicalScopeOptions::default()
+            .with_allow_universal_wildcard(true)
+            .with_exact_only_scope_patterns(["*"]),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        HierarchicalScopeValidationError::BareWildcardExactOnlyPattern {
+            pattern: "*".to_string(),
+        }
+    );
 }
 
 #[tokio::test]

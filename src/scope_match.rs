@@ -36,6 +36,7 @@ impl ScopeMatch for ExactScopeMatch {
 
 /// Options for [`HierarchicalScopeMatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HierarchicalScopeOptions {
     /// Segment separator. Defaults to `'.'`.
     pub separator: char,
@@ -49,6 +50,17 @@ pub struct HierarchicalScopeOptions {
     pub allow_universal_wildcard: bool,
     /// Scopes that satisfy every requirement. Empty by default.
     pub super_scopes: Vec<String>,
+    /// Required scopes that may be satisfied only by an exactly equal grant.
+    ///
+    /// Exact-only requirements are evaluated before super-scope and wildcard
+    /// behavior. Empty by default.
+    pub exact_only_scopes: Vec<String>,
+    /// Required-scope patterns that select exact-only behavior.
+    ///
+    /// Patterns use the configured hierarchical wildcard rules. This lets a
+    /// host declare resource-qualified scope families without enumerating
+    /// every resource identifier. Empty by default.
+    pub exact_only_scope_patterns: Vec<String>,
 }
 
 impl Default for HierarchicalScopeOptions {
@@ -59,6 +71,130 @@ impl Default for HierarchicalScopeOptions {
             wildcard_matches_multi_segment: true,
             allow_universal_wildcard: false,
             super_scopes: Vec::new(),
+            exact_only_scopes: Vec::new(),
+            exact_only_scope_patterns: Vec::new(),
+        }
+    }
+}
+
+impl HierarchicalScopeOptions {
+    /// Sets the segment separator.
+    pub fn with_separator(mut self, separator: char) -> Self {
+        self.separator = separator;
+        self
+    }
+
+    /// Sets the wildcard segment/string.
+    pub fn with_wildcard(mut self, wildcard: impl Into<String>) -> Self {
+        self.wildcard = wildcard.into();
+        self
+    }
+
+    /// Sets whether a trailing wildcard matches multiple segments.
+    pub fn with_wildcard_matches_multi_segment(mut self, enabled: bool) -> Self {
+        self.wildcard_matches_multi_segment = enabled;
+        self
+    }
+
+    /// Sets whether a bare wildcard grant satisfies every requirement.
+    pub fn with_allow_universal_wildcard(mut self, enabled: bool) -> Self {
+        self.allow_universal_wildcard = enabled;
+        self
+    }
+
+    /// Sets the consumer-supplied super-scopes.
+    pub fn with_super_scopes<I, S>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.super_scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the consumer-supplied exact-only scopes.
+    pub fn with_exact_only_scopes<I, S>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.exact_only_scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the consumer-supplied exact-only scope patterns.
+    pub fn with_exact_only_scope_patterns<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.exact_only_scope_patterns = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Validates the options and returns non-fatal configuration warnings.
+    ///
+    /// A bare wildcard exact-only pattern is rejected because, when universal
+    /// wildcard behavior is enabled, it selects every required scope. Other
+    /// wildcard-bearing exact-only patterns are valid but reported so hosts can
+    /// make the resulting subtree policy visible during configuration loading.
+    pub fn validate(
+        &self,
+    ) -> Result<Vec<HierarchicalScopeValidationWarning>, HierarchicalScopeValidationError> {
+        let mut warnings = Vec::new();
+
+        for pattern in &self.exact_only_scope_patterns {
+            if !self.wildcard.is_empty() && pattern == &self.wildcard {
+                return Err(
+                    HierarchicalScopeValidationError::BareWildcardExactOnlyPattern {
+                        pattern: pattern.clone(),
+                    },
+                );
+            }
+
+            if !self.wildcard.is_empty() && pattern.contains(&self.wildcard) {
+                warnings.push(
+                    HierarchicalScopeValidationWarning::WildcardExactOnlyPattern {
+                        pattern: pattern.clone(),
+                    },
+                );
+            }
+        }
+
+        Ok(warnings)
+    }
+}
+
+/// Fatal validation error for [`HierarchicalScopeOptions`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum HierarchicalScopeValidationError {
+    /// An exact-only pattern is exactly the configured wildcard.
+    #[error("exact-only scope pattern {pattern:?} must not be the bare wildcard")]
+    BareWildcardExactOnlyPattern {
+        /// Rejected pattern.
+        pattern: String,
+    },
+}
+
+/// Non-fatal validation warning for [`HierarchicalScopeOptions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HierarchicalScopeValidationWarning {
+    /// An exact-only pattern contains the configured wildcard.
+    WildcardExactOnlyPattern {
+        /// Pattern whose subtree becomes exact-only.
+        pattern: String,
+    },
+}
+
+impl std::fmt::Display for HierarchicalScopeValidationWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WildcardExactOnlyPattern { pattern } => write!(
+                formatter,
+                "exact-only scope pattern {pattern:?} contains a wildcard and may select a scope subtree"
+            ),
         }
     }
 }
@@ -72,27 +208,73 @@ impl Default for HierarchicalScopeOptions {
 #[derive(Debug, Clone)]
 pub struct HierarchicalScopeMatch {
     options: HierarchicalScopeOptions,
+    validation_warnings: Vec<HierarchicalScopeValidationWarning>,
 }
 
 impl HierarchicalScopeMatch {
-    /// Creates a matcher with explicit options.
-    pub fn new(options: HierarchicalScopeOptions) -> Self {
-        Self { options }
+    /// Creates a matcher with validated explicit options.
+    ///
+    /// Call [`Self::validation_warnings`] after construction and surface each
+    /// warning through the host's configuration diagnostics.
+    pub fn new(
+        options: HierarchicalScopeOptions,
+    ) -> Result<Self, HierarchicalScopeValidationError> {
+        let validation_warnings = options.validate()?;
+        Ok(Self {
+            options,
+            validation_warnings,
+        })
     }
 
     /// Creates a matcher with default hierarchical options and no super-scopes.
     pub fn with_defaults() -> Self {
         Self::new(HierarchicalScopeOptions::default())
+            .expect("default hierarchical scope options are valid")
     }
 
     /// Returns the configured options.
     pub fn options(&self) -> &HierarchicalScopeOptions {
         &self.options
     }
+
+    /// Returns non-fatal diagnostics found while validating the options.
+    pub fn validation_warnings(&self) -> &[HierarchicalScopeValidationWarning] {
+        &self.validation_warnings
+    }
 }
 
 impl ScopeMatch for HierarchicalScopeMatch {
     fn matches(&self, granted: &str, required: &str) -> bool {
+        let exact_only = self.is_exact_only_requirement(required);
+        self.matches_with_exact_only(granted, required, exact_only)
+    }
+
+    fn has_scope(&self, granted: &[String], required: &str) -> bool {
+        let exact_only = self.is_exact_only_requirement(required);
+        granted
+            .iter()
+            .any(|scope| self.matches_with_exact_only(scope, required, exact_only))
+    }
+}
+
+impl HierarchicalScopeMatch {
+    fn is_exact_only_requirement(&self, required: &str) -> bool {
+        self.options
+            .exact_only_scopes
+            .iter()
+            .any(|scope| scope == required)
+            || self
+                .options
+                .exact_only_scope_patterns
+                .iter()
+                .any(|pattern| self.matches_hierarchy(pattern, required))
+    }
+
+    fn matches_with_exact_only(&self, granted: &str, required: &str, exact_only: bool) -> bool {
+        if exact_only {
+            return granted == required;
+        }
+
         if self
             .options
             .super_scopes
@@ -102,6 +284,10 @@ impl ScopeMatch for HierarchicalScopeMatch {
             return true;
         }
 
+        self.matches_hierarchy(granted, required)
+    }
+
+    fn matches_hierarchy(&self, granted: &str, required: &str) -> bool {
         if granted == required {
             return true;
         }
@@ -162,8 +348,10 @@ impl ScopeMatcher {
     }
 
     /// Creates a hierarchical matcher enum from options.
-    pub fn hierarchical(options: HierarchicalScopeOptions) -> Self {
-        Self::Hierarchical(HierarchicalScopeMatch::new(options))
+    pub fn hierarchical(
+        options: HierarchicalScopeOptions,
+    ) -> Result<Self, HierarchicalScopeValidationError> {
+        Ok(Self::Hierarchical(HierarchicalScopeMatch::new(options)?))
     }
 
     /// Converts this matcher into a trait object suitable for request runtime.
@@ -178,6 +366,30 @@ impl ScopeMatch for ScopeMatcher {
             Self::Exact => ExactScopeMatch.matches(granted, required),
             Self::Hierarchical(matcher) => matcher.matches(granted, required),
             Self::Custom(matcher) => matcher.matches(granted, required),
+        }
+    }
+
+    fn has_scope(&self, granted: &[String], required: &str) -> bool {
+        match self {
+            Self::Exact => ExactScopeMatch.has_scope(granted, required),
+            Self::Hierarchical(matcher) => matcher.has_scope(granted, required),
+            Self::Custom(matcher) => matcher.has_scope(granted, required),
+        }
+    }
+
+    fn has_any_scope(&self, granted: &[String], required: &[&str]) -> bool {
+        match self {
+            Self::Exact => ExactScopeMatch.has_any_scope(granted, required),
+            Self::Hierarchical(matcher) => matcher.has_any_scope(granted, required),
+            Self::Custom(matcher) => matcher.has_any_scope(granted, required),
+        }
+    }
+
+    fn has_all_scopes(&self, granted: &[String], required: &[&str]) -> bool {
+        match self {
+            Self::Exact => ExactScopeMatch.has_all_scopes(granted, required),
+            Self::Hierarchical(matcher) => matcher.has_all_scopes(granted, required),
+            Self::Custom(matcher) => matcher.has_all_scopes(granted, required),
         }
     }
 }
