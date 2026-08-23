@@ -7,6 +7,7 @@
     "wildcard_matches_multi_segment": true,
     "allow_universal_wildcard": false,
     "super_scopes": [],
+    "allow_super_scopes_for_exact_only": false,
     "exact_only_scopes": [],
     "exact_only_scope_patterns": []
   },
@@ -266,6 +267,42 @@
         "exact_only_scopes": ["payments.credentials.release"]
       },
       "notes": "exact-only requirements reject the universal wildcard even when it is enabled"
+    },
+    {
+      "id": 37,
+      "granted": ["root.admin"],
+      "required": "payments.credentials.release",
+      "expected": true,
+      "options": {
+        "super_scopes": ["root.admin", "operations.breakglass"],
+        "allow_super_scopes_for_exact_only": true,
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "configured super-scopes may satisfy exact-only requirements only under explicit policy"
+    },
+    {
+      "id": 38,
+      "granted": ["operations.breakglass"],
+      "required": "payments.credentials.release",
+      "expected": true,
+      "options": {
+        "super_scopes": ["root.admin", "operations.breakglass"],
+        "allow_super_scopes_for_exact_only": true,
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "each exactly configured super-scope is recognized"
+    },
+    {
+      "id": 39,
+      "granted": ["root.admin.copy"],
+      "required": "payments.credentials.release",
+      "expected": false,
+      "options": {
+        "super_scopes": ["root.admin", "operations.breakglass"],
+        "allow_super_scopes_for_exact_only": true,
+        "exact_only_scopes": ["payments.credentials.release"]
+      },
+      "notes": "a similar string is not a configured super-scope"
     }
   ]
 }

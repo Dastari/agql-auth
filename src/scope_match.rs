@@ -50,10 +50,14 @@ pub struct HierarchicalScopeOptions {
     pub allow_universal_wildcard: bool,
     /// Scopes that satisfy every requirement. Empty by default.
     pub super_scopes: Vec<String>,
-    /// Required scopes that may be satisfied only by an exactly equal grant.
+    /// When `true`, configured super-scopes may satisfy exact-only
+    /// requirements. Defaults to `false` for compatibility.
+    pub allow_super_scopes_for_exact_only: bool,
+    /// Required scopes that refuse wildcard-derived satisfaction.
     ///
-    /// Exact-only requirements are evaluated before super-scope and wildcard
-    /// behavior. Empty by default.
+    /// Exact-only requirements always reject wildcard-derived matches.
+    /// Configured super-scopes are also rejected unless
+    /// [`Self::allow_super_scopes_for_exact_only`] is enabled. Empty by default.
     pub exact_only_scopes: Vec<String>,
     /// Required-scope patterns that select exact-only behavior.
     ///
@@ -71,6 +75,7 @@ impl Default for HierarchicalScopeOptions {
             wildcard_matches_multi_segment: true,
             allow_universal_wildcard: false,
             super_scopes: Vec::new(),
+            allow_super_scopes_for_exact_only: false,
             exact_only_scopes: Vec::new(),
             exact_only_scope_patterns: Vec::new(),
         }
@@ -109,6 +114,12 @@ impl HierarchicalScopeOptions {
         S: Into<String>,
     {
         self.super_scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets whether configured super-scopes satisfy exact-only requirements.
+    pub fn with_allow_super_scopes_for_exact_only(mut self, enabled: bool) -> Self {
+        self.allow_super_scopes_for_exact_only = enabled;
         self
     }
 
@@ -271,20 +282,27 @@ impl HierarchicalScopeMatch {
     }
 
     fn matches_with_exact_only(&self, granted: &str, required: &str, exact_only: bool) -> bool {
-        if exact_only {
-            return granted == required;
+        if granted == required {
+            return true;
         }
 
-        if self
-            .options
-            .super_scopes
-            .iter()
-            .any(|scope| scope == granted)
-        {
+        if exact_only {
+            return self.options.allow_super_scopes_for_exact_only
+                && self.is_configured_super_scope(granted);
+        }
+
+        if self.is_configured_super_scope(granted) {
             return true;
         }
 
         self.matches_hierarchy(granted, required)
+    }
+
+    fn is_configured_super_scope(&self, granted: &str) -> bool {
+        self.options
+            .super_scopes
+            .iter()
+            .any(|scope| scope == granted)
     }
 
     fn matches_hierarchy(&self, granted: &str, required: &str) -> bool {

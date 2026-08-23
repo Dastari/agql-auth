@@ -48,6 +48,7 @@ Defaults:
 - `wildcard_matches_multi_segment = true`
 - `allow_universal_wildcard = false`
 - `super_scopes = []`
+- `allow_super_scopes_for_exact_only = false`
 - `exact_only_scopes = []`
 - `exact_only_scope_patterns = []`
 
@@ -64,7 +65,9 @@ For `matches(granted, required)`:
 
 1. If `required` is configured in `exact_only_scopes`, or is selected by a
    configured `exact_only_scope_patterns` entry under the same wildcard rules,
-   allow only when `granted == required` and stop.
+   allow an exact grant. A configured super-scope may also allow when
+   `allow_super_scopes_for_exact_only` is explicitly enabled. Reject all other
+   grants and stop, including wildcard-derived matches.
 2. If `granted` is configured in `super_scopes`, allow.
 3. If `granted == required`, allow.
 4. If `granted` equals the bare wildcard, allow only when
@@ -101,6 +104,8 @@ Summary:
 | 29 | `platform.admin` | `orders.delete` | allow only as configured super-scope |
 | 35 | `platform.admin` | `payments.account.42.read` | allow when an exact-only pattern does not match |
 | 36 | `*` | `payments.credentials.release` | deny when exact-only, even with universal wildcard enabled |
+| 37 | `root.admin` | `payments.credentials.release` | allow only under the explicit exact-only super-scope policy |
+| 39 | `root.admin.copy` | `payments.credentials.release` | deny because similar strings are not configured super-scopes |
 
 ## Super-Scopes
 
@@ -120,10 +125,10 @@ assert!(matcher.has_scope(&["platform.admin".to_string()], "orders.delete"));
 
 ## Exact-Only Scopes
 
-`exact_only_scopes` lets a host declare requirements that blanket authority or
-wildcard grants must never satisfy. The crate supplies no built-in values. A
-consumer can configure a sensitive operation while retaining ordinary
-hierarchical behavior elsewhere:
+`exact_only_scopes` lets a host declare requirements that wildcard grants must
+never satisfy. Configured super-scopes remain excluded by default. The crate
+supplies no built-in values. A consumer can configure a sensitive operation
+while retaining ordinary hierarchical behavior elsewhere:
 
 ```rust
 let matcher = HierarchicalScopeMatch::new(
@@ -138,6 +143,23 @@ assert!(matcher.matches(
     "payments.credentials.release",
     "payments.credentials.release",
 ));
+```
+
+A host can separately opt configured super-scopes into exact-only matching.
+The comparison against `super_scopes` remains exact and case-sensitive; a
+similar string is not admitted:
+
+```rust
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["root.admin", "operations.breakglass"])
+        .with_allow_super_scopes_for_exact_only(true)
+        .with_exact_only_scopes(["payments.credentials.release"]),
+)?;
+
+assert!(matcher.matches("root.admin", "payments.credentials.release"));
+assert!(!matcher.matches("root.admin.copy", "payments.credentials.release"));
+assert!(!matcher.matches("payments.*", "payments.credentials.release"));
 ```
 
 Membership is an exact, case-sensitive comparison against the required scope.

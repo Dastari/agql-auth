@@ -64,6 +64,9 @@ fn hierarchical_matcher_conforms_to_json_golden_file() {
                     .map(|v| v.as_str().unwrap().to_string())
                     .collect();
             }
+            if let Some(allow) = opts.get("allow_super_scopes_for_exact_only") {
+                options.allow_super_scopes_for_exact_only = allow.as_bool().unwrap();
+            }
             if let Some(exact_only) = opts.get("exact_only_scopes").and_then(|v| v.as_array()) {
                 options.exact_only_scopes = exact_only
                     .iter()
@@ -244,6 +247,59 @@ fn exact_only_requirements_reject_super_and_wildcard_grants() {
             "grant {granted:?} against requirement {required:?}"
         );
     }
+}
+
+#[test]
+fn exact_only_super_scope_policy_has_an_explicit_compatibility_default() {
+    let options = HierarchicalScopeOptions::default()
+        .with_super_scopes(["root.admin", "operations.breakglass"])
+        .with_exact_only_scopes(["payments.credentials.release"]);
+    let compatibility_default = HierarchicalScopeMatch::new(options.clone()).unwrap();
+    let enabled =
+        HierarchicalScopeMatch::new(options.with_allow_super_scopes_for_exact_only(true)).unwrap();
+
+    let ordinary = [
+        ("orders.read", "orders.read", true),
+        ("orders.*", "orders.items.read", true),
+        ("orders.*.read", "orders.items.read", true),
+        ("root.admin", "orders.delete", true),
+        ("operations.breakglass", "orders.delete", true),
+        ("root.admin.copy", "orders.delete", false),
+        ("unrelated.scope", "orders.delete", false),
+    ];
+    for (granted, required, expected) in ordinary {
+        assert_eq!(
+            enabled.matches(granted, required),
+            expected,
+            "ordinary grant {granted:?} against requirement {required:?}"
+        );
+    }
+
+    let exact_only = [
+        ("payments.credentials.release", true),
+        ("payments.*", false),
+        ("payments.*.release", false),
+        ("root.admin", true),
+        ("operations.breakglass", true),
+        ("root.admin.copy", false),
+        ("unrelated.scope", false),
+    ];
+    for (granted, expected) in exact_only {
+        assert_eq!(
+            enabled.matches(granted, "payments.credentials.release"),
+            expected,
+            "enabled exact-only grant {granted:?}"
+        );
+    }
+
+    assert!(!compatibility_default.matches("root.admin", "payments.credentials.release"));
+    assert!(
+        !compatibility_default.matches("operations.breakglass", "payments.credentials.release")
+    );
+    assert!(compatibility_default.matches(
+        "payments.credentials.release",
+        "payments.credentials.release"
+    ));
 }
 
 #[test]
