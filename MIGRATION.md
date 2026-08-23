@@ -1,5 +1,29 @@
 # Migration Guide
 
+## 0.18.0 to 0.19.0: opt-in super-scopes for exact-only requirements
+
+Existing consumers need no configuration change. The compatibility default
+keeps configured super-scopes from satisfying exact-only requirements, while
+direct exact grants remain accepted and wildcard-derived matches remain
+rejected.
+
+A host that wants its configured super-scopes to apply to exact-only
+requirements can enable the policy explicitly:
+
+```rust
+let matcher = HierarchicalScopeMatch::new(
+    HierarchicalScopeOptions::default()
+        .with_super_scopes(["root.admin", "operations.breakglass"])
+        .with_allow_super_scopes_for_exact_only(true)
+        .with_exact_only_scopes(["payments.credentials.release"]),
+)?;
+```
+
+Only exact membership in `super_scopes` receives blanket authority. Wildcards,
+hierarchical wildcard matches, related strings, and unrelated grants do not
+satisfy an exact-only requirement. Disable the option to restore the previous
+behavior. No token, database, role, or stored-scope migration is implied.
+
 ## 0.17.1 to 0.18.0: typed authorization roles and resilient catalogue policy
 
 Existing issuers and validators need no configuration change. The new

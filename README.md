@@ -347,6 +347,14 @@ For typed recent-authentication requests bound to one-time state, see
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
 
+## 0.19.0 Exact-Only Super-Scope Policy
+
+Version 0.19 lets hierarchical-matcher consumers explicitly allow their
+configured super-scopes to satisfy exact-only requirements. The option is off
+by default, exact-only requirements always reject wildcard-derived matches,
+and super-scope recognition remains an exact configured membership check. See
+[Scope matching](docs/scope-matching.md) and the [migration guide](MIGRATION.md).
+
 ## 0.17.1 Compact Default Session Context
 
 Version 0.17.1 omits default unsatisfied MFA state and an absent active business

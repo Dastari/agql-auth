@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.19.0
+
+### Added
+
+- `HierarchicalScopeOptions::allow_super_scopes_for_exact_only` and its
+  builder let hosts explicitly permit configured super-scopes to satisfy
+  exact-only requirements.
+- Language-neutral golden vectors and Rust truth-table coverage for multiple
+  super-scopes, exact grants, wildcard grants, unrelated grants, and similar
+  but unconfigured strings.
+
+### Security
+
+- Exact-only requirements continue to reject every wildcard-derived match.
+  Super-scopes are recognized by exact configured membership only.
+
+### Compatibility / SemVer
+
+- The new policy is disabled by default, preserving 0.18 matcher decisions.
+  Existing exact-only requirements continue to accept only direct exact grants
+  until a host opts in. The additive option makes a pre-1.0 minor release.
+- No token, database, role, or stored-scope migration is required.
+
 ## 0.18.0
 
 ### Added
