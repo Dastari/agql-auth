@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.1
+
+- Declare the MIT license and include its full text, matching graphql-orm.
+- Library source, public API, token formats, and runtime behavior are unchanged.
+
 ## 0.19.0
 
 ### Added
