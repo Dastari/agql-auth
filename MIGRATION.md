@@ -1,5 +1,12 @@
 # Migration Guide
 
+## 0.19.0 to 0.19.1: license declaration
+
+The package now declares MIT licensing and includes `LICENSE`. No source API,
+configuration, token, database, role, or stored-scope migration is needed.
+Select the same published release tag in direct and transitive consumers to
+retain one Cargo source/type universe.
+
 ## 0.18.0 to 0.19.0: opt-in super-scopes for exact-only requirements
 
 Existing consumers need no configuration change. The compatibility default

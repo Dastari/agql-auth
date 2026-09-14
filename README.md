@@ -514,3 +514,7 @@ The host application implements those pieces around the reusable primitives.
 
 See the [release process](docs/release-process.md) for validation, human-approved
 GitHub releases, immutable version tags, and source-manifest verification.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
