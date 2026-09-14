@@ -1,8 +1,7 @@
 # Rust build output
 /target/
 
-# Library crate lockfile policy
-Cargo.lock
+# Release validation retains the reviewed library Cargo.lock
 
 # Local environment and secrets
 .env
@@ -23,3 +22,8 @@ Thumbs.db
 *.temp
 *.bak
 *.orig
+
+# Release validation caches and local evidence
+__pycache__/
+/release-dist/
+/.handoff/

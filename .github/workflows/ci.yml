@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      target_ref:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [default, no-default-features]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.lane }}
+      - name: Validate release metadata and formatting
+        run: |
+          scripts/check-release-state.sh
+          scripts/check-package-release-policy.sh
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          cargo fmt --all -- --check
+      - name: Validate crate lane
+        env:
+          LANE: ${{ matrix.lane }}
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ "$LANE" == no-default-features ]]; then
+            features=(--no-default-features)
+          fi
+          cargo clippy --locked --all-targets "${features[@]}" -- -D warnings
+          cargo test --locked "${features[@]}"
+          cargo doc --locked --no-deps "${features[@]}"

@@ -31,7 +31,7 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 
 ```toml
 [dependencies]
-agql-auth = "0.14"
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1d2e9fe2e1576105212a7b340a11abf8cad0382d", version = "0.19.0" }
 ```
 
 ## Basic Usage
@@ -509,3 +509,8 @@ are no public API or storage migrations from `0.8.0`.
 - business authorization beyond roles, scopes, and guard helpers
 
 The host application implements those pieces around the reusable primitives.
+
+## Releasing
+
+See the [release process](docs/release-process.md) for validation, human-approved
+GitHub releases, immutable version tags, and source-manifest verification.

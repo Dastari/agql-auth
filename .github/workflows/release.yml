@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version matching Cargo.toml (without the v prefix)
+        required: true
+        type: string
+      target_ref:
+        description: Full commit SHA of current main
+        required: true
+        type: string
+      prerelease:
+        description: Mark this immutable release as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agql-auth-release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require current main and an unused release identity
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+          VERSION: ${{ inputs.version }}
+          WORKFLOW_REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$WORKFLOW_REF" = refs/heads/main
+          # Naming an environment is insufficient: fail closed if its human gate is absent.
+          protection=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
+            --jq '.protection_rules | any(.type == "required_reviewers" and any(.reviewers[]; .type == "User" and .reviewer.login == "Dastari"))')
+          test "$protection" = true
+          [[ "$TARGET_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch origin main --tags
+          test "$(git rev-parse HEAD)" = "$TARGET_REF"
+          test "$TARGET_REF" = "$(git rev-parse origin/main)"
+          test "$VERSION" = "$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
+            echo "release tag already exists" >&2
+            exit 1
+          fi
+          scripts/check-release-state.sh
+          scripts/check-package-release-policy.sh
+
+  validate:
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+    with:
+      target_ref: ${{ inputs.target_ref }}
+
+  semver:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check compatibility with the last version tag
+        run: |
+          cargo install cargo-semver-checks --version 0.46.0 --locked
+          cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)" --default-features
+
+  release:
+    needs: [guard, validate, semver]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - name: Recheck source and generate the release manifest
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          test "$(git rev-parse HEAD)" = "$TARGET_REF"
+          test "$TARGET_REF" = "$(git rev-parse origin/main)"
+          if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
+            echo "release tag already exists" >&2
+            exit 1
+          fi
+          mkdir release-dist
+          python3 scripts/release.py manifest --output "release-dist/v$VERSION.json"
+          cd release-dist
+          sha256sum -- *.json > SHA256SUMS
+      - name: Attest every release asset
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release-dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v${{ inputs.version }}
+          path: release-dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Tag and publish the validated source
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_REF: ${{ inputs.target_ref }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "v$VERSION" "$TARGET_REF" -m "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+          flags=()
+          if [[ "$PRERELEASE" == true ]]; then
+            flags=(--prerelease)
+          fi
+          gh release create "v$VERSION" --verify-tag --draft --title "v$VERSION" \
+            --notes "Source release at $TARGET_REF. See CHANGELOG.md and MIGRATION.md at this tag." \
+            "${flags[@]}" release-dist/*
+          gh release edit "v$VERSION" --draft=false
