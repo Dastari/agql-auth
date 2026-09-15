@@ -63,15 +63,41 @@ def check_policy(base=None):
     print(f"release-policy: {base} -> {version} passed")
 
 
-def manifest(output):
+def release_identity():
     version = check_state()
     require(not git("status", "--porcelain", "--untracked-files=no").strip(),
-            "manifest requires a clean committed tree")
+            "a clean committed tree is required")
     git("ls-files", "--error-unmatch", "Cargo.lock")
-    commit = git("rev-parse", "HEAD").decode().strip()
+    return version, git("rev-parse", "HEAD").decode().strip()
+
+
+def manifest(output):
+    version, commit = release_identity()
     data = {"commit": commit, "version": version, "tag": f"v{version}",
             "cargoLock": hashlib.sha256(git("show", "HEAD:Cargo.lock")).hexdigest()}
     Path(output).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def render_notes(version, commit):
+    return "\n".join([
+        f"# v{version}",
+        "",
+        "This is an immutable, Git-only source release.",
+        f'Consumers pin the annotated release tag (`tag = "v{version}"`) as the Git',
+        f"reference for this library, and record the commit `{commit}` from the",
+        "attached manifest in their own reviewed pin record.",
+        "A published release tag is annotated and is never moved, so the tag and the",
+        "recorded commit remain one identity.",
+        "",
+        "The attached `v<version>.json` manifest is the canonical release record; see",
+        "`CHANGELOG.md` and `MIGRATION.md` at this tag.",
+        "",
+    ])
+
+
+def notes(output):
+    version, commit = release_identity()
+    Path(output).write_text(render_notes(version, commit))
 
 
 def main():
@@ -83,6 +109,8 @@ def main():
     commands.add_parser("baseline")
     generate = commands.add_parser("manifest")
     generate.add_argument("--output", required=True)
+    body = commands.add_parser("notes")
+    body.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.command == "check-state":
         print(f"release-state: {check_state()} passed")
@@ -90,6 +118,8 @@ def main():
         check_policy(args.base)
     elif args.command == "baseline":
         print(latest_tag())
+    elif args.command == "notes":
+        notes(args.output)
     else:
         manifest(args.output)
 

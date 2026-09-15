@@ -112,6 +112,8 @@ jobs:
           fi
           mkdir release-dist
           python3 scripts/release.py manifest --output "release-dist/v$VERSION.json"
+          # Notes are the release body, not an attested asset, so keep them out of release-dist.
+          python3 scripts/release.py notes --output release-notes.md
           cd release-dist
           sha256sum -- *.json > SHA256SUMS
       - name: Attest every release asset
@@ -141,6 +143,6 @@ jobs:
             flags=(--prerelease)
           fi
           gh release create "v$VERSION" --verify-tag --draft --title "v$VERSION" \
-            --notes "Source release at $TARGET_REF. See CHANGELOG.md and MIGRATION.md at this tag." \
+            --notes-file release-notes.md \
             "${flags[@]}" release-dist/*
           gh release edit "v$VERSION" --draft=false

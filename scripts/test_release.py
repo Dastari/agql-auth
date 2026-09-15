@@ -92,6 +92,17 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "clean committed tree"):
             release.manifest(output)
 
+    def test_notes_pin_the_tag_and_record_the_manifest_commit(self):
+        output = self.root / "notes.md"
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.notes(output)
+        body = output.read_text()
+        commit = self.git("rev-parse", "HEAD").decode().strip()
+        self.assertIn('tag = "v0.19.0"', body)
+        self.assertIn(commit, body)
+        self.assertIn("attached manifest", body)
+        self.assertIn("never moved", body)
+
     def test_untracked_lock_is_rejected(self):
         self.git("rm", "--cached", "Cargo.lock")
         self.git("commit", "-qm", "untrack lock")
