@@ -8,6 +8,14 @@ immutable annotated `v<version>` tags, beginning with `v0.19.0`. Historical
 The attached `v<version>.json` records `commit`, `version`, `tag`, and `cargoLock`
 (the SHA-256 of the committed lockfile). Both it and `SHA256SUMS` are attested.
 
+Consumers pin the release tag, for example `tag = "v0.19.1"`, as the Git
+reference for this library, and record the commit from that release's attached
+manifest in their own reviewed pin record. A published release tag is annotated
+and is never moved, so the tag and the recorded commit remain one identity; a
+consumer lockfile that resolves the tag to a different commit is the detection
+point. `scripts/release.py notes` renders this release body from the same
+checked release identity, and the publication workflow attaches it.
+
 ## Version policy
 
 Source, build script, or Cargo manifest changes since the last reachable `v*`
@@ -54,6 +62,11 @@ python3 scripts/release.py manifest --output /tmp/agql-auth-release.json
 ```
 
 The manifest is deterministic for that commit and requires a tracked lockfile.
+Preview the release body the same way:
+
+```bash
+python3 scripts/release.py notes --output /tmp/agql-auth-release.md
+```
 
 ## Publish through GitHub Actions
 
