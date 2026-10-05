@@ -46,6 +46,18 @@ and factor verification cannot be held inside a storage transaction. A burst
 may begin before another failure activates lockout, but every resulting failure
 is recorded through CAS and none is lost.
 
+Password login applies the same configured credential controls to unknown,
+disabled, and enabled/wrong-password attempts. Unknown and disabled accounts
+perform one verification against the fixed dummy Argon2 hash; enabled accounts
+use their stored hash. Disabled correct-password attempts are failures too.
+An admitted disabled attempt returns `UserDisabled`, never clears attempts,
+and never enters access/refresh issuance. Already active controls reject before
+password work; persistence errors propagate through the safe public error map.
+The threshold-activating failure returns its credential error, and the next
+attempt receives throttling/lockout. There is no constant-time guarantee across
+host-chosen stored hash parameters and no change to the deliberately distinct
+public `USER_DISABLED` error.
+
 ## Record Versus Clear
 
 Before credential verification, the service remembers the observed revision
@@ -99,6 +111,8 @@ Downstream adapters should run the same store against these cases:
 - safe public errors that contain no normalized principal, client address, or
   opaque `value_hash`.
 
-The in-memory implementation and crate test suite exercise this contract. A
-database adapter should repeat it against an isolated test database; the crate
-does not require a live consumer integration or prescribe a schema.
+The in-memory implementation and crate test suite exercise this contract.
+Test-only consumer adapters also execute the password-login contract against
+SQLite and PostgreSQL in CI. See [commands and review evidence](password-login-review.md).
+These isolated fixtures prescribe no production schema or downstream policy;
+consumer adapters should repeat the contract against their own isolated store.

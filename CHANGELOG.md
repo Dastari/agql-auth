@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.2
+
+- Disabled password-login attempts now perform the existing dummy Argon2
+  verification and consume configured principal/client credential controls
+  through the engine's CAS recorder, including correct-password attempts.
+- Preserve `UserDisabled` / `USER_DISABLED` for admitted disabled attempts;
+  active backoff/lockout and safe persistence errors retain precedence.
+  Disabled attempts never clear counters or enter token/session issuance.
+- Add deterministic password-work/issuance assertions and executable SQLite
+  and PostgreSQL consumer-store conformance fixtures in CI.
+- No public API, token format, store contract, production dependency, or schema
+  change. See the migration guide and password-login review for behavior notes.
+
 ## 0.19.1
 
 - Declare the MIT license and include its full text, matching graphql-orm.
