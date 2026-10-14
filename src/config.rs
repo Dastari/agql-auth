@@ -26,13 +26,13 @@ pub struct AuthConfig {
     pub jwt_secret: String,
     /// Configured local JWT signing mode.
     pub jwt_signing: JwtSigningConfig,
-    /// Ordinary session access-token lifetime (at least one second).
+    /// Ordinary session access-token lifetime.
     pub access_token_ttl: Duration,
     /// Maximum allowed access-token lifetime for custom TTLs.
     ///
     /// Used by access-token-only and delegated grants. Ordinary refreshable
     /// sessions use `access_token_ttl` independently; hosts must configure that
-    /// lifetime separately. This ceiling must be at least one second.
+    /// lifetime separately.
     pub max_access_token_ttl: Duration,
     /// Maximum lifetime of an existing-session-bound delegated access token.
     ///
@@ -183,19 +183,15 @@ impl AuthConfig {
             ));
         }
         let now = time::OffsetDateTime::now_utc();
-        crate::util::checked_jwt_expiry(now, self.access_token_ttl, "access-token ttl")?;
-        crate::util::checked_jwt_expiry(
-            now,
-            self.max_access_token_ttl,
-            "access-token maximum ttl",
-        )?;
+        crate::util::checked_expiry(now, self.access_token_ttl, "access-token ttl")?;
+        crate::util::checked_expiry(now, self.max_access_token_ttl, "access-token maximum ttl")?;
         crate::util::checked_expiry(now, self.refresh_token_ttl, "refresh-token ttl")?;
 
-        if self.max_session_bound_delegation_ttl < Duration::seconds(1)
+        if self.max_session_bound_delegation_ttl <= Duration::ZERO
             || self.max_session_bound_delegation_ttl > self.max_access_token_ttl
         {
             return Err(AuthError::InvalidConfiguration(
-                "session-bound delegation ttl ceiling must be at least one second and not exceed the access-token maximum"
+                "session-bound delegation ttl ceiling must be positive and not exceed the access-token maximum"
                     .to_string(),
             ));
         }

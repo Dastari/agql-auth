@@ -853,9 +853,9 @@ where
         validate_access_token_only_request(&request, &self.config)?;
         let now = OffsetDateTime::now_utc();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
-        if ttl < Duration::seconds(1) {
+        if ttl <= Duration::ZERO {
             return Err(AuthError::InvalidConfiguration(
-                "access-token-only ttl must be at least one second".to_string(),
+                "access-token-only ttl must be greater than zero".to_string(),
             ));
         }
         if ttl > self.config.max_access_token_ttl {
@@ -1877,9 +1877,9 @@ fn validate_access_token_ttl_and_claims(
     config: &AuthConfig,
 ) -> AuthResult<()> {
     if let Some(ttl) = ttl {
-        if ttl < Duration::seconds(1) {
+        if ttl <= Duration::ZERO {
             return Err(AuthError::InvalidConfiguration(
-                "access-token-only ttl must be at least one second".to_string(),
+                "access-token-only ttl must be greater than zero".to_string(),
             ));
         }
         if ttl > config.max_access_token_ttl {

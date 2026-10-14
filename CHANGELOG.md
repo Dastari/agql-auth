@@ -3,7 +3,7 @@
 ## 0.20.3
 
 - Reject empty issuer/audience, nonpositive or unrepresentable configured
-  lifetimes, and subsecond JWT lifetimes before issuance. Use checked expiry
+  lifetimes, and JWT expiries that round into the issuance second. Use checked expiry
   arithmetic for session, API, purpose, challenge, and password-reset tokens.
 - Reject unrepresentable signed access-token timestamps and use wide arithmetic
   for leeway checks, preventing overflow and loss of expiry metadata.

@@ -35,12 +35,13 @@ pub(crate) fn checked_jwt_expiry(
     ttl: Duration,
     name: &str,
 ) -> AuthResult<OffsetDateTime> {
-    if ttl < Duration::seconds(1) {
+    let expiry = checked_expiry(now, ttl, name)?;
+    if expiry.unix_timestamp() <= now.unix_timestamp() {
         return Err(AuthError::InvalidConfiguration(format!(
-            "{name} must be at least one second"
+            "{name} expires within the issuance second"
         )));
     }
-    checked_expiry(now, ttl, name)
+    Ok(expiry)
 }
 
 pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {

@@ -93,12 +93,7 @@ async fn impossible_expiries_fail_before_credential_storage() {
         )),
         Err(AuthError::InvalidConfiguration(_))
     ));
-    for ttl in [
-        Duration::ZERO,
-        Duration::seconds(-1),
-        Duration::nanoseconds(1),
-        Duration::MAX,
-    ] {
+    for ttl in [Duration::ZERO, Duration::seconds(-1), Duration::MAX] {
         assert!(matches!(
             auth.issue_password_reset_token_with_ttl("fixture", ttl),
             Err(AuthError::InvalidConfiguration(_))
@@ -137,5 +132,14 @@ fn invalid_or_overflowing_reauthorization_schedule_requires_an_immediate_check()
         );
     }
     assert!(crate::util::checked_jwt_expiry(now, Duration::nanoseconds(1), "fixture").is_err());
+    // Fractional TTLs remain valid when they cross into a future JWT second.
+    let late_in_second = now + Duration::milliseconds(900);
+    assert_eq!(
+        crate::util::checked_jwt_expiry(late_in_second, Duration::milliseconds(200), "fixture")
+            .unwrap()
+            .unix_timestamp(),
+        1
+    );
+
     assert!(crate::util::checked_expiry(now, Duration::MAX, "fixture").is_err());
 }

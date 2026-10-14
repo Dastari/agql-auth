@@ -4,8 +4,9 @@
 
 Issuer and audience must contain non-whitespace characters. Ordinary access,
 custom-grant maximum, and refresh lifetimes must be positive and produce a
-representable timestamp. JWT lifetimes (access, purpose, reset) must be at least
-one second because their expiry uses whole-second NumericDate values. Invalid
+representable timestamp. JWT expiry (access, purpose, reset) must fall in a later whole second than
+issuance because NumericDate has second precision. Positive fractional TTLs
+remain supported when their resulting expiry crosses that boundary. Invalid
 configuration or expiry arithmetic returns `InvalidConfiguration`; issuance no
 longer panics or deliberately creates expired credentials from negative TTLs.
 Use a test-owned signed fixture or validator clock to test expiration.
