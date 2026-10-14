@@ -14,6 +14,10 @@
 
 ## 0.19.2
 
+- Pin CI and release actions to full revisions while preserving explicit token
+  permissions and all validation lanes. Workflow maintenance only; no API or
+  consumer migration change.
+
 - Disabled password-login attempts now perform the existing dummy Argon2
   verification and consume configured principal/client credential controls
   through the engine's CAS recorder, including correct-password attempts.
