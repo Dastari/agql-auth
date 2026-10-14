@@ -103,6 +103,7 @@ mod grant;
 mod graphql;
 mod guards;
 mod keys;
+mod memory_rate_limit;
 mod models;
 mod oidc;
 mod oidc_authorization;
@@ -235,3 +236,5 @@ pub type AuthResult<T> = Result<T, AuthError>;
 pub use crate::refresh_authority::{
     CurrentRefreshGrant, RefreshGrantAuthority, RefreshGrantSource,
 };
+
+pub use memory_rate_limit::DEFAULT_MEMORY_AUTH_RATE_LIMIT_CAPACITY;

@@ -108,3 +108,5 @@ pub use crate::validator::{AccessTokenValidator, AccessTokenValidatorBuilder};
 pub use crate::refresh_authority::{
     CurrentRefreshGrant, RefreshGrantAuthority, RefreshGrantSource,
 };
+
+pub use crate::DEFAULT_MEMORY_AUTH_RATE_LIMIT_CAPACITY;
