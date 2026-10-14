@@ -26,6 +26,14 @@ the latest reachable version tag. Workflow, scripts, lockfile and documentation
 maintenance alone do not require a version bump. Review dependency compatibility
 when changing the lockfile even though it does not set the library version.
 
+External GitHub Actions use full commit SHA pins with upstream version comments.
+Review the selected revision, composite dependencies and downloaded tools when
+updating a pin; entry-point pinning does not make transitive downloads immutable.
+Workflow tokens default to read-only contents; publication alone receives the
+explicit write and attestation permissions it needs. Preserve all validation
+lanes and the protected release gate when maintaining workflows, following
+[GitHub's secure-use guidance](https://docs.github.com/en/actions/reference/security/secure-use).
+
 ## Prepare the release commit
 
 1. Branch from current `main`; update source, version, changelog and migration
