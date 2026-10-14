@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -27,11 +28,23 @@ pub const DEFAULT_MEMORY_AUTH_RATE_LIMIT_CAPACITY: usize = 16_384;
 /// Clones share the same state, capacity, and trusted clock. Hosts injecting an
 /// authentication rate-limit clock must supply the same time basis here.
 /// Multi-instance applications still need a durable [`AuthRateLimitStore`].
-#[derive(Clone)]
 pub struct MemoryAuthRateLimitStore {
     states: Arc<Mutex<MemoryState>>,
     capacity: NonZeroUsize,
-    clock: Arc<dyn Clock>,
+    // Every clock read occurs while holding states. A clock panic poisons that
+    // mutex, and all subsequent authoritative operations fail closed before
+    // reading the clock. Preserve the store's existing unwind-safe auto traits.
+    clock: AssertUnwindSafe<Arc<dyn Clock>>,
+}
+
+impl Clone for MemoryAuthRateLimitStore {
+    fn clone(&self) -> Self {
+        Self {
+            states: self.states.clone(),
+            capacity: self.capacity,
+            clock: AssertUnwindSafe(self.clock.0.clone()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -96,7 +109,7 @@ impl MemoryAuthRateLimitStore {
         Self {
             states: Arc::default(),
             capacity,
-            clock,
+            clock: AssertUnwindSafe(clock),
         }
     }
 
@@ -229,5 +242,47 @@ mod tests {
         assert_eq!(states.purge_expired(now + Duration::seconds(999)), 0);
         assert_eq!(states.purge_expired(now + Duration::seconds(1000)), 1);
         assert!(states.expirations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod unwind_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct PanickingClock(AtomicBool);
+    impl Clock for PanickingClock {
+        fn now(&self) -> OffsetDateTime {
+            assert!(
+                !self.0.swap(false, Ordering::SeqCst),
+                "synthetic clock panic"
+            );
+            OffsetDateTime::UNIX_EPOCH
+        }
+    }
+
+    #[tokio::test]
+    async fn clock_panics_poison_the_store_and_fail_closed_after_catch_unwind() {
+        fn existing_auto_traits<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        existing_auto_traits::<MemoryAuthRateLimitStore>();
+        let store = MemoryAuthRateLimitStore::with_capacity_and_clock(
+            NonZeroUsize::new(1).unwrap(),
+            Arc::new(PanickingClock(AtomicBool::new(true))),
+        );
+        assert!(std::panic::catch_unwind(|| store.purge_expired()).is_err());
+        assert!(matches!(
+            store.purge_expired(),
+            Err(AuthError::AuthServiceUnavailable)
+        ));
+        let key = AuthRateLimitKey {
+            flow: crate::AuthRateLimitFlow::PasswordLogin,
+            bucket: crate::AuthRateLimitBucket::Principal,
+            value_hash: "synthetic-key".into(),
+        };
+        assert!(matches!(
+            store.find_auth_rate_limit_state(&key).await,
+            Err(AuthError::AuthServiceUnavailable)
+        ));
     }
 }
