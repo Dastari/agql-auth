@@ -1,5 +1,15 @@
 # Migration Guide
 
+## 0.20.1 to 0.20.2: combined bearer validation
+
+No API, persisted-data, or configuration migration is required. `CombinedAuth`
+now passes the original header to `AccessTokenAuth::authenticate_bearer`, whose
+contract accepts the bearer input according to the validator's configured policy.
+Custom implementations must parse the optional Bearer scheme as documented;
+they must not rely on the combined injector stripping it. Do not weaken
+`BearerParseMode::RequireBearer` to work around the former rejection of valid
+headers. Raw JWTs remain rejected when that policy is enabled.
+
 ## 0.20.0 to 0.20.1: bounded process-local abuse state
 
 `MemoryAuthRateLimitStore::default()` now holds at most 16,384 live records and
