@@ -14,6 +14,35 @@ permissions:
   contents: read
 
 jobs:
+  consumer-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: agql_test
+          POSTGRES_PASSWORD: agql_test
+          POSTGRES_DB: agql_conformance
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agql_test -d agql_conformance"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install consumer fixture tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run the same contract against SQLite and PostgreSQL
+        env:
+          AGQL_AUTH_TEST_POSTGRES_URL: postgresql://agql_test:agql_test@127.0.0.1:5432/agql_conformance
+        run: cargo test --locked password_login_consumer_conformance -- --ignored
+
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 30

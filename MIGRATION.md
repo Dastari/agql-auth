@@ -1,5 +1,30 @@
 # Migration Guide
 
+## 0.19.1 to 0.19.2: disabled password-login abuse protection
+
+No API, token, store, schema, or configuration migration is required. Disabled
+password-login attempts now do one dummy Argon2 verification and record a
+credential failure in both available principal/client buckets. This includes
+correct passwords and invalid stored hashes. The dummy hash uses the engine's
+default Argon2 work parameters, also used for unknown principals; hosts with
+custom stored hash parameters should not interpret this as constant-time
+equivalence to every enabled-account verification.
+
+Admitted attempts still return `UserDisabled` (`USER_DISABLED` in GraphQL).
+Repeated attempts can now activate `AuthThrottled` or `AuthLocked`, including
+for other principals sharing the client bucket. Active controls reject before
+password work. Failure to persist counters returns the existing safe
+`AUTH_SERVICE_UNAVAILABLE` error. A disabled attempt never clears failures or
+issues access/refresh authority. Only an admitted enabled correct-password
+login conditionally clears the revisions observed before verification, then
+issues a session.
+
+Merge and publish through the owner-controlled release process. Consumers
+select the reviewed immutable release tag and record its manifest commit,
+keeping direct and transitive dependencies on one Cargo source identity;
+no dependency exception is required. See
+[review and executable evidence](docs/password-login-review.md).
+
 ## 0.19.0 to 0.19.1: license declaration
 
 The package now declares MIT licensing and includes `LICENSE`. No source API,

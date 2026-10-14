@@ -118,6 +118,10 @@ pub struct AuthService<U, R> {
     scope_matcher: Arc<dyn ScopeMatch>,
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
+    #[cfg(test)]
+    pub(super) password_work: std::sync::Mutex<Vec<String>>,
+    #[cfg(test)]
+    pub(super) token_work: std::sync::atomic::AtomicUsize,
 }
 
 impl<U, R> AuthService<U, R>
@@ -195,6 +199,10 @@ where
             rate_limit_store,
             rate_limit_clock,
             argon2: Argon2::default(),
+            #[cfg(test)]
+            password_work: std::sync::Mutex::default(),
+            #[cfg(test)]
+            token_work: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -250,15 +258,26 @@ where
     pub fn verify_password(&self, password: &str, password_hash: &str) -> AuthResult<()> {
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
-        self.argon2
+        let result = self
+            .argon2
             .verify_password(password.as_bytes(), &parsed_hash)
-            .map_err(|_| AuthError::InvalidCredentials)
+            .map_err(|_| AuthError::InvalidCredentials);
+        #[cfg(test)]
+        self.password_work
+            .lock()
+            .unwrap()
+            .push(password_hash.to_owned());
+        result
     }
 
     /// Performs password login and issues a local session.
     ///
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
+    /// Disabled accounts perform dummy password work and record a credential
+    /// failure before returning [`AuthError::UserDisabled`]. Active abuse
+    /// controls and store errors take precedence; disabled attempts never
+    /// clear counters or issue a session.
     pub async fn login(
         &self,
         principal: &str,
@@ -279,6 +298,11 @@ where
         };
 
         if user.disabled {
+            // Disabled accounts cannot authenticate. Use the same fixed work as
+            // unknown accounts, independent of their stored hash or password.
+            let _ = self.verify_password(password, DUMMY_PASSWORD_HASH);
+            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
+                .await?;
             return Err(AuthError::UserDisabled);
         }
 
@@ -1072,6 +1096,9 @@ where
         metadata: ClientMetadata,
         now: OffsetDateTime,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
+        #[cfg(test)]
+        self.token_work
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         auth_user.token_claims.grant_kind = Some(AccessTokenGrantKind::UserSession);
         if let Some(provider) = &self.additional_token_roles_provider {
             let additional = provider.additional_token_roles(&auth_user).await?;
