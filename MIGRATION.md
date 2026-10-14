@@ -3,7 +3,8 @@
 ## 0.19.2 to 0.20.0: current authority and sensitive operations
 
 Persist the new `StoredRefreshToken.grant_source`, `roles`, and
-`authorization_roles` fields in every store insert/read/rotation transaction. Serialized records missing provenance
+`authorization_roles` fields in every store insert/read/rotation transaction.
+Serialized records missing provenance
 load as `RefreshGrantSource::Legacy` and cannot refresh. Reauthenticate those
 sessions; do not infer provenance from `auth_method` or bulk-label historical
 host/OIDC grants as password grants. Rust struct literals need all three fields.
@@ -627,7 +628,7 @@ No existing call-site, database, token, session, or serialized-record migration
 is required. Version 0.9.0 adds opt-in APIs for disconnected or long-lived work.
 
 Persist `AuthPrincipal::reference()` instead of a bearer token or a cloned
-roles/scopes/typed authorization roles snapshot. Implement `CurrentPrincipalResolver` in the host using
+roles/scopes snapshot. Implement `CurrentPrincipalResolver` in the host using
 its authoritative session/token and membership stores. Before every protected
 operation, resolve the reference and use only the roles, scopes, assurance, and
 status on the returned `ResolvedPrincipal`.
@@ -703,7 +704,7 @@ policy accepts the provider values. A missing value, `NoopClaimsMapper`, and
 
 `StoredRefreshToken` adds `refreshable_metadata: Option<RefreshableTokenMetadata>`.
 `SessionContext`, already stored in the refresh record, adds optional
-`assurance`. JSON/document stores can deploy the new reader first: all three fields
+`assurance`. JSON/document stores can deploy the new reader first: both fields
 use Serde defaults and missing values become `None`.
 
 For relational stores, add nullable JSON columns (or equivalent typed columns):

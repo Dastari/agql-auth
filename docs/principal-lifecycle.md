@@ -57,8 +57,8 @@ session, family, tenant, and session version continuity while retaining the
 delegation bindings on the reference for the protected operation to enforce.
 
 Rehydrate before every protected operation, after approval, before external
-disclosure, and before each sensitive subscription event or job action. Periodic checks
-are an additional connection-lifetime measure, not immediate revocation.
+disclosure, and before each sensitive subscription event or job action. Periodic
+checks are an additional connection-lifetime measure, not immediate revocation.
 
 `VerifiedActiveUserSessionResolver` is the stricter read-only adapter used by
 session-bound token issuance. It must not touch idle expiry or interactive
@@ -97,7 +97,8 @@ policy/context injection. Supply `now` from the trusted evaluation clock
 immediately before calling; do not reuse old timestamps or successful results.
 Durable-job resolvers may return refreshed credentials; the sensitive-operation
 helper instead requires exact accepted token identity, with the explicit
-session-bound-delegation parent exception below. Keep the original credential bindings available for
+session-bound-delegation parent exception below. Keep the original credential
+bindings available for
 resource/operation/tenant/audience/purpose/confirmation enforcement. Signature
 validation, periodic checks and always-active checkers do not establish immediate
 revocation. Missing authority or status must deny. A decision observes state at

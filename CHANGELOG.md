@@ -85,7 +85,7 @@
 
 - Newly serialized `SessionContext` values omit the default unsatisfied MFA
   object and absent active business scope. Deserialization continues to
-  default all three fields, while non-default MFA and active-scope values retain
+  default both fields, while non-default MFA and active-scope values retain
   their existing wire shape.
 
 ### Compatibility / SemVer
