@@ -759,6 +759,15 @@ pub struct StoredRefreshToken {
     pub session_id: Uuid,
     /// Session-family ID used for replay revocation.
     pub session_family_id: Uuid,
+    /// Authority source. Legacy records fail closed until reauthentication.
+    #[serde(default)]
+    pub grant_source: crate::RefreshGrantSource,
+    /// Typed authorization-role ceiling, narrowed monotonically on rotation.
+    #[serde(default)]
+    pub authorization_roles: Vec<String>,
+    /// Role ceiling, narrowed monotonically on rotation.
+    #[serde(default)]
+    pub roles: Vec<String>,
     /// Local scopes bound to refresh-token rotation.
     #[serde(default)]
     pub scopes: Vec<String>,

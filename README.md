@@ -518,3 +518,10 @@ GitHub releases, immutable version tags, and source-manifest verification.
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+Sensitive operations require immediate current-status and current-authority
+checks through `revalidate_sensitive_principal`; see [principal lifecycle](docs/principal-lifecycle.md)
+and the [0.20 migration](MIGRATION.md). Host/OIDC refresh requires an explicit
+`RefreshGrantAuthority`; password refresh narrows grants against StoredUser.
+
+See the [compilable current-authority boundary example](examples/current-authority.rs).

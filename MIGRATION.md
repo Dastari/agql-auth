@@ -1,5 +1,56 @@
 # Migration Guide
 
+## 0.19.2 to 0.20.0: current authority and sensitive operations
+
+Persist the new `StoredRefreshToken.grant_source`, `roles`, and
+`authorization_roles` fields in every store insert/read/rotation transaction.
+Serialized records missing provenance
+load as `RefreshGrantSource::Legacy` and cannot refresh. Reauthenticate those
+sessions; do not infer provenance from `auth_method` or bulk-label historical
+host/OIDC grants as password grants. Rust struct literals need all three fields.
+
+Password login records `StoredUser` provenance. Each rotation intersects prior
+roles/scopes with the current enabled user's roles/scopes. Typed authorization
+roles are intersected with the current `AdditionalTokenRolesProvider` result.
+Both ceilings narrow monotonically. Removal survives
+later rotations even if the user's authority is restored; new permissions need
+new authentication. Roles no longer expand during refresh.
+
+All host issuance APIs, including OIDC callbacks and host-verified password
+flows, record `Host` provenance. Install `with_refresh_grant_authority` with a
+`RefreshGrantAuthority` that reads current durable provider/custom grants,
+checks revocation and tenant membership, and returns `CurrentRefreshGrant`.
+Without it, refresh returns `Forbidden`; issuance itself remains available.
+The returned roles/scopes are intersected with the prior grant, so an external
+scope need not exist on StoredUser and an intentionally downscoped grant cannot
+widen. Disabled/deleted local users always fail before the host hook.
+
+Access-token signature validation still proves a signed snapshot. Sensitive
+operations must call `revalidate_sensitive_principal` at evaluation time using
+an authoritative `TokenStatusChecker` and `CurrentPrincipalResolver`. Neither
+periodic WebSocket checks nor `AlwaysActiveTokenStatus` meets immediate
+revocation requirements. Check account/token/session/family revocation for
+user sessions and the opaque token's current record for API principals; reject
+unsupported principal kinds or unavailable stores. The resolver must preserve
+the exact accepted credential reference (including token ID), reject disabled
+or deleted accounts, and supply current authority. This helper narrows roles,
+scopes and typed authorization roles while preserving accepted assurance and
+all token metadata. Supply `now` from the trusted evaluation clock immediately
+before calling; never reuse an old timestamp or cache a successful result.
+Existing durable-job resolvers may return a refreshed credential; this sensitive
+operation helper instead requires exact accepted credential identity, with the
+explicit delegation-parent exception described in the lifecycle guide.
+Hosts still enforce audience, purpose, sender confirmation,
+resource, operation and tenant bindings using the original accepted principal.
+Do not project away these restrictions before policy evaluation.
+
+The refresh decision reads authority before atomic refresh-store rotation. A
+completed permission removal visible to that read is reflected in new tokens;
+concurrent changes after the read require host transaction/version fencing.
+Immediate revalidation observes authority at evaluation, without promising to
+undo writes after a later revocation. Do not cache its result across sensitive
+operations or subscription events.
+
 ## 0.19.1 to 0.19.2: disabled password-login abuse protection
 
 No API, token, store, schema, or configuration migration is required. Disabled

@@ -228,3 +228,10 @@ Unknown `kid` values can trigger one forced JWKS refresh, but repeated unknown
 keys are throttled by `jwks_forced_refresh_cooldown` to avoid hammering the
 identity provider. Set the cooldown to zero only in tests or when another layer
 already rate-limits callbacks.
+
+## Current authority for sensitive operations
+
+See [principal lifecycle](principal-lifecycle.md#current-authority-for-sensitive-operations)
+for immediate fail-closed status/current-grant checks and the
+[0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
+for refresh provenance, stored role ceilings, and mandatory host/OIDC authority.

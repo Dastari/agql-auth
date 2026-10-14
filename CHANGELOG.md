@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.20.0
+
+- Refresh rotation intersects prior roles/scopes with current authority. Password
+  sessions use StoredUser; host/OIDC sessions require RefreshGrantAuthority.
+  Typed authorization roles also retain a persisted, monotonically narrowing
+  ceiling against the current AdditionalTokenRolesProvider result.
+- Persist refresh grant provenance and role ceilings; legacy records require
+  reauthentication rather than silently inheriting a guessed grant source.
+- Add revalidate_sensitive_principal for immediate, fail-closed current-authority
+  and token-status checks while preserving accepted credential bindings.
+- Breaking storage/refresh migration: see MIGRATION.md.
+
 ## 0.19.2
 
 - Pin CI and release actions to full revisions while preserving explicit token
