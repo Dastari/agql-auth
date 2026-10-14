@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.20.2
+
+- Preserve the original Authorization header when `CombinedAuth` delegates a
+  user JWT to its validator. `RequireBearer` now accepts a valid Bearer header
+  through the combined injector while still rejecting a raw JWT. API-token
+  selection and expired/invalid JWT failure behavior are unchanged.
+
 ## 0.20.1
 
 - Bound default process-local abuse state to 16,384 records and reclaim expired

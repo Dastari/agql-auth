@@ -500,6 +500,8 @@ are no public API or storage migrations from `0.8.0`.
 - Resource servers should use `AccessTokenValidator` instead of constructing
   `AuthService` just to validate JWTs.
 - Use `CombinedAuth` for endpoints that accept either user JWTs or API tokens.
+  User validators receive the original Authorization header, preserving their
+  configured Bearer-scheme requirement.
 - Use `issue_access_token_only` for short-lived JWT grants that must not create
   refresh-token rows.
 - Use `ChannelIdentity` only after the host has verified the channel.

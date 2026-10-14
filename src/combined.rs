@@ -71,8 +71,9 @@ where
 
     /// Injects a user JWT or API-token principal into an `async-graphql` request.
     ///
-    /// Missing auth leaves the request unchanged. Expired user JWTs are never
-    /// treated as API-token candidates.
+    /// Missing auth leaves the request unchanged. The original header is passed
+    /// to the user validator so its bearer-scheme policy remains authoritative.
+    /// Expired user JWTs are never treated as API-token candidates.
     pub async fn inject_http_auth(
         &self,
         request: Request,
@@ -86,7 +87,7 @@ where
         let runtime = AuthRuntime::new(self.access_tokens.scope_matcher());
 
         if token.contains('.') {
-            match self.access_tokens.authenticate_bearer(token) {
+            match self.access_tokens.authenticate_bearer(raw) {
                 Ok(user) => return Ok(inject_user(request, runtime, user)),
                 Err(AuthError::AccessTokenExpired) => return Err(AuthError::AccessTokenExpired),
                 Err(AuthError::InvalidAccessToken)

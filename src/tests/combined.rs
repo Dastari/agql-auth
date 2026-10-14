@@ -57,6 +57,54 @@ async fn combined_auth_injects_user_jwt_principal() {
 }
 
 #[tokio::test]
+async fn combined_auth_preserves_the_validators_required_bearer_scheme() {
+    let auth = auth_service(rs256_config());
+    let payload = auth
+        .issue_verified_user_session("user-1", vec![], AuthMethod::Password, metadata())
+        .await
+        .unwrap();
+    let validator = AccessTokenValidator::builder()
+        .issuer("agql-auth")
+        .audience("agql-auth-clients")
+        .rs256_public_pem(RSA_PUBLIC_KEY_A)
+        .key_id("auth-key-1")
+        .bearer_parse_mode(BearerParseMode::RequireBearer)
+        .build()
+        .unwrap();
+    let api_tokens = ApiTokenService::new(Arc::new(MemoryApiTokenStore::default()));
+    let combined = CombinedAuth::new(&validator, &api_tokens);
+    let schema = Schema::build(CombinedQuery, EmptyMutation, EmptySubscription).finish();
+    let header = format!("Bearer {}", payload.access_token);
+    assert!(validator.authenticate_bearer(&header).is_ok());
+    let request = combined
+        .inject_http_auth(
+            Request::new("{ principalSubject }"),
+            Some(&header),
+            metadata(),
+        )
+        .await
+        .expect("valid Bearer header must survive composition");
+    let response = schema.execute(request).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["principalSubject"],
+        "user-1"
+    );
+
+    // Composition must not manufacture a scheme and weaken a strict validator.
+    assert!(
+        combined
+            .inject_http_auth(
+                Request::new("{ principalSubject }"),
+                Some(&payload.access_token),
+                metadata(),
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn combined_auth_injects_api_token_principal() {
     let validator = validator();
     let api_store = MemoryApiTokenStore::default();

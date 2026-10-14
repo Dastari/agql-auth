@@ -144,6 +144,10 @@ unchanged.
 Use `CombinedAuth` when one GraphQL endpoint should accept either a user access
 JWT or an opaque API token:
 
+The user-token validator receives the original Authorization header. A validator
+configured with `BearerParseMode::RequireBearer` requires the scheme even through
+this injector; do not switch it to permissive parsing to accept valid headers.
+
 ```rust
 use agql_auth::CombinedAuth;
 
