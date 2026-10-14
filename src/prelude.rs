@@ -101,6 +101,10 @@ pub use crate::token_decode::{
 };
 pub use crate::token_status::{
     AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,
-    TokenStatusChecker, TokenStatusRequest,
+    TokenStatusChecker, TokenStatusRequest, revalidate_sensitive_principal,
 };
 pub use crate::validator::{AccessTokenValidator, AccessTokenValidatorBuilder};
+
+pub use crate::refresh_authority::{
+    CurrentRefreshGrant, RefreshGrantAuthority, RefreshGrantSource,
+};

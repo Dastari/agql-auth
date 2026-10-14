@@ -57,7 +57,8 @@ session, family, tenant, and session version continuity while retaining the
 delegation bindings on the reference for the protected operation to enforce.
 
 Rehydrate before every protected operation, after approval, before external
-disclosure, and periodically during long-lived subscriptions or jobs.
+disclosure, and before each sensitive subscription event or job action. Periodic checks
+are an additional connection-lifetime measure, not immediate revocation.
 
 `VerifiedActiveUserSessionResolver` is the stricter read-only adapter used by
 session-bound token issuance. It must not touch idle expiry or interactive
@@ -77,3 +78,32 @@ does not replace ordinary application authorization.
 and optional grant reference while retaining the original actor and decision.
 Never put credentials, prompts, request bodies, or protected arguments in this
 metadata.
+
+## Current authority for sensitive operations
+
+See [the 0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
+for mandatory immediate status/current-grant checks and refresh provenance.
+Refresh narrows the previous role/scope ceiling. Password sessions use current
+StoredUser grants; custom/OIDC sessions require `RefreshGrantAuthority`.
+Legacy refresh records require reauthentication. Persist `grant_source` and
+`roles` alongside scopes in the same atomic rotation.
+
+For each sensitive operation or subscription event, use
+`revalidate_sensitive_principal` with an authoritative `TokenStatusChecker`
+and `CurrentPrincipalResolver`, then use the returned narrowed principal for
+policy/context injection. Keep the original credential bindings available for
+resource/operation/tenant/audience/purpose/confirmation enforcement. Signature
+validation, periodic checks and always-active checkers do not establish immediate
+revocation. Missing authority or status must deny. A decision observes state at
+evaluation; subsequent writes need host transaction/version fencing where atomic
+revocation ordering is required.
+
+For session-bound delegation, the resolver returns the current parent session;
+the requested delegation reference must remain exact and its subject/session,
+family, tenant, session version and active business scope must match that parent.
+The status checker independently checks the original delegated token, even when
+the parent is active. All original delegation bindings remain on the narrowed
+result and must be enforced by the operation policy.
+
+The [compilable boundary example](../examples/current-authority.rs) shows calling
+the helper before a sensitive scope decision.

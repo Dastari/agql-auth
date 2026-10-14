@@ -109,6 +109,7 @@ mod oidc_authorization;
 pub mod prelude;
 mod principal_reference;
 mod purpose_grant;
+mod refresh_authority;
 mod role_scope;
 mod scope_match;
 mod scopes;
@@ -225,8 +226,12 @@ pub use token_decode::{
 };
 pub use token_status::{
     AlwaysActiveTokenStatus, ReauthorizationPolicy, StatusCheckFailureMode, TokenStatus,
-    TokenStatusChecker, TokenStatusRequest,
+    TokenStatusChecker, TokenStatusRequest, revalidate_sensitive_principal,
 };
 pub use validator::{AccessTokenValidator, AccessTokenValidatorBuilder};
 
 pub type AuthResult<T> = Result<T, AuthError>;
+
+pub use crate::refresh_authority::{
+    CurrentRefreshGrant, RefreshGrantAuthority, RefreshGrantSource,
+};

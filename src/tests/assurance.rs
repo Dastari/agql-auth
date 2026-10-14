@@ -46,7 +46,8 @@ fn user_with_assurance(assurance: SessionAssurance) -> AuthUser {
 async fn refreshable_issuance_and_multiple_rotations_preserve_exact_assurance() {
     let refresh_store = MemoryRefreshTokenStore::default();
     let user_store = MemoryUserStore::default();
-    let auth = test_auth_service(user_store.clone(), refresh_store.clone());
+    let auth = test_auth_service(user_store.clone(), refresh_store.clone())
+        .with_refresh_grant_authority(std::sync::Arc::new(AssuranceGrantAuthority));
     user_store.insert(stored_user(
         &auth,
         "user-1",
@@ -128,6 +129,8 @@ async fn refreshable_issuance_and_multiple_rotations_preserve_exact_assurance() 
 #[test]
 fn legacy_refresh_record_deserializes_without_assurance_and_recent_mfa_fails_closed() {
     let sample = StoredRefreshToken {
+        grant_source: crate::RefreshGrantSource::StoredUser,
+        roles: Vec::new(),
         id: uuid::Uuid::new_v4(),
         user_id: "user-1".to_string(),
         session_id: uuid::Uuid::new_v4(),
@@ -146,10 +149,14 @@ fn legacy_refresh_record_deserializes_without_assurance_and_recent_mfa_fails_clo
     };
     let mut raw = serde_json::to_value(sample).unwrap();
     raw.as_object_mut().unwrap().remove("refreshable_metadata");
+    raw.as_object_mut().unwrap().remove("grant_source");
+    raw.as_object_mut().unwrap().remove("roles");
     raw["session"].as_object_mut().unwrap().remove("assurance");
     let record: StoredRefreshToken = serde_json::from_value(raw).unwrap();
     assert!(record.session.assurance.is_none());
     assert!(record.refreshable_metadata.is_none());
+    assert_eq!(record.grant_source, RefreshGrantSource::Legacy);
+    assert!(record.roles.is_empty());
 
     let user = AuthUser {
         user_id: record.user_id,
@@ -418,7 +425,8 @@ fn policy_ids_are_portable_and_bounded() {
 async fn genuine_step_up_changes_only_the_target_session_at_injected_time() {
     let refresh_store = MemoryRefreshTokenStore::default();
     let user_store = MemoryUserStore::default();
-    let auth = test_auth_service(user_store.clone(), refresh_store);
+    let auth = test_auth_service(user_store.clone(), refresh_store)
+        .with_refresh_grant_authority(std::sync::Arc::new(AssuranceGrantAuthority));
     user_store.insert(stored_user(
         &auth,
         "user-1",
@@ -495,4 +503,19 @@ fn denial_debug_and_public_surface_do_not_expose_internal_detail() {
     let debug = format!("{denial:?}");
     assert!(!debug.contains(denial.internal_detail()));
     assert!(!debug.contains("secret-user"));
+}
+
+struct AssuranceGrantAuthority;
+#[async_trait::async_trait]
+impl RefreshGrantAuthority for AssuranceGrantAuthority {
+    async fn current_grant(
+        &self,
+        _: &StoredRefreshToken,
+        _: &StoredUser,
+    ) -> crate::AuthResult<CurrentRefreshGrant> {
+        Ok(CurrentRefreshGrant {
+            roles: vec!["member".into()],
+            scopes: vec!["records.read".into()],
+        })
+    }
 }

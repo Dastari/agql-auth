@@ -145,3 +145,107 @@ impl ReauthorizationPolicy {
         }
     }
 }
+
+/// Revalidates an accepted credential immediately before a sensitive operation.
+///
+/// Both dependencies are mandatory. The checker must perform an authoritative
+/// online check for this principal kind (including account, token, session and
+/// family revocation where applicable); an always-active placeholder does not
+/// meet this contract. The resolver must reject disabled/deleted principals and
+/// read current grants. Errors propagate without fail-open or periodic caching.
+///
+/// The result preserves the accepted credential's bindings and assurance while
+/// intersecting its roles/scopes with current authority. Resolvers must retain
+/// the exact credential reference for this operation, including token identity;
+/// a replacement credential is not proof that the accepted token is active.
+/// Session-bound delegation is the explicit exception: the resolver supplies
+/// its authoritative parent session using the existing reference contract, while
+/// the checker must independently check the original delegated token's status.
+///
+/// The decision observes authoritative state at evaluation. Hosts needing an
+/// atomic relationship to a subsequent write must supply transaction/version
+/// fencing; revocation after evaluation cannot undo an external write.
+pub async fn revalidate_sensitive_principal(
+    accepted: &AuthPrincipal,
+    resolver: &dyn crate::CurrentPrincipalResolver,
+    checker: &dyn TokenStatusChecker,
+    now: OffsetDateTime,
+) -> AuthResult<AuthPrincipal> {
+    let reference = accepted.reference();
+    if reference.subject.trim().is_empty()
+        || reference
+            .token_id
+            .as_ref()
+            .is_none_or(|id| id.trim().is_empty())
+    {
+        return Err(AuthError::Forbidden);
+    }
+    if reference.expires_at.is_none_or(|expiry| expiry <= now) {
+        return Err(AuthError::AccessTokenExpired);
+    }
+    let status = checker
+        .check(TokenStatusRequest {
+            principal: accepted,
+            token_id: reference.token_id.as_deref(),
+            session_id: reference.session_id.as_deref(),
+            session_family_id: reference.session_family_id.as_deref(),
+            tenant_id: reference.tenant_id.as_deref(),
+        })
+        .await?;
+    ReauthorizationPolicy::status_to_error(status)?;
+    let resolved = resolver.resolve(&reference).await?;
+    let delegation =
+        reference.grant_kind == Some(crate::AccessTokenGrantKind::SessionBoundDelegation);
+    if resolved.reference() != &reference
+        || if delegation {
+            !reference.matches(resolved.principal())
+        } else {
+            resolved.principal().reference() != reference
+        }
+    {
+        return Err(AuthError::Forbidden);
+    }
+    let current = resolved.principal();
+    if current
+        .reference()
+        .expires_at
+        .is_none_or(|expiry| expiry <= now)
+    {
+        return Err(AuthError::AccessTokenExpired);
+    }
+    let mut narrowed = accepted.clone();
+    match (&mut narrowed, current) {
+        (AuthPrincipal::User(accepted), AuthPrincipal::User(current)) => {
+            if delegation
+                && (reference
+                    .session_version
+                    .as_ref()
+                    .is_none_or(|v| v.trim().is_empty())
+                    || reference
+                        .session_family_id
+                        .as_ref()
+                        .is_none_or(|v| v.trim().is_empty()))
+            {
+                return Err(AuthError::Forbidden);
+            }
+            if accepted.session.active_scope != current.session.active_scope {
+                return Err(AuthError::Forbidden);
+            }
+            accepted.roles.retain(|role| current.roles.contains(role));
+            accepted
+                .scopes
+                .retain(|scope| current.scopes.contains(scope));
+            accepted
+                .token_claims
+                .authorization_roles
+                .retain(|role| current.token_claims.authorization_roles.contains(role));
+        }
+        (AuthPrincipal::ApiToken(accepted), AuthPrincipal::ApiToken(current)) => {
+            accepted
+                .scopes
+                .retain(|scope| current.scopes.contains(scope));
+        }
+        _ => return Err(AuthError::Forbidden),
+    }
+    Ok(narrowed)
+}

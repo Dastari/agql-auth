@@ -6,6 +6,7 @@ mod channel;
 mod claims_and_status;
 mod combined;
 mod consumer_store;
+mod current_authority;
 mod grant;
 mod graphql_transport;
 mod jwt_signing;

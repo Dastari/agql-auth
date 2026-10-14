@@ -246,3 +246,10 @@ Use it only when the host explicitly wants to retain provider access or refresh
 tokens. Provider refresh tokens should be encrypted by the host before
 persistence. Microsoft access tokens should be treated as opaque unless the host
 is separately validating them for a resource-server use case.
+
+## Current authority for sensitive operations
+
+See [principal lifecycle](principal-lifecycle.md#current-authority-for-sensitive-operations)
+for immediate fail-closed status/current-grant checks and the
+[0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
+for refresh provenance, stored role ceilings, and mandatory host/OIDC authority.

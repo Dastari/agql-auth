@@ -118,6 +118,7 @@ pub struct AuthService<U, R> {
     scope_matcher: Arc<dyn ScopeMatch>,
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
+    refresh_grant_authority: Option<Arc<dyn crate::RefreshGrantAuthority>>,
     #[cfg(test)]
     pub(super) password_work: std::sync::Mutex<Vec<String>>,
     #[cfg(test)]
@@ -193,6 +194,7 @@ where
             scope_matcher: Arc::new(ExactScopeMatch),
             active_user_session_resolver: None,
             additional_token_roles_provider: None,
+            refresh_grant_authority: None,
             config,
             user_store,
             refresh_store,
@@ -204,6 +206,16 @@ where
             #[cfg(test)]
             token_work: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// Installs current grant authority for host-issued and OIDC sessions.
+    /// Password grants always use current StoredUser authority.
+    pub fn with_refresh_grant_authority(
+        mut self,
+        authority: Arc<dyn crate::RefreshGrantAuthority>,
+    ) -> Self {
+        self.refresh_grant_authority = Some(authority);
+        self
     }
 
     /// Hashes a password with Argon2.
@@ -328,14 +340,23 @@ where
             },
         };
 
-        self.issue_auth_payload(auth_user, session_family_id, metadata)
-            .await
+        self.issue_auth_payload(
+            auth_user,
+            session_family_id,
+            metadata,
+            crate::RefreshGrantSource::StoredUser,
+        )
+        .await
     }
 
     /// Rotates a refresh token and returns a new local session payload.
     ///
     /// Reuse of a revoked refresh token is treated as replay and revokes the
-    /// token family through the configured store.
+    /// token family through the configured store. Roles/scopes are intersected
+    /// with current authority and never widen. Host-issued grants require an
+    /// installed [`crate::RefreshGrantAuthority`]; legacy records require login.
+    /// The authority read precedes atomic store rotation; cross-store fencing
+    /// for concurrent permission changes remains the host's responsibility.
     pub async fn refresh(
         &self,
         refresh_token: &str,
@@ -416,6 +437,33 @@ where
             return Err(AuthError::UserDisabled);
         }
 
+        let current_grant = match existing.grant_source {
+            crate::RefreshGrantSource::StoredUser => crate::CurrentRefreshGrant {
+                roles: user.roles.clone(),
+                scopes: user.scopes.clone(),
+            },
+            crate::RefreshGrantSource::Host => {
+                self.refresh_grant_authority
+                    .as_ref()
+                    .ok_or(AuthError::Forbidden)?
+                    .current_grant(&existing, &user)
+                    .await?
+            }
+            crate::RefreshGrantSource::Legacy => return Err(AuthError::Forbidden),
+        };
+        let roles = existing
+            .roles
+            .iter()
+            .filter(|role| current_grant.roles.contains(role))
+            .cloned()
+            .collect();
+        let scopes = existing
+            .scopes
+            .iter()
+            .filter(|scope| current_grant.scopes.contains(scope))
+            .cloned()
+            .collect();
+
         let mut session = existing.session.clone();
         if let Some(assurance) = assurance_override {
             session = session.with_assurance(assurance);
@@ -433,8 +481,8 @@ where
         let auth_user = AuthUser {
             user_id: user.id,
             session_id: existing.session_id,
-            roles: dedupe_stable(user.roles),
-            scopes: dedupe_stable(existing.scopes.clone()),
+            roles: dedupe_stable(roles),
+            scopes: dedupe_stable(scopes),
             session,
             token_claims: AccessTokenMetadata {
                 session_family_id: Some(existing.session_family_id.to_string()),
@@ -450,7 +498,13 @@ where
         };
 
         let (new_raw_refresh_token, new_record, access_token, access_token_expires_at, user) = self
-            .issue_tokens_only(auth_user, existing.session_family_id, metadata.clone(), now)
+            .issue_tokens_only(
+                auth_user,
+                existing.session_family_id,
+                metadata.clone(),
+                now,
+                existing.grant_source,
+            )
             .await?;
 
         let rotated = self
@@ -704,7 +758,9 @@ where
     ///
     /// Existing issuance methods call this with no assurance or refreshable
     /// metadata. Sender/resource bindings and arbitrary custom claims are not
-    /// accepted here because their validity may be per-token.
+    /// accepted here because their validity may be per-token. This records host
+    /// grant provenance; refresh requires [`Self::with_refresh_grant_authority`],
+    /// including when the host verified a password itself.
     pub async fn issue_session_for_user_with_metadata(
         &self,
         user_id: impl Into<String>,
@@ -748,8 +804,13 @@ where
                 ..AccessTokenMetadata::default()
             },
         };
-        self.issue_auth_payload(auth_user, session_family_id, metadata)
-            .await
+        self.issue_auth_payload(
+            auth_user,
+            session_family_id,
+            metadata,
+            crate::RefreshGrantSource::Host,
+        )
+        .await
     }
 
     /// Issues a refreshable session from host-accepted authentication facts.
@@ -1070,10 +1131,11 @@ where
         auth_user: AuthUser,
         session_family_id: Uuid,
         metadata: ClientMetadata,
+        grant_source: crate::RefreshGrantSource,
     ) -> AuthResult<AuthPayload> {
         let now = OffsetDateTime::now_utc();
         let (refresh_token, record, access_token, access_token_expires_at, user) = self
-            .issue_tokens_only(auth_user, session_family_id, metadata, now)
+            .issue_tokens_only(auth_user, session_family_id, metadata, now, grant_source)
             .await?;
 
         self.refresh_store
@@ -1095,6 +1157,7 @@ where
         session_family_id: Uuid,
         metadata: ClientMetadata,
         now: OffsetDateTime,
+        grant_source: crate::RefreshGrantSource,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         #[cfg(test)]
         self.token_work
@@ -1124,6 +1187,8 @@ where
             session_id: user.session_id,
             session_family_id,
             scopes: user.scopes.clone(),
+            roles: user.roles.clone(),
+            grant_source,
             session: user.session.clone(),
             refreshable_metadata,
             token_hash: hash_refresh_token(&raw_refresh_token),

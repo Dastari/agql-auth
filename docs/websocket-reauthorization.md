@@ -68,3 +68,10 @@ safe public code/message. Require a genuine step-up over the host's normal HTTP
 or device flow, rotate the selected session, and reauthenticate the channel
 with the new access token. Do not mutate an in-flight principal or extend its
 `auth_time` merely because the socket remains connected.
+
+## Current authority for sensitive operations
+
+See [principal lifecycle](principal-lifecycle.md#current-authority-for-sensitive-operations)
+for immediate fail-closed status/current-grant checks and the
+[0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
+for refresh provenance, stored role ceilings, and mandatory host/OIDC authority.

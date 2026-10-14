@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.0
+
+- Refresh rotation intersects prior roles/scopes with current authority. Password
+  sessions use StoredUser; host/OIDC sessions require RefreshGrantAuthority.
+- Persist refresh grant provenance and role ceilings; legacy records require
+  reauthentication rather than silently inheriting a guessed grant source.
+- Add revalidate_sensitive_principal for immediate, fail-closed current-authority
+  and token-status checks while preserving accepted credential bindings.
+- Breaking storage/refresh migration: see MIGRATION.md.
+
 ## 0.19.2
 
 - Disabled password-login attempts now perform the existing dummy Argon2
