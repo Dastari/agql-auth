@@ -12,6 +12,25 @@ use crate::prelude::*;
 
 struct ValidatorQuery;
 
+#[test]
+fn validator_rejects_unrepresentable_time_claims_without_panicking() {
+    let validator = rs256_validator().leeway_seconds(60).build().unwrap();
+    for field in ["exp", "iat", "nbf"] {
+        for value in [i64::MIN, i64::MAX] {
+            let mut claims = access_claims_json(Some("access_token"));
+            claims[field] = json!(value);
+            let token = encode_rs256(claims);
+            assert!(
+                matches!(
+                    validator.authenticate_access_token(&token),
+                    Err(AuthError::InvalidAccessToken)
+                ),
+                "{field}={value} must be rejected before arithmetic or metadata conversion"
+            );
+        }
+    }
+}
+
 #[Object]
 impl ValidatorQuery {
     async fn auth_subject(&self, ctx: &Context<'_>) -> String {
@@ -83,19 +102,11 @@ async fn rs256_validator_rejects_wrong_audience_and_issuer() {
 
 #[tokio::test]
 async fn rs256_validator_rejects_expired_and_wrong_purpose_tokens() {
-    let mut config = rs256_config();
-    config.access_token_ttl = Duration::seconds(-5);
-    let auth = auth_service(config);
-    let payload = auth
-        .issue_verified_user_session("user-1", vec![], AuthMethod::Password, metadata())
-        .await
-        .unwrap();
+    let token = expired_rs256_token();
     let validator = rs256_validator().build().unwrap();
 
     assert!(matches!(
-        validator
-            .authenticate_access_token(&payload.access_token)
-            .unwrap_err(),
+        validator.authenticate_access_token(&token).unwrap_err(),
         AuthError::AccessTokenExpired
     ));
 
@@ -291,4 +302,12 @@ fn access_claims_json(purpose: Option<&str>) -> JsonValue {
         claims["purpose"] = json!(purpose);
     }
     claims
+}
+
+// Test-owned signed fixture; invalid issuance configuration is never needed to
+// exercise expired-token verification.
+pub(super) fn expired_rs256_token() -> String {
+    let mut claims = access_claims_json(Some("access_token"));
+    claims["exp"] = json!((OffsetDateTime::now_utc() - Duration::seconds(5)).unix_timestamp());
+    encode_rs256(claims)
 }

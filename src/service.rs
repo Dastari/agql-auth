@@ -609,7 +609,8 @@ where
     ) -> AuthResult<IssuedPurposeToken> {
         validate_purpose_token_issue_request(&request)?;
         let issued_at = OffsetDateTime::now_utc();
-        let expires_at = issued_at + request.ttl;
+        let expires_at =
+            crate::util::checked_jwt_expiry(issued_at, request.ttl, "purpose-token ttl")?;
         let claims = PurposeTokenClaims {
             typ: PURPOSE_TOKEN_TYPE.to_string(),
             sub: request.subject.clone(),
@@ -892,7 +893,8 @@ where
                 additional: request.additional_claims,
             },
         };
-        let access_token_expires_at = now + ttl;
+        let access_token_expires_at =
+            crate::util::checked_jwt_expiry(now, ttl, "access-token-only ttl")?;
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
@@ -1182,12 +1184,14 @@ where
                 .authorization_roles
                 .retain(|role| ceiling.contains(role));
         }
-        let access_token_expires_at = now + self.config.access_token_ttl;
+        let access_token_expires_at =
+            crate::util::checked_jwt_expiry(now, self.config.access_token_ttl, "access-token ttl")?;
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
         let raw_refresh_token = generate_opaque_token();
-        let refresh_token_expires_at = now + self.config.refresh_token_ttl;
+        let refresh_token_expires_at =
+            crate::util::checked_expiry(now, self.config.refresh_token_ttl, "refresh-token ttl")?;
         let refreshable_metadata = RefreshableTokenMetadata {
             tenant_id: user.token_claims.tenant_id.clone(),
             organization_id: user.token_claims.organization_id.clone(),

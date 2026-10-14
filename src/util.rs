@@ -13,6 +13,37 @@ use crate::{AuthError, AuthResult, LoginChallengeOptions, TotpOptions};
 
 type HmacSha1 = Hmac<Sha1>;
 
+/// Validates a trusted duration before constructing an expiry. All callers fail
+/// before signing or persisting a credential if the result is unrepresentable.
+pub(crate) fn checked_expiry(
+    now: OffsetDateTime,
+    ttl: Duration,
+    name: &str,
+) -> AuthResult<OffsetDateTime> {
+    if ttl <= Duration::ZERO {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "{name} must be positive"
+        )));
+    }
+    now.checked_add(ttl).ok_or_else(|| {
+        AuthError::InvalidConfiguration(format!("{name} exceeds the supported timestamp range"))
+    })
+}
+
+pub(crate) fn checked_jwt_expiry(
+    now: OffsetDateTime,
+    ttl: Duration,
+    name: &str,
+) -> AuthResult<OffsetDateTime> {
+    let expiry = checked_expiry(now, ttl, name)?;
+    if expiry.unix_timestamp() <= now.unix_timestamp() {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "{name} expires within the issuance second"
+        )));
+    }
+    Ok(expiry)
+}
+
 pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {
     strip_bearer_prefix_with_mode(input, crate::token_decode::BearerParseMode::BearerOrRaw)
 }

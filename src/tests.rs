@@ -18,6 +18,7 @@ mod rate_limits;
 mod recovery;
 mod scope_match;
 mod scopes;
+mod time_invariants;
 mod totp;
 mod validator;
 

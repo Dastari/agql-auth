@@ -200,14 +200,24 @@ fn validate_time_claims(
     claims: &AccessTokenClaims,
     config: &AccessTokenDecodeConfig,
 ) -> AuthResult<()> {
-    let now = config.clock.now().unix_timestamp();
-    let leeway = i64::try_from(config.leeway_seconds).unwrap_or(i64::MAX);
+    // A successfully accepted token must retain a representable expiry in its
+    // principal metadata; silently turning an out-of-range expiry into None
+    // would lose that security boundary for downstream guards.
+    for timestamp in [Some(claims.exp), Some(claims.iat), claims.nbf]
+        .into_iter()
+        .flatten()
+    {
+        OffsetDateTime::from_unix_timestamp(timestamp)
+            .map_err(|_| AuthError::InvalidAccessToken)?;
+    }
+    let now = i128::from(config.clock.now().unix_timestamp());
+    let leeway = i128::from(config.leeway_seconds);
 
-    if claims.exp + leeway <= now {
+    if i128::from(claims.exp) + leeway <= now {
         return Err(AuthError::AccessTokenExpired);
     }
     if let Some(nbf) = claims.nbf
-        && nbf > now + leeway
+        && i128::from(nbf) > now + leeway
     {
         return Err(AuthError::InvalidAccessToken);
     }

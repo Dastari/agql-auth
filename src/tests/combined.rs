@@ -147,13 +147,7 @@ async fn combined_auth_missing_header_leaves_request_unauthenticated() {
 
 #[tokio::test]
 async fn combined_auth_does_not_fall_back_for_expired_jwt() {
-    let mut config = rs256_config();
-    config.access_token_ttl = Duration::seconds(-5);
-    let auth = auth_service(config);
-    let payload = auth
-        .issue_verified_user_session("user-1", vec![], AuthMethod::Password, metadata())
-        .await
-        .unwrap();
+    let token = super::validator::expired_rs256_token();
     let validator = validator();
     let api_tokens = ApiTokenService::new(Arc::new(MemoryApiTokenStore::default()));
     let combined = CombinedAuth::new(&validator, &api_tokens);
@@ -161,7 +155,7 @@ async fn combined_auth_does_not_fall_back_for_expired_jwt() {
     let err = combined
         .inject_http_auth(
             Request::new("{ principalSubject }"),
-            Some(&format!("Bearer {}", payload.access_token)),
+            Some(&format!("Bearer {}", token)),
             metadata(),
         )
         .await

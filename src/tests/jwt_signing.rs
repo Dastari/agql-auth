@@ -652,17 +652,9 @@ async fn rs256_rejects_wrong_issuer_and_audience() {
 
 #[tokio::test]
 async fn rs256_rejects_expired_token() {
-    let mut config = rs256_config("auth-key-1");
-    config.access_token_ttl = Duration::seconds(-5);
-    let auth = auth_service(config);
-    let payload = auth
-        .issue_verified_user_session("user-1", vec![], AuthMethod::Password, metadata())
-        .await
-        .unwrap();
-
-    let err = auth
-        .authenticate_access_token(&payload.access_token)
-        .unwrap_err();
+    let auth = auth_service(rs256_config("auth-key-1"));
+    let token = super::validator::expired_rs256_token();
+    let err = auth.authenticate_access_token(&token).unwrap_err();
     assert!(matches!(err, AuthError::AccessTokenExpired));
 }
 

@@ -33,7 +33,7 @@ where
     ) -> AuthResult<PasswordResetToken> {
         let user_id = user_id.into();
         let issued_at = OffsetDateTime::now_utc();
-        let expires_at = issued_at + ttl;
+        let expires_at = crate::util::checked_jwt_expiry(issued_at, ttl, "password-reset ttl")?;
         let token_id = Uuid::new_v4();
         let claims = PasswordResetTokenClaims {
             sub: user_id.clone(),
