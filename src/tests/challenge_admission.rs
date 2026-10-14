@@ -152,10 +152,16 @@ async fn expiry_after_admission_or_during_consume_never_returns_verified_authori
             )
             .await
             .unwrap();
+        auth.password_work.lock().unwrap().clear();
         let result = auth
             .verify_login_challenge(&store, issued.challenge_id, &issued.code)
             .await;
         assert!(matches!(result, Err(AuthError::LoginChallengeExpired)));
+        assert_eq!(
+            auth.password_work.lock().unwrap().len(),
+            usize::from(after_consume),
+            "an admission returned after expiry must not start password work"
+        );
         let row = store
             .inner
             .find_login_challenge(issued.challenge_id)

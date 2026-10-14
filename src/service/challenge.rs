@@ -123,6 +123,11 @@ where
         {
             return Err(AuthError::AuthServiceUnavailable);
         }
+        // The store may return long after it atomically admitted this attempt.
+        // Do not spend password work on authority that has already expired.
+        if reserved.is_expired(self.login_challenge_clock.now()) {
+            return Err(AuthError::LoginChallengeExpired);
+        }
         let verified = self.verify_password(code, &reserved.code_hash);
         // Password work and storage awaits can outlive the admission timestamp.
         let verified_at = self.login_challenge_clock.now();
