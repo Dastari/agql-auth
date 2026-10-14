@@ -30,12 +30,12 @@ jobs:
           --health-cmd "pg_isready -U agql_test -d agql_conformance"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.target_ref || github.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.90.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4aab473fa1157d90c6dc14f879ca54797e16fea0 # 1.90.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install consumer fixture tools
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Run the same contract against SQLite and PostgreSQL
@@ -51,15 +51,15 @@ jobs:
       matrix:
         lane: [default, no-default-features]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.target_ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@4aab473fa1157d90c6dc14f879ca54797e16fea0 # 1.90.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.lane }}
       - name: Validate release metadata and formatting

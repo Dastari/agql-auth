@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 10
     environment: release
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
@@ -72,13 +72,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.90.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4aab473fa1157d90c6dc14f879ca54797e16fea0 # 1.90.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check compatibility with the last version tag
         run: |
           cargo install cargo-semver-checks --version 0.46.0 --locked
@@ -93,7 +93,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
@@ -117,10 +117,10 @@ jobs:
           cd release-dist
           sha256sum -- *.json > SHA256SUMS
       - name: Attest every release asset
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: release-dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: v${{ inputs.version }}
           path: release-dist/
