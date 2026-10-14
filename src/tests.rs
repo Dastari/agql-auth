@@ -2,6 +2,7 @@ mod api_tokens;
 mod assurance;
 mod auth_lifecycle;
 mod bounded_memory;
+mod challenge_admission;
 mod challenges;
 mod channel;
 mod claims_and_status;
@@ -336,10 +337,11 @@ impl LoginChallengeStore for MemoryLoginChallengeStore {
         &self,
         challenge: StoredLoginChallenge,
     ) -> crate::AuthResult<()> {
-        self.challenges
-            .lock()
-            .unwrap()
-            .insert(challenge.id, challenge);
+        let mut challenges = self.challenges.lock().unwrap();
+        if challenges.contains_key(&challenge.id) {
+            return Err(AuthError::Store("duplicate challenge id".into()));
+        }
+        challenges.insert(challenge.id, challenge);
         Ok(())
     }
 
@@ -350,17 +352,26 @@ impl LoginChallengeStore for MemoryLoginChallengeStore {
         Ok(self.challenges.lock().unwrap().get(&challenge_id).cloned())
     }
 
-    async fn increment_login_challenge_attempts(
+    async fn reserve_login_challenge_attempt(
         &self,
         challenge_id: Uuid,
-        _attempted_at: OffsetDateTime,
-    ) -> crate::AuthResult<u32> {
+        attempted_at: OffsetDateTime,
+    ) -> crate::AuthResult<StoredLoginChallenge> {
         let mut challenges = self.challenges.lock().unwrap();
         let Some(challenge) = challenges.get_mut(&challenge_id) else {
             return Err(AuthError::InvalidLoginChallenge);
         };
-        challenge.failed_attempts += 1;
-        Ok(challenge.failed_attempts)
+        if challenge.is_consumed() {
+            return Err(AuthError::LoginChallengeReplayed);
+        }
+        if challenge.is_expired(attempted_at) {
+            return Err(AuthError::LoginChallengeExpired);
+        }
+        if challenge.attempts_exhausted() {
+            return Err(AuthError::LoginChallengeAttemptsExhausted);
+        }
+        challenge.attempts += 1;
+        Ok(challenge.clone())
     }
 
     async fn consume_login_challenge(
@@ -372,7 +383,7 @@ impl LoginChallengeStore for MemoryLoginChallengeStore {
         let Some(challenge) = challenges.get_mut(&challenge_id) else {
             return Ok(false);
         };
-        if challenge.consumed_at.is_some() {
+        if challenge.is_consumed() || challenge.is_expired(consumed_at) || challenge.attempts == 0 {
             return Ok(false);
         }
         challenge.consumed_at = Some(consumed_at);

@@ -41,7 +41,12 @@ handles any local session-revocation policy.
 
 Login challenges support short numeric codes for email, SMS, or similar flows.
 The crate generates the code, stores only a password hash of that code, tracks
-attempts, and consumes the challenge once.
+attempts, and consumes the challenge once. Each verification first reserves an
+attempt atomically in the store. The cap includes all admitted guesses and
+cancelled work, preventing concurrent callers from sharing the last available
+attempt. Failed or expired attempts never create verified authority. The service
+uses system UTC by default; `with_login_challenge_clock` installs a separate
+trusted clock aligned with your challenge store.
 
 ```rust
 use agql_auth::LoginChallengeOptions;
@@ -144,7 +149,7 @@ enrollment records. Host services should:
   `should_process_login_code_request` before user lookup or email delivery;
   `Ok(false)` means preserve silent-success semantics but do not send email
 - pass `ClientMetadata` to verification/consumption helpers when possible
-- keep one-time consume operations atomic
+- keep challenge admission and one-time consume operations atomic
 - expire unused records
 - avoid logging reset tokens or login codes
 - revoke existing sessions when local policy requires it

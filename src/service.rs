@@ -108,6 +108,7 @@ pub struct AuthService<U, R> {
     pub(super) refresh_store: Arc<R>,
     pub(super) rate_limit_store: Arc<dyn AuthRateLimitStore>,
     pub(super) rate_limit_clock: Arc<dyn Clock>,
+    pub(super) login_challenge_clock: Arc<dyn Clock>,
     pub(super) argon2: Argon2<'static>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
@@ -200,12 +201,22 @@ where
             refresh_store,
             rate_limit_store,
             rate_limit_clock,
+            login_challenge_clock: Arc::new(SystemClock),
             argon2: Argon2::default(),
             #[cfg(test)]
             password_work: std::sync::Mutex::default(),
             #[cfg(test)]
             token_work: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// Sets the trusted clock for login-challenge issuance and verification.
+    ///
+    /// Use the same time basis in the durable challenge store. This is separate
+    /// from the rate-limit clock and does not alter JWT or other token clocks.
+    pub fn with_login_challenge_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.login_challenge_clock = clock;
+        self
     }
 
     /// Installs current grant authority for host-issued and OIDC sessions.

@@ -1023,9 +1023,10 @@ pub struct StoredLoginChallenge {
     pub created_at: OffsetDateTime,
     /// Expiry time.
     pub expires_at: OffsetDateTime,
-    /// Failed verification attempts.
-    pub failed_attempts: u32,
-    /// Maximum allowed failed attempts.
+    /// Atomically admitted verification attempts, including successful,
+    /// cancelled, and interrupted work. Reservations are never refunded.
+    pub attempts: u32,
+    /// Maximum admitted verification attempts.
     pub max_attempts: u32,
     /// Consumption time, if consumed.
     pub consumed_at: Option<OffsetDateTime>,
@@ -1044,9 +1045,9 @@ impl StoredLoginChallenge {
         self.consumed_at.is_some()
     }
 
-    /// Returns `true` when failed attempts have reached the maximum.
+    /// Returns `true` when no further verification attempt may be admitted.
     pub fn attempts_exhausted(&self) -> bool {
-        self.failed_attempts >= self.max_attempts
+        self.attempts >= self.max_attempts
     }
 }
 
@@ -1057,7 +1058,7 @@ pub struct LoginChallengeOptions {
     pub code_length: usize,
     /// Challenge lifetime.
     pub ttl: Duration,
-    /// Maximum failed attempts before rejection.
+    /// Maximum admitted verification attempts before rejecting further work.
     pub max_attempts: u32,
     /// Optional delivery channel label.
     pub channel: Option<String>,

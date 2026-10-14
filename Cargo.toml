@@ -1,6 +1,6 @@
 [package]
 name = "agql-auth"
-version = "0.20.3"
+version = "0.21.0"
 edition = "2024"
 license = "MIT"
 authors = ["Toby Martin <toby@dastari.net>"]

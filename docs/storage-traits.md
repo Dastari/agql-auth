@@ -173,12 +173,42 @@ SMS-code, or similar flows.
 
 The store must support:
 
-- inserting the challenge and password-hashed code
+- inserting a unique immutable challenge and password-hashed code
 - reading the challenge by ID
-- incrementing failed attempts
-- consuming the challenge exactly once
+- atomically reserving an attempt before password verification
+- conditionally consuming the unexpired challenge exactly once
 
-The consume operation should be atomic to reject replayed codes.
+`reserve_login_challenge_attempt` must check presence, consumption, expiry and
+`attempts < max_attempts` in the same atomic update that increments `attempts`.
+Return the post-increment snapshot, or the corresponding `AuthError` for a
+terminal record. Committed reservations are never refunded after cancellation,
+store response loss, incorrect code, or subsequent failure. Release transaction
+locks before returning; password work runs outside the store transaction.
+
+SQLite/PostgreSQL-style admission shape (bind every value):
+
+```sql
+UPDATE login_challenges
+SET attempts = attempts + 1
+WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
+  AND attempts < max_attempts
+RETURNING *;
+```
+
+Adapt parameters and types to the backend. SQL Server uses `OUTPUT inserted.*`
+instead of `RETURNING`; a lock/transaction implementation is also acceptable.
+Zero affected rows must deny, never trigger an unconditional retry/update.
+Reads used to classify a denial must not grant admission. Both SQLite's write
+serialization and PostgreSQL/SQL Server concurrent conditional-update behavior
+must be verified by each host adapter against its disposable database fixture.
+
+Consumption must atomically require `consumed_at IS NULL`, `expires_at > now`,
+and `attempts > 0`, then set `consumed_at`. A correctly verified final admitted
+attempt remains eligible when the counter equals the cap. All other record
+fields are immutable; duplicate insert and ID reuse are forbidden. Service and
+store clocks must use the same trusted time basis. The service rechecks expiry
+after asynchronous completion too. See [the migration guide](../MIGRATION.md)
+for the coordinated old-worker shutdown and outstanding-challenge invalidation.
 
 ## OIDC State
 
