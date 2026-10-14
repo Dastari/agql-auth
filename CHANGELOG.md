@@ -4,6 +4,8 @@
 
 - Refresh rotation intersects prior roles/scopes with current authority. Password
   sessions use StoredUser; host/OIDC sessions require RefreshGrantAuthority.
+  Typed authorization roles also retain a persisted, monotonically narrowing
+  ceiling against the current AdditionalTokenRolesProvider result.
 - Persist refresh grant provenance and role ceilings; legacy records require
   reauthentication rather than silently inheriting a guessed grant source.
 - Add revalidate_sensitive_principal for immediate, fail-closed current-authority
@@ -83,7 +85,7 @@
 
 - Newly serialized `SessionContext` values omit the default unsatisfied MFA
   object and absent active business scope. Deserialization continues to
-  default both fields, while non-default MFA and active-scope values retain
+  default all three fields, while non-default MFA and active-scope values retain
   their existing wire shape.
 
 ### Compatibility / SemVer

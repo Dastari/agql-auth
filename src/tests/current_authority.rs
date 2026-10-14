@@ -491,3 +491,52 @@ async fn concurrent_grant_removal_is_ordered_at_authority_read_not_later_rotatio
         "removal completed before this authority read must be reflected"
     );
 }
+
+struct DynamicAuthorizationRoles(Arc<Mutex<Vec<String>>>);
+#[async_trait]
+impl AdditionalTokenRolesProvider for DynamicAuthorizationRoles {
+    async fn additional_token_roles(&self, _: &AuthUser) -> crate::AuthResult<Vec<String>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+
+#[tokio::test]
+async fn typed_authorization_roles_never_widen_and_removals_survive_readdition() {
+    let users = MemoryUserStore::default();
+    let roles = Arc::new(Mutex::new(vec!["reader".into(), "writer".into()]));
+    let auth = test_auth_service(users.clone(), MemoryRefreshTokenStore::default())
+        .with_additional_token_roles_provider(Arc::new(DynamicAuthorizationRoles(roles.clone())));
+    let user = stored_user(&auth, "u", "u@example.invalid", "synthetic-password");
+    users.insert(user.clone());
+    let first = auth
+        .login(&user.principal, "synthetic-password", metadata())
+        .await
+        .unwrap();
+    *roles.lock().unwrap() = vec!["reader".into(), "admin".into()];
+    let second = auth
+        .refresh(&first.refresh_token, metadata())
+        .await
+        .unwrap();
+    assert_eq!(second.user.token_claims.authorization_roles, ["reader"]);
+    *roles.lock().unwrap() = vec!["writer".into(), "admin".into()];
+    let third = auth
+        .refresh(&second.refresh_token, metadata())
+        .await
+        .unwrap();
+    assert!(third.user.token_claims.authorization_roles.is_empty());
+    assert!(
+        auth.authenticate_access_token(&third.access_token)
+            .unwrap()
+            .token_claims
+            .authorization_roles
+            .is_empty()
+    );
+    let fresh = auth
+        .login(&user.principal, "synthetic-password", metadata())
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh.user.token_claims.authorization_roles,
+        ["writer", "admin"]
+    );
+}

@@ -504,6 +504,7 @@ where
                 metadata.clone(),
                 now,
                 existing.grant_source,
+                Some(&existing.authorization_roles),
             )
             .await?;
 
@@ -1135,7 +1136,14 @@ where
     ) -> AuthResult<AuthPayload> {
         let now = OffsetDateTime::now_utc();
         let (refresh_token, record, access_token, access_token_expires_at, user) = self
-            .issue_tokens_only(auth_user, session_family_id, metadata, now, grant_source)
+            .issue_tokens_only(
+                auth_user,
+                session_family_id,
+                metadata,
+                now,
+                grant_source,
+                None,
+            )
             .await?;
 
         self.refresh_store
@@ -1158,6 +1166,7 @@ where
         metadata: ClientMetadata,
         now: OffsetDateTime,
         grant_source: crate::RefreshGrantSource,
+        authorization_role_ceiling: Option<&[String]>,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         #[cfg(test)]
         self.token_work
@@ -1166,6 +1175,12 @@ where
         if let Some(provider) = &self.additional_token_roles_provider {
             let additional = provider.additional_token_roles(&auth_user).await?;
             auth_user.token_claims.authorization_roles = dedupe_stable(additional);
+        }
+        if let Some(ceiling) = authorization_role_ceiling {
+            auth_user
+                .token_claims
+                .authorization_roles
+                .retain(|role| ceiling.contains(role));
         }
         let access_token_expires_at = now + self.config.access_token_ttl;
         let (access_token, user) =
@@ -1188,6 +1203,7 @@ where
             session_family_id,
             scopes: user.scopes.clone(),
             roles: user.roles.clone(),
+            authorization_roles: user.token_claims.authorization_roles.clone(),
             grant_source,
             session: user.session.clone(),
             refreshable_metadata,

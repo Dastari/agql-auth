@@ -131,6 +131,7 @@ fn legacy_refresh_record_deserializes_without_assurance_and_recent_mfa_fails_clo
     let sample = StoredRefreshToken {
         grant_source: crate::RefreshGrantSource::StoredUser,
         roles: Vec::new(),
+        authorization_roles: Vec::new(),
         id: uuid::Uuid::new_v4(),
         user_id: "user-1".to_string(),
         session_id: uuid::Uuid::new_v4(),
@@ -151,12 +152,14 @@ fn legacy_refresh_record_deserializes_without_assurance_and_recent_mfa_fails_clo
     raw.as_object_mut().unwrap().remove("refreshable_metadata");
     raw.as_object_mut().unwrap().remove("grant_source");
     raw.as_object_mut().unwrap().remove("roles");
+    raw.as_object_mut().unwrap().remove("authorization_roles");
     raw["session"].as_object_mut().unwrap().remove("assurance");
     let record: StoredRefreshToken = serde_json::from_value(raw).unwrap();
     assert!(record.session.assurance.is_none());
     assert!(record.refreshable_metadata.is_none());
     assert_eq!(record.grant_source, RefreshGrantSource::Legacy);
     assert!(record.roles.is_empty());
+    assert!(record.authorization_roles.is_empty());
 
     let user = AuthUser {
         user_id: record.user_id,

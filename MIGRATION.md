@@ -2,14 +2,16 @@
 
 ## 0.19.2 to 0.20.0: current authority and sensitive operations
 
-Persist the new `StoredRefreshToken.grant_source` and `roles` fields in every
-store insert/read/rotation transaction. Serialized records missing provenance
+Persist the new `StoredRefreshToken.grant_source`, `roles`, and
+`authorization_roles` fields in every store insert/read/rotation transaction. Serialized records missing provenance
 load as `RefreshGrantSource::Legacy` and cannot refresh. Reauthenticate those
 sessions; do not infer provenance from `auth_method` or bulk-label historical
-host/OIDC grants as password grants. Rust struct literals need both fields.
+host/OIDC grants as password grants. Rust struct literals need all three fields.
 
 Password login records `StoredUser` provenance. Each rotation intersects prior
-roles/scopes with the current enabled user's roles/scopes. Removal survives
+roles/scopes with the current enabled user's roles/scopes. Typed authorization
+roles are intersected with the current `AdditionalTokenRolesProvider` result.
+Both ceilings narrow monotonically. Removal survives
 later rotations even if the user's authority is restored; new permissions need
 new authentication. Roles no longer expand during refresh.
 
@@ -32,7 +34,12 @@ unsupported principal kinds or unavailable stores. The resolver must preserve
 the exact accepted credential reference (including token ID), reject disabled
 or deleted accounts, and supply current authority. This helper narrows roles,
 scopes and typed authorization roles while preserving accepted assurance and
-all token metadata. Hosts still enforce audience, purpose, sender confirmation,
+all token metadata. Supply `now` from the trusted evaluation clock immediately
+before calling; never reuse an old timestamp or cache a successful result.
+Existing durable-job resolvers may return a refreshed credential; this sensitive
+operation helper instead requires exact accepted credential identity, with the
+explicit delegation-parent exception described in the lifecycle guide.
+Hosts still enforce audience, purpose, sender confirmation,
 resource, operation and tenant bindings using the original accepted principal.
 Do not project away these restrictions before policy evaluation.
 
@@ -620,7 +627,7 @@ No existing call-site, database, token, session, or serialized-record migration
 is required. Version 0.9.0 adds opt-in APIs for disconnected or long-lived work.
 
 Persist `AuthPrincipal::reference()` instead of a bearer token or a cloned
-roles/scopes snapshot. Implement `CurrentPrincipalResolver` in the host using
+roles/scopes/typed authorization roles snapshot. Implement `CurrentPrincipalResolver` in the host using
 its authoritative session/token and membership stores. Before every protected
 operation, resolve the reference and use only the roles, scopes, assurance, and
 status on the returned `ResolvedPrincipal`.
@@ -696,7 +703,7 @@ policy accepts the provider values. A missing value, `NoopClaimsMapper`, and
 
 `StoredRefreshToken` adds `refreshable_metadata: Option<RefreshableTokenMetadata>`.
 `SessionContext`, already stored in the refresh record, adds optional
-`assurance`. JSON/document stores can deploy the new reader first: both fields
+`assurance`. JSON/document stores can deploy the new reader first: all three fields
 use Serde defaults and missing values become `None`.
 
 For relational stores, add nullable JSON columns (or equivalent typed columns):

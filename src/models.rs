@@ -762,6 +762,9 @@ pub struct StoredRefreshToken {
     /// Authority source. Legacy records fail closed until reauthentication.
     #[serde(default)]
     pub grant_source: crate::RefreshGrantSource,
+    /// Typed authorization-role ceiling, narrowed monotonically on rotation.
+    #[serde(default)]
+    pub authorization_roles: Vec<String>,
     /// Role ceiling, narrowed monotonically on rotation.
     #[serde(default)]
     pub roles: Vec<String>,

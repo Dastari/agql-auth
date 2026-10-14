@@ -148,6 +148,11 @@ impl ReauthorizationPolicy {
 
 /// Revalidates an accepted credential immediately before a sensitive operation.
 ///
+/// `now` must come from the host's trusted evaluation clock immediately before
+/// this call, using the same time basis as token expiry. Never cache or reuse a
+/// successful result across operations/events. Asynchronous store reads observe
+/// their state during this evaluation, not an atomic cross-store snapshot.
+///
 /// Both dependencies are mandatory. The checker must perform an authoritative
 /// online check for this principal kind (including account, token, session and
 /// family revocation where applicable); an always-active placeholder does not

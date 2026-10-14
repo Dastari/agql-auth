@@ -83,15 +83,21 @@ metadata.
 
 See [the 0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
 for mandatory immediate status/current-grant checks and refresh provenance.
-Refresh narrows the previous role/scope ceiling. Password sessions use current
-StoredUser grants; custom/OIDC sessions require `RefreshGrantAuthority`.
+Refresh narrows the previous role/scope/typed authorization-role ceilings.
+Password sessions use current StoredUser grants; custom/OIDC sessions require
+`RefreshGrantAuthority`. Typed roles use `AdditionalTokenRolesProvider` while
+retaining their previous persisted ceiling.
 Legacy refresh records require reauthentication. Persist `grant_source` and
-`roles` alongside scopes in the same atomic rotation.
+`roles`/`authorization_roles` alongside scopes in the same atomic rotation.
 
 For each sensitive operation or subscription event, use
 `revalidate_sensitive_principal` with an authoritative `TokenStatusChecker`
 and `CurrentPrincipalResolver`, then use the returned narrowed principal for
-policy/context injection. Keep the original credential bindings available for
+policy/context injection. Supply `now` from the trusted evaluation clock
+immediately before calling; do not reuse old timestamps or successful results.
+Durable-job resolvers may return refreshed credentials; the sensitive-operation
+helper instead requires exact accepted token identity, with the explicit
+session-bound-delegation parent exception below. Keep the original credential bindings available for
 resource/operation/tenant/audience/purpose/confirmation enforcement. Signature
 validation, periodic checks and always-active checkers do not establish immediate
 revocation. Missing authority or status must deny. A decision observes state at
