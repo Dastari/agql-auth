@@ -11,7 +11,8 @@ use crate::{AccessTokenValidator, AuthError, AuthPrincipal, AuthResult, AuthServ
 
 /// Access-token authentication surface shared by issuers and resource servers.
 pub trait AccessTokenAuth: Send + Sync {
-    /// Authenticates a bearer value with or without the `Bearer ` prefix.
+    /// Authenticates the original bearer input according to the configured
+    /// scheme policy, which may require the `Bearer ` prefix.
     fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser>;
 
     /// Returns the matcher that should be injected for request-time guards.
