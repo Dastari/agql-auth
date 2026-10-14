@@ -1,13 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
     ApiTokenPrincipalKind, ApiTokenRevocationReason, AuthRateLimitKey, AuthRateLimitSnapshot,
-    AuthRateLimitState, AuthResult, AuthUser, ExternalIdentity, OAuthLoginState, OidcTokenResponse,
+    AuthResult, AuthUser, ExternalIdentity, OAuthLoginState, OidcTokenResponse,
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
     StoredUser,
 };
@@ -122,7 +119,9 @@ pub trait AuthRateLimitStore: Send + Sync {
     /// With `expected_revision = None`, commit only when the key is absent.
     /// With `Some(revision)`, commit only when the stored revision exactly
     /// matches. Return `Ok(true)` only when `replacement` was committed and
-    /// `Ok(false)` on a compare conflict without changing storage.
+    /// `Ok(false)` on a compare conflict without committing the replacement or
+    /// altering unexpired state. Expired records may be reclaimed atomically
+    /// as part of any operation, including a compare conflict.
     ///
     /// `replacement.revision` must be persisted with the state. Callers must
     /// provide a fresh revision for every attempt; stores must reject a
@@ -146,71 +145,7 @@ pub trait AuthRateLimitStore: Send + Sync {
     ) -> AuthResult<bool>;
 }
 
-/// In-memory abuse-protection store.
-///
-/// This is useful for tests, local development, and single-process consumers.
-/// Production multi-instance applications should implement
-/// [`AuthRateLimitStore`] with durable storage.
-#[derive(Clone, Default)]
-pub struct MemoryAuthRateLimitStore {
-    states: Arc<Mutex<HashMap<AuthRateLimitKey, AuthRateLimitSnapshot>>>,
-}
-
-impl MemoryAuthRateLimitStore {
-    /// Returns the stored state for tests and diagnostics.
-    pub fn get(&self, key: &AuthRateLimitKey) -> Option<AuthRateLimitState> {
-        self.states
-            .lock()
-            .unwrap()
-            .get(key)
-            .map(|snapshot| snapshot.state.clone())
-    }
-}
-
-#[async_trait]
-impl AuthRateLimitStore for MemoryAuthRateLimitStore {
-    async fn find_auth_rate_limit_state(
-        &self,
-        key: &AuthRateLimitKey,
-    ) -> AuthResult<Option<AuthRateLimitSnapshot>> {
-        Ok(self.states.lock().unwrap().get(key).cloned())
-    }
-
-    async fn compare_exchange_auth_rate_limit_state(
-        &self,
-        key: &AuthRateLimitKey,
-        expected_revision: Option<Uuid>,
-        replacement: AuthRateLimitSnapshot,
-    ) -> AuthResult<bool> {
-        if replacement.state.key != *key {
-            return Err(crate::AuthError::Store(
-                "rate-limit replacement key does not match compare key".to_string(),
-            ));
-        }
-        let mut states = self.states.lock().unwrap();
-        let current_revision = states.get(key).map(|snapshot| snapshot.revision);
-        if current_revision != expected_revision {
-            return Ok(false);
-        }
-        states.insert(key.clone(), replacement);
-        Ok(true)
-    }
-
-    async fn clear_auth_rate_limit_state(
-        &self,
-        key: &AuthRateLimitKey,
-        expected_revision: Option<Uuid>,
-    ) -> AuthResult<bool> {
-        let mut states = self.states.lock().unwrap();
-        if states.get(key).map(|snapshot| snapshot.revision) != expected_revision {
-            return Ok(false);
-        }
-        if expected_revision.is_some() {
-            states.remove(key);
-        }
-        Ok(true)
-    }
-}
+pub use crate::memory_rate_limit::MemoryAuthRateLimitStore;
 
 #[async_trait]
 /// Persists one-time password-reset token IDs.

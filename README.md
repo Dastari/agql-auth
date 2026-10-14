@@ -49,8 +49,17 @@ let auth = AuthService::new(
 )?;
 ```
 
-`AuthService::new` uses an in-memory abuse-protection store. Production
-multi-instance apps should provide a durable `AuthRateLimitStore`:
+`AuthService::new` uses a bounded in-memory abuse-protection store with at most
+16,384 live records. Expired state is reclaimed on each operation; active
+counters and lockouts are preserved. New distinct keys at capacity return
+`AuthServiceUnavailable`, which hosts must treat as denied admission.
+
+Single-process hosts can customize the limit and trusted clock with
+`MemoryAuthRateLimitStore::with_capacity_and_clock` (a `NonZeroUsize` capacity
+and `Arc<dyn Clock>`). Use the same clock/time basis as the service, then pass
+the store through the constructor below. `purge_expired()` permits idle cleanup.
+See [bounded process-local storage](docs/abuse-protection.md#bounded-process-local-storage).
+Production multi-instance apps should provide a durable `AuthRateLimitStore`:
 
 ```rust
 let auth = AuthService::new_with_rate_limit_store(

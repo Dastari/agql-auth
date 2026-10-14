@@ -1,5 +1,30 @@
 # Migration Guide
 
+## 0.20.0 to 0.20.1: bounded process-local abuse state
+
+`MemoryAuthRateLimitStore::default()` now holds at most 16,384 live records and
+reclaims records at `expires_at <= clock.now()` on every operation. Active
+counters/lockouts are never evicted to make room. At capacity, a new distinct key
+returns `AuthServiceUnavailable` (safe public code `AUTH_SERVICE_UNAVAILABLE`);
+existing keys can still update or clear. Hosts must deny admission on store
+errors and must not silently switch to a fresh/unbounded store. Principal/client
+buckets remain separate; a safe over-count can persist if one admits before
+another fails. Global work/request admission is still a host responsibility.
+
+Use `MemoryAuthRateLimitStore::with_capacity_and_clock` with a nonzero capacity
+and the same trusted clock/time basis as the service when customizing either.
+The default service and store both use system UTC. An already-expired replacement
+is rejected; do not pair a fixed/historical service clock with a system-clock
+store. `purge_expired()` permits explicit cleanup during idle periods; ordinary
+operations already purge lazily. Clones share state and limits. There is no
+background thread, active eviction, or distributed persistence.
+
+No AuthRateLimitStore method or serialized snapshot migration is required.
+Durable stores may already delete expired records. Compare conflicts and stale
+clears still preserve live versions; expiry reclamation can independently remove
+expired records. A bounded expiry index avoids accumulating stale deadlines
+when the same counter is updated repeatedly.
+
 ## 0.19.2 to 0.20.0: current authority and sensitive operations
 
 Persist the new `StoredRefreshToken.grant_source`, `roles`, and

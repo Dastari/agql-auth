@@ -1,6 +1,7 @@
 mod api_tokens;
 mod assurance;
 mod auth_lifecycle;
+mod bounded_memory;
 mod challenges;
 mod channel;
 mod claims_and_status;

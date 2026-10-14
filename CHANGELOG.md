@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.1
+
+- Bound default process-local abuse state to 16,384 records and reclaim expired
+  records on every operation. Configurable capacity and a shared injected clock
+  support deterministic single-process hosts.
+- Preserve atomic compare-and-swap and active lockouts: capacity exhaustion fails
+  closed for new distinct keys; existing records can update or clear. Expiry
+  indexing remains bounded under repeated counter updates.
+- No durable store trait methods or serialized records change. See MIGRATION.md
+  for capacity and clock behavior.
+
 ## 0.20.0
 
 - Refresh rotation intersects prior roles/scopes with current authority. Password

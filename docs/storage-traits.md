@@ -253,3 +253,8 @@ See [principal lifecycle](principal-lifecycle.md#current-authority-for-sensitive
 for immediate fail-closed status/current-grant checks and the
 [0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
 for refresh provenance, stored role ceilings, and mandatory host/OIDC authority.
+
+The default memory abuse store has a finite capacity and reclaims expired rows;
+see [bounded process-local storage](abuse-protection.md#bounded-process-local-storage)
+for safe capacity failures, clock injection and idle cleanup. Durable stores must
+retain atomic CAS/clear behavior while performing their own TTL lifecycle.

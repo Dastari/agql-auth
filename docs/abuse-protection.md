@@ -116,3 +116,27 @@ Test-only consumer adapters also execute the password-login contract against
 SQLite and PostgreSQL in CI. See [commands and review evidence](password-login-review.md).
 These isolated fixtures prescribe no production schema or downstream policy;
 consumer adapters should repeat the contract against their own isolated store.
+
+## Bounded process-local storage
+
+The default `MemoryAuthRateLimitStore` stores at most 16,384 live records. Every
+operation reclaims expired records under the CAS mutex, using an expiry index
+that retains one deadline per key. New distinct keys at capacity return
+`AuthServiceUnavailable`; existing active counters and lockouts remain intact.
+Never treat this error as admission or evict an active record to accept a new
+principal. Multi-process hosts still need durable shared storage and bounded
+request/work admission.
+
+```rust
+use std::{num::NonZeroUsize, sync::Arc};
+use agql_auth::{MemoryAuthRateLimitStore, SystemClock};
+
+let store = MemoryAuthRateLimitStore::with_capacity_and_clock(
+    NonZeroUsize::new(32_768).unwrap(),
+    Arc::new(SystemClock),
+);
+```
+
+Use the same trusted clock in the store and `AuthService` when injecting one.
+Expired replacements are rejected. `purge_expired()` can reclaim state during
+idle periods; no background task is spawned. See [the migration guide](../MIGRATION.md#0200-to-0201-bounded-process-local-abuse-state).
