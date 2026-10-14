@@ -26,11 +26,13 @@ pub struct AuthConfig {
     pub jwt_secret: String,
     /// Configured local JWT signing mode.
     pub jwt_signing: JwtSigningConfig,
-    /// Access-token lifetime.
+    /// Ordinary session access-token lifetime (at least one second).
     pub access_token_ttl: Duration,
     /// Maximum allowed access-token lifetime for custom TTLs.
     ///
-    /// Used by access-token-only grants and similar short-lived issuance paths.
+    /// Used by access-token-only and delegated grants. Ordinary refreshable
+    /// sessions use `access_token_ttl` independently; hosts must configure that
+    /// lifetime separately. This ceiling must be at least one second.
     pub max_access_token_ttl: Duration,
     /// Maximum lifetime of an existing-session-bound delegated access token.
     ///
@@ -175,11 +177,25 @@ impl AuthConfig {
 
     pub(crate) fn validate(&self) -> crate::AuthResult<()> {
         self.rate_limits.validate()?;
-        if self.max_session_bound_delegation_ttl <= Duration::ZERO
+        if self.issuer.trim().is_empty() || self.audience.trim().is_empty() {
+            return Err(AuthError::InvalidConfiguration(
+                "issuer and audience must not be empty".to_string(),
+            ));
+        }
+        let now = time::OffsetDateTime::now_utc();
+        crate::util::checked_jwt_expiry(now, self.access_token_ttl, "access-token ttl")?;
+        crate::util::checked_jwt_expiry(
+            now,
+            self.max_access_token_ttl,
+            "access-token maximum ttl",
+        )?;
+        crate::util::checked_expiry(now, self.refresh_token_ttl, "refresh-token ttl")?;
+
+        if self.max_session_bound_delegation_ttl < Duration::seconds(1)
             || self.max_session_bound_delegation_ttl > self.max_access_token_ttl
         {
             return Err(AuthError::InvalidConfiguration(
-                "session-bound delegation ttl ceiling must be positive and not exceed the access-token maximum"
+                "session-bound delegation ttl ceiling must be at least one second and not exceed the access-token maximum"
                     .to_string(),
             ));
         }

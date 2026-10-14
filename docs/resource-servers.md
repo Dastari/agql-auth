@@ -143,3 +143,8 @@ let validator = AccessTokenValidator::builder()
     .legacy_scope_claims(LegacyScopeClaims::Reject)
     .build()?;
 ```
+
+Access-token time claims must fit the supported `time::OffsetDateTime` range.
+Out-of-range signed `exp`, `iat`, or `nbf` values fail with `InvalidAccessToken`;
+accepted credentials always retain their expiry metadata. Leeway uses checked
+range validation and wide integer comparisons rather than overflowing addition.

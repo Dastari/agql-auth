@@ -1,5 +1,28 @@
 # Migration Guide
 
+## 0.20.2 to 0.20.3: time and configuration invariants
+
+Issuer and audience must contain non-whitespace characters. Ordinary access,
+custom-grant maximum, and refresh lifetimes must be positive and produce a
+representable timestamp. JWT lifetimes (access, purpose, reset) must be at least
+one second because their expiry uses whole-second NumericDate values. Invalid
+configuration or expiry arithmetic returns `InvalidConfiguration`; issuance no
+longer panics or deliberately creates expired credentials from negative TTLs.
+Use a test-owned signed fixture or validator clock to test expiration.
+
+`max_access_token_ttl` continues to cap access-only/delegated grants; ordinary
+refreshable sessions still use the separate `access_token_ttl`. Configure both
+according to your application policy. No new universal lifetime cap is imposed.
+
+Access-token `exp`, `iat`, and optional `nbf` must fit `time::OffsetDateTime`.
+Previously accepted out-of-range timestamps now return `InvalidAccessToken`,
+never a principal whose expiry disappears from metadata. Normal timestamps and
+configured leeway retain their semantics. No token/store format changes.
+
+Invalid or overflowing `ReauthorizationPolicy` durations, and non-finite
+lifetime fractions, schedule a check immediately. Periodic scheduling still
+does not satisfy the immediate checks required for sensitive operations.
+
 ## 0.20.1 to 0.20.2: combined bearer validation
 
 No API, persisted-data, or configuration migration is required. `CombinedAuth`

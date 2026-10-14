@@ -536,3 +536,8 @@ and the [0.20 migration](MIGRATION.md). Host/OIDC refresh requires an explicit
 `RefreshGrantAuthority`; password refresh narrows grants against StoredUser.
 
 See the [compilable current-authority boundary example](examples/current-authority.rs).
+
+Runtime configuration rejects empty issuer/audience and invalid lifetimes. JWT
+lifetimes must be at least one second; all expiry arithmetic is checked before
+signing or persistence. The custom-grant maximum and ordinary session lifetime
+remain separately configured. See [the migration guide](MIGRATION.md).

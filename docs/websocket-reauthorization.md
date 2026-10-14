@@ -75,3 +75,8 @@ See [principal lifecycle](principal-lifecycle.md#current-authority-for-sensitive
 for immediate fail-closed status/current-grant checks and the
 [0.20 migration](../MIGRATION.md#0192-to-0200-current-authority-and-sensitive-operations)
 for refresh provenance, stored role ceilings, and mandatory host/OIDC authority.
+
+Invalid or overflowing schedule durations and non-finite lifetime fractions
+produce an immediate deadline. This avoids a panic or an indefinitely postponed
+check; it does not convert periodic reauthorization into an immediate revocation
+guarantee for sensitive operations.

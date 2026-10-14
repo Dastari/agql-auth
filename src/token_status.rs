@@ -96,14 +96,29 @@ impl ReauthorizationPolicy {
         metadata: &AccessTokenMetadata,
         connection_started_at: OffsetDateTime,
     ) -> OffsetDateTime {
-        let mut deadline = now + self.min_interval;
+        // Invalid/unrepresentable scheduling configuration must force an
+        // immediate check, never panic or postpone authorization indefinitely.
+        if self.min_interval <= Duration::ZERO
+            || !self.lifetime_fraction.is_finite()
+            || self
+                .max_connection_ttl
+                .is_some_and(|ttl| ttl <= Duration::ZERO)
+        {
+            return now;
+        }
+        let Some(mut deadline) = now.checked_add(self.min_interval) else {
+            return now;
+        };
 
         if let Some(expires_at) = metadata.expires_at {
             let remaining = expires_at - now;
             if remaining > Duration::ZERO {
                 let fraction = self.lifetime_fraction.clamp(0.01, 1.0);
                 let fraction_secs = (remaining.whole_seconds() as f64 * fraction).ceil() as i64;
-                let candidate = now + Duration::seconds(fraction_secs.max(1));
+                let Some(candidate) = now.checked_add(Duration::seconds(fraction_secs.max(1)))
+                else {
+                    return now;
+                };
                 if candidate < deadline {
                     deadline = candidate;
                 }
@@ -116,7 +131,9 @@ impl ReauthorizationPolicy {
         }
 
         if let Some(max_ttl) = self.max_connection_ttl {
-            let max_deadline = connection_started_at + max_ttl;
+            let Some(max_deadline) = connection_started_at.checked_add(max_ttl) else {
+                return now;
+            };
             if max_deadline < deadline {
                 deadline = max_deadline;
             }

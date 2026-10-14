@@ -57,7 +57,7 @@ where
         validate_issue_request(&request)?;
 
         let now = OffsetDateTime::now_utc();
-        let expires_at = now + request.ttl;
+        let expires_at = crate::util::checked_expiry(now, request.ttl, "API-token ttl")?;
         let token_id = Uuid::new_v4();
         let raw_token = format!("{}{}", self.token_prefix, generate_opaque_token());
         let token_hash = hash_api_token(&raw_token);

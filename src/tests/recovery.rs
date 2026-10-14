@@ -32,11 +32,20 @@ async fn password_reset_tokens_support_success_expiry_and_replay() {
         .unwrap_err();
     assert!(matches!(replay, AuthError::PasswordResetTokenReplayed));
 
-    let expired = auth
-        .issue_password_reset_token_with_ttl("user-2", Duration::seconds(-1))
-        .unwrap();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let expired = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &serde_json::json!({
+            "sub": "user-2", "jti": uuid::Uuid::new_v4().to_string(),
+            "typ": "password_reset", "purpose": "password_reset",
+            "iss": "agql-auth", "aud": "agql-auth-clients",
+            "iat": now - 60, "exp": now - 5,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(super::TEST_HS256_SECRET.as_bytes()),
+    )
+    .unwrap();
     let err = auth
-        .authenticate_password_reset_token(&expired.token)
+        .authenticate_password_reset_token(&expired)
         .unwrap_err();
     assert!(matches!(err, AuthError::PasswordResetTokenExpired));
 }

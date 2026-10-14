@@ -35,7 +35,7 @@ where
             principal: principal.into(),
             code_hash,
             created_at: now,
-            expires_at: now + options.ttl,
+            expires_at: crate::util::checked_expiry(now, options.ttl, "login challenge ttl")?,
             failed_attempts: 0,
             max_attempts: options.max_attempts,
             consumed_at: None,

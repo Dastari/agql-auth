@@ -609,7 +609,8 @@ where
     ) -> AuthResult<IssuedPurposeToken> {
         validate_purpose_token_issue_request(&request)?;
         let issued_at = OffsetDateTime::now_utc();
-        let expires_at = issued_at + request.ttl;
+        let expires_at =
+            crate::util::checked_jwt_expiry(issued_at, request.ttl, "purpose-token ttl")?;
         let claims = PurposeTokenClaims {
             typ: PURPOSE_TOKEN_TYPE.to_string(),
             sub: request.subject.clone(),
@@ -852,9 +853,9 @@ where
         validate_access_token_only_request(&request, &self.config)?;
         let now = OffsetDateTime::now_utc();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
-        if ttl <= Duration::ZERO {
+        if ttl < Duration::seconds(1) {
             return Err(AuthError::InvalidConfiguration(
-                "access-token-only ttl must be greater than zero".to_string(),
+                "access-token-only ttl must be at least one second".to_string(),
             ));
         }
         if ttl > self.config.max_access_token_ttl {
@@ -892,7 +893,8 @@ where
                 additional: request.additional_claims,
             },
         };
-        let access_token_expires_at = now + ttl;
+        let access_token_expires_at =
+            crate::util::checked_jwt_expiry(now, ttl, "access-token-only ttl")?;
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
@@ -1182,12 +1184,14 @@ where
                 .authorization_roles
                 .retain(|role| ceiling.contains(role));
         }
-        let access_token_expires_at = now + self.config.access_token_ttl;
+        let access_token_expires_at =
+            crate::util::checked_jwt_expiry(now, self.config.access_token_ttl, "access-token ttl")?;
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
         let raw_refresh_token = generate_opaque_token();
-        let refresh_token_expires_at = now + self.config.refresh_token_ttl;
+        let refresh_token_expires_at =
+            crate::util::checked_expiry(now, self.config.refresh_token_ttl, "refresh-token ttl")?;
         let refreshable_metadata = RefreshableTokenMetadata {
             tenant_id: user.token_claims.tenant_id.clone(),
             organization_id: user.token_claims.organization_id.clone(),
@@ -1873,9 +1877,9 @@ fn validate_access_token_ttl_and_claims(
     config: &AuthConfig,
 ) -> AuthResult<()> {
     if let Some(ttl) = ttl {
-        if ttl <= Duration::ZERO {
+        if ttl < Duration::seconds(1) {
             return Err(AuthError::InvalidConfiguration(
-                "access-token-only ttl must be greater than zero".to_string(),
+                "access-token-only ttl must be at least one second".to_string(),
             ));
         }
         if ttl > config.max_access_token_ttl {
