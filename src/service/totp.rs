@@ -67,8 +67,12 @@ where
     /// Verifies a TOTP code for the supplied secret and time.
     ///
     /// This method is stateless and can accept the same valid code more than
-    /// once within the configured skew window. Production MFA flows should
-    /// prefer [`AuthService::verify_totp_code_with_replay_store`].
+    /// once within the configured skew window. It has no principal/factor
+    /// ownership check, attempt limiter, replay consumption, enrollment update
+    /// or session/MFA state transition. `now` and the secret must come from the
+    /// trusted host. Production MFA flows should prefer
+    /// [`Self::verify_totp_code_with_replay_store_and_metadata`], then bind the
+    /// result to the exact authenticated session before recording step-up.
     pub fn verify_totp_code(
         &self,
         secret_base32: &str,
@@ -80,7 +84,12 @@ where
             .map(|_| ())
     }
 
-    /// Verifies a TOTP code for a principal with abuse protection.
+    /// Verifies a TOTP code with configured principal/client abuse protection.
+    ///
+    /// This does not consume a replay step: the same valid code can succeed
+    /// again within its time window. It does not check factor ownership or
+    /// establish MFA/session state. For one-time acceptance use
+    /// [`Self::verify_totp_code_with_replay_store_and_metadata`].
     pub async fn verify_totp_code_for_principal(
         &self,
         principal_id: &str,
@@ -124,7 +133,10 @@ where
     /// Verifies a TOTP code and consumes the accepted time step once.
     ///
     /// `store.consume_totp_step` must atomically return `true` only for the
-    /// first use of `(principal_id, factor_id, step)`.
+    /// first use of `(principal_id, factor_id, step)`. Configured principal
+    /// abuse protection applies; client protection requires the metadata variant.
+    /// The host still binds the stored factor and accepted result to the exact
+    /// authenticated principal/session and records any resulting assurance.
     #[allow(clippy::too_many_arguments)]
     pub async fn verify_totp_code_with_replay_store<S>(
         &self,
@@ -153,7 +165,13 @@ where
     }
 
     /// Verifies a TOTP code, consumes the accepted time step once, and applies
-    /// abuse protection using principal and client metadata.
+    /// configured abuse protection using principal and client metadata.
+    ///
+    /// Replay safety requires an atomic, durable [`TotpReplayStore`] shared by
+    /// all workers. The host supplies the correct factor/secret and trusted
+    /// time, verifies factor ownership and session binding, and only then records
+    /// accepted MFA (for example through [`Self::step_up_session`]). This method
+    /// neither enrolls a factor nor changes session assurance itself.
     #[allow(clippy::too_many_arguments)]
     pub async fn verify_totp_code_with_replay_store_and_metadata<S>(
         &self,

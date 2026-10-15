@@ -17,7 +17,12 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
-    /// Issues a password-reset token with the default one-hour TTL.
+    /// Issues a signed password-reset token with the default one-hour TTL.
+    ///
+    /// This does not persist a one-time-use record, send delivery, check user
+    /// state or apply request admission. Complete reset flows should use
+    /// [`Self::should_process_password_reset_request`] and
+    /// [`Self::issue_password_reset_token_with_store`].
     pub fn issue_password_reset_token(
         &self,
         user_id: impl Into<String>,
@@ -25,7 +30,8 @@ where
         self.issue_password_reset_token_with_ttl(user_id, Duration::hours(1))
     }
 
-    /// Issues a password-reset token with a custom TTL.
+    /// Issues a signed reset token without persisting its one-time-use record.
+    /// Shares the primitive contract of [`Self::issue_password_reset_token`].
     pub fn issue_password_reset_token_with_ttl(
         &self,
         user_id: impl Into<String>,
@@ -73,7 +79,15 @@ where
         Ok(issued)
     }
 
-    /// Validates a password-reset token without consuming its stored token ID.
+    /// Validates a signed reset token without consulting or consuming its store.
+    ///
+    /// Checks cryptographic claims/purpose/expiry, not one-time use, store
+    /// revocation, attempt limits, current user state or a password change.
+    /// Repeated validation can succeed for the same token. Never use validation
+    /// alone to authorize a reset; use
+    /// [`Self::consume_password_reset_token_with_metadata`], then perform the
+    /// host's password update and required session revocation with appropriate
+    /// transaction/fencing and recovery behavior.
     pub fn authenticate_password_reset_token(
         &self,
         token: &str,
@@ -123,7 +137,12 @@ where
             .await
     }
 
-    /// Validates and consumes a password-reset token with abuse protection.
+    /// Validates and atomically consumes a reset ID with configured abuse protection.
+    ///
+    /// Requires an atomic [`PasswordResetTokenStore`] implementation. This does
+    /// not update a password or revoke other sessions/tokens. The host binds the
+    /// verified user, persists the new password and implements revocation and
+    /// recovery/fencing if any step fails after consumption.
     pub async fn consume_password_reset_token_with_metadata<S>(
         &self,
         store: &S,

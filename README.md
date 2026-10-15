@@ -352,6 +352,7 @@ For typed recent-authentication requests bound to one-time state, see
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [OIDC reauthentication and step-up](docs/oidc-step-up.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
+- [Primitives and complete secure host flows](docs/secure-primitive-flows.md)
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Atomic abuse protection](docs/abuse-protection.md)
 - [Migration guide](MIGRATION.md)
