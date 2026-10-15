@@ -10,6 +10,33 @@ use super::jwt_signing::{RSA_PRIVATE_KEY_A, RSA_PUBLIC_KEY_A};
 use super::{MemoryRefreshTokenStore, MemoryUserStore, TEST_HS256_SECRET, metadata};
 use crate::prelude::*;
 
+#[test]
+fn validator_current_time_tracks_its_injected_validation_clock() {
+    for epoch in [1_000_000_000, 3_000_000_000] {
+        let now = OffsetDateTime::from_unix_timestamp(epoch).unwrap()
+            + Duration::nanoseconds(123_456_789);
+        let clock = FixedClock::new(now);
+        let validator = rs256_validator()
+            .clock(Arc::new(clock.clone()))
+            .leeway_seconds(0)
+            .build()
+            .unwrap();
+        let mut claims = access_claims_json(Some("access_token"));
+        claims["iat"] = json!(epoch);
+        claims["exp"] = json!(epoch + 60);
+        let token = encode_rs256(claims);
+        assert_eq!(validator.current_time(), now);
+        let user = validator.authenticate_access_token(&token).unwrap();
+        assert_eq!(
+            user.token_claims.expires_at.unwrap().unix_timestamp(),
+            epoch + 60
+        );
+        clock.advance_seconds(61);
+        assert_eq!(validator.current_time(), now + Duration::seconds(61));
+        assert!(validator.authenticate_access_token(&token).is_err());
+    }
+}
+
 struct ValidatorQuery;
 
 #[test]

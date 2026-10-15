@@ -271,6 +271,15 @@ impl AccessTokenValidator {
         AccessTokenValidatorBuilder::new()
     }
 
+    /// Returns the current time from the clock used for token validation.
+    ///
+    /// Transport adapters can use this observation to schedule credential expiry
+    /// on the same time basis. Each call reads the retained clock; this does not
+    /// validate a credential or check current account/session revocation.
+    pub fn current_time(&self) -> time::OffsetDateTime {
+        self.clock.now()
+    }
+
     /// Returns a clone of the configured request-time scope matcher.
     pub fn scope_matcher(&self) -> Arc<dyn ScopeMatch> {
         self.scope_matcher.clone()

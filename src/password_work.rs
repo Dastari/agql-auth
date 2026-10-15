@@ -90,13 +90,9 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
-    use std::task::{Context, Poll, Wake, Waker};
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
     fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
-        future.poll(&mut Context::from_waker(&Waker::from(Arc::new(Noop))))
+        future.poll(&mut Context::from_waker(Waker::noop()))
     }
 
     #[tokio::test]
