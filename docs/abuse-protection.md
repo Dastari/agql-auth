@@ -140,3 +140,17 @@ let store = MemoryAuthRateLimitStore::with_capacity_and_clock(
 Use the same trusted clock in the store and `AuthService` when injecting one.
 Expired replacements are rejected. `purge_expired()` can reclaim state during
 idle periods; no background task is spawned. See [the migration guide](../MIGRATION.md#0200-to-0201-bounded-process-local-abuse-state).
+
+## Async password work admission
+
+Async password login and challenge hashing/verification leave runtime threads using
+one process-wide pool of two workers and 32 queued jobs. Admission uses a nonblocking
+bounded queue; saturation and worker faults fail closed as `AuthServiceUnavailable`
+before credential-failure counters change. No store lock is held during CPU work.
+Cancellation does not free actual running/queued capacity early. Atomic challenge
+attempts already reserved remain charged even when the executor cannot admit work.
+
+Hosts separately bound incoming requests, password/code sizes and accepted Argon2
+costs. These controls must cover explicit synchronous hash/verify helpers too; those
+helpers remain blocking by design. This pool does not add a password-size or Argon2
+parameter compatibility cutoff and never logs sensitive inputs.

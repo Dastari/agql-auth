@@ -107,6 +107,7 @@ mod memory_rate_limit;
 mod models;
 mod oidc;
 mod oidc_authorization;
+mod password_work;
 pub mod prelude;
 mod principal_reference;
 mod purpose_grant;

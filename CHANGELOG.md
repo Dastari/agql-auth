@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.1
+
+- Move async password login and challenge hashing/verification to one runtime-neutral,
+  process-wide bounded worker pool (two workers, 32 queued jobs). Saturation and
+  executor failures return `AuthServiceUnavailable` without credential-failure counts.
+- Keep admitted work charged until completion after caller cancellation. Preserve
+  disabled-account dummy verification and atomic challenge reservation semantics.
+- Re-read current enabled user credentials/grants before session creation and
+  reject challenges that expire in the worker queue before Argon2 starts.
+- Document explicit synchronous password helpers and host input/cost admission boundaries.
+
 ## 0.21.0
 
 - Require atomic login-challenge attempt admission before password work, closing

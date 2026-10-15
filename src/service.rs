@@ -110,6 +110,7 @@ pub struct AuthService<U, R> {
     pub(super) rate_limit_clock: Arc<dyn Clock>,
     pub(super) login_challenge_clock: Arc<dyn Clock>,
     pub(super) argon2: Argon2<'static>,
+    pub(super) password_executor: Arc<crate::password_work::PasswordWorkPool>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
     pub(super) validation: Validation,
@@ -121,7 +122,7 @@ pub struct AuthService<U, R> {
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
     refresh_grant_authority: Option<Arc<dyn crate::RefreshGrantAuthority>>,
     #[cfg(test)]
-    pub(super) password_work: std::sync::Mutex<Vec<String>>,
+    pub(super) password_work: Arc<std::sync::Mutex<Vec<String>>>,
     #[cfg(test)]
     pub(super) token_work: std::sync::atomic::AtomicUsize,
 }
@@ -203,8 +204,9 @@ where
             rate_limit_clock,
             login_challenge_clock: Arc::new(SystemClock),
             argon2: Argon2::default(),
+            password_executor: crate::password_work::PasswordWorkPool::shared()?,
             #[cfg(test)]
-            password_work: std::sync::Mutex::default(),
+            password_work: Arc::default(),
             #[cfg(test)]
             token_work: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -229,7 +231,8 @@ where
         self
     }
 
-    /// Hashes a password with Argon2.
+    /// Hashes a password synchronously with Argon2. This blocks the caller;
+    /// async service entry points use the shared bounded worker pool.
     pub fn hash_password(&self, password: &str) -> AuthResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         self.argon2
@@ -277,7 +280,8 @@ where
         self
     }
 
-    /// Verifies a password against an Argon2 password hash.
+    /// Verifies a password synchronously against an Argon2 hash. This blocks
+    /// the caller; async service entry points use the shared bounded worker pool.
     pub fn verify_password(&self, password: &str, password_hash: &str) -> AuthResult<()> {
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
@@ -293,7 +297,60 @@ where
         result
     }
 
+    pub(super) async fn hash_password_async(&self, password: &str) -> AuthResult<String> {
+        let password = password.to_owned();
+        let argon2 = self.argon2.clone();
+        self.password_executor
+            .execute(move || {
+                let salt = SaltString::generate(&mut OsRng);
+                argon2
+                    .hash_password(password.as_bytes(), &salt)
+                    .map(|hash| hash.to_string())
+                    .map_err(|err| AuthError::PasswordHashing(err.to_string()))
+            })
+            .await
+    }
+
+    pub(super) async fn verify_password_async(
+        &self,
+        password: &str,
+        password_hash: &str,
+    ) -> AuthResult<()> {
+        self.verify_password_async_before(password, password_hash, None)
+            .await
+    }
+
+    pub(super) async fn verify_password_async_before(
+        &self,
+        password: &str,
+        password_hash: &str,
+        deadline: Option<(Arc<dyn Clock>, OffsetDateTime)>,
+    ) -> AuthResult<()> {
+        let password = password.to_owned();
+        let password_hash = password_hash.to_owned();
+        let argon2 = self.argon2.clone();
+        #[cfg(test)]
+        let password_work = self.password_work.clone();
+        self.password_executor
+            .execute(move || {
+                if deadline.is_some_and(|(clock, expiry)| clock.now() >= expiry) {
+                    return Err(AuthError::LoginChallengeExpired);
+                }
+                let parsed = PasswordHash::new(&password_hash)
+                    .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
+                let result = argon2
+                    .verify_password(password.as_bytes(), &parsed)
+                    .map_err(|_| AuthError::InvalidCredentials);
+                #[cfg(test)]
+                password_work.lock().unwrap().push(password_hash);
+                result
+            })
+            .await
+    }
+
     /// Performs password login and issues a local session.
+    /// Password work awaits the process-wide bounded pool; saturation returns
+    /// `AuthServiceUnavailable` without recording a bad credential.
     ///
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
@@ -314,7 +371,13 @@ where
             .await?;
 
         let Some(user) = self.user_store.find_user_by_principal(principal).await? else {
-            let _ = self.verify_password(password, DUMMY_PASSWORD_HASH);
+            match self
+                .verify_password_async(password, DUMMY_PASSWORD_HASH)
+                .await
+            {
+                Ok(()) | Err(AuthError::InvalidCredentials) => {}
+                Err(error) => return Err(error),
+            }
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
                 .await?;
             return Err(AuthError::InvalidCredentials);
@@ -323,19 +386,49 @@ where
         if user.disabled {
             // Disabled accounts cannot authenticate. Use the same fixed work as
             // unknown accounts, independent of their stored hash or password.
-            let _ = self.verify_password(password, DUMMY_PASSWORD_HASH);
+            match self
+                .verify_password_async(password, DUMMY_PASSWORD_HASH)
+                .await
+            {
+                Ok(()) | Err(AuthError::InvalidCredentials) => {}
+                Err(error) => return Err(error),
+            }
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
                 .await?;
             return Err(AuthError::UserDisabled);
         }
 
-        if let Err(err) = self.verify_password(password, &user.password_hash) {
+        if let Err(err) = self
+            .verify_password_async(password, &user.password_hash)
+            .await
+        {
+            if matches!(err, AuthError::AuthServiceUnavailable) {
+                return Err(err);
+            }
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
                 .await?;
             return Err(err);
         }
         self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
             .await?;
+
+        // Queueing and counter-store awaits can outlive the original user
+        // snapshot. Observe current authority immediately before session creation.
+        let current = self
+            .user_store
+            .find_user_by_id(&user.id)
+            .await?
+            .ok_or(AuthError::InvalidCredentials)?;
+        if current.id != user.id {
+            return Err(AuthError::AuthServiceUnavailable);
+        }
+        if current.disabled {
+            return Err(AuthError::UserDisabled);
+        }
+        if current.password_hash != user.password_hash {
+            return Err(AuthError::InvalidCredentials);
+        }
+        let user = current;
 
         let session_id = Uuid::new_v4();
         let session_family_id = Uuid::new_v4();
