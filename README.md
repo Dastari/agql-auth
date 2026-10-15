@@ -541,3 +541,8 @@ Runtime configuration rejects empty issuer/audience and invalid lifetimes. JWT
 expiry must survive whole-second rounding; all expiry arithmetic is checked before
 signing or persistence. The custom-grant maximum and ordinary session lifetime
 remain separately configured. See [the migration guide](MIGRATION.md).
+
+Login-code stores must atomically reserve attempts before verification and
+consume only an unexpired challenge. Every admitted guess counts, including
+correct and cancelled work. The 0.21 migration changes the store contract and
+counter field; see [MIGRATION.md](MIGRATION.md).

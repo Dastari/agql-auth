@@ -180,16 +180,32 @@ pub trait LoginChallengeStore: Send + Sync {
         challenge_id: Uuid,
     ) -> AuthResult<Option<StoredLoginChallenge>>;
 
-    /// Increments failed attempts and returns the new attempt count.
-    async fn increment_login_challenge_attempts(
+    /// Atomically admits one verification attempt and returns its snapshot.
+    ///
+    /// In one transaction, reject a missing, consumed, expired (expiry <=
+    /// `attempted_at`), or exhausted challenge with the corresponding AuthError;
+    /// otherwise increment `attempts` and return the resulting record. At most
+    /// `max_attempts` calls may succeed for a challenge, including under concurrent
+    /// requests. There is no safe read-then-write fallback. Do not hold storage
+    /// locks while the caller performs password verification.
+    ///
+    /// A committed admission remains charged if the caller cancels or fails.
+    /// All challenge fields except `attempts` and `consumed_at` are immutable.
+    /// IDs must never be reused, and insert must reject an existing ID.
+    async fn reserve_login_challenge_attempt(
         &self,
         challenge_id: Uuid,
         attempted_at: OffsetDateTime,
-    ) -> AuthResult<u32>;
+    ) -> AuthResult<StoredLoginChallenge>;
 
     /// Consumes a login challenge exactly once.
     ///
-    /// Return `true` only for the first successful consume operation.
+    /// Atomically require an existing, unconsumed challenge with at least one
+    /// admitted attempt and expiry > `consumed_at`, then mark it consumed. A
+    /// correctly verified final admitted attempt may consume at attempts ==
+    /// max_attempts. Return `false` without changing state on rejection. Never
+    /// recreate an absent challenge. Hosts may additionally check the database
+    /// clock inside this transaction; use the same trusted time basis.
     async fn consume_login_challenge(
         &self,
         challenge_id: Uuid,

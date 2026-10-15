@@ -1,5 +1,41 @@
 # Migration Guide
 
+## 0.20.3 to 0.21.0: atomic login-challenge admission
+
+This is a breaking pre-1.0 release. Replace
+`LoginChallengeStore::increment_login_challenge_attempts` with the required
+`reserve_login_challenge_attempt`. It must atomically check that the challenge
+is present, unconsumed, unexpired, and below its cap, increment `attempts`, and
+return the resulting snapshot. A read/check/write sequence without locking or
+a conditional atomic update is insufficient. No default implementation is
+provided. Release the storage lock before returning to password verification.
+
+Rename `StoredLoginChallenge.failed_attempts` to `attempts` in Rust, serialized
+records, and storage mappings. The count now includes every admitted guess,
+including a correct code and cancelled/interrupted work. `max_attempts` limits
+all admitted work, so retries after cancellation can exhaust the challenge.
+Never refund an admission, even when its response is lost.
+
+Quiesce old challenge-verification workers, invalidate outstanding challenges,
+and deploy the new store/service together. Issue fresh challenges afterward.
+Do not run old increment-after-failure verifiers concurrently with new atomic
+reservation verifiers; they can bypass each other's caps. There is no implicit
+serde alias for the old counter. This does not change access/refresh tokens or
+other authentication store contracts.
+
+Challenge IDs and their principal, code hash, timestamps, maximum and channel
+are immutable. Reject duplicate insertion and never reuse an ID. Consumption
+must atomically require an unconsumed, unexpired record with an admitted attempt.
+The final correctly verified reservation can consume when `attempts == max_attempts`.
+Exactly one concurrent consumer may succeed; do not recreate missing rows.
+
+`with_login_challenge_clock` sets a trusted issuance/verification clock; stores
+must use the same time basis. Its default is system UTC and it is separate from
+the existing rate-limit clock. The service checks expiry after password work,
+after consumption, and before returning `VerifiedLoginChallenge`. A challenge
+consumed just before expiry can remain consumed while verification fails closed;
+the caller must obtain a new challenge. See [storage contracts](docs/storage-traits.md#login-challenges).
+
 ## 0.20.2 to 0.20.3: time and configuration invariants
 
 Issuer and audience must contain non-whitespace characters. Ordinary access,

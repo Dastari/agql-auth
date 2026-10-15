@@ -1,4 +1,3 @@
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::AuthService;
@@ -29,14 +28,14 @@ where
         validate_login_challenge_options(&options)?;
         let code = generate_numeric_code(options.code_length);
         let code_hash = self.hash_password(&code)?;
-        let now = OffsetDateTime::now_utc();
+        let now = self.login_challenge_clock.now();
         let challenge = StoredLoginChallenge {
             id: Uuid::new_v4(),
             principal: principal.into(),
             code_hash,
             created_at: now,
             expires_at: crate::util::checked_expiry(now, options.ttl, "login challenge ttl")?,
-            failed_attempts: 0,
+            attempts: 0,
             max_attempts: options.max_attempts,
             consumed_at: None,
             channel: options.channel.clone(),
@@ -83,7 +82,6 @@ where
     where
         S: LoginChallengeStore,
     {
-        let now = OffsetDateTime::now_utc();
         let client_keys =
             self.rate_limit_keys(AuthRateLimitFlow::LoginCodeVerification, None, &metadata);
         self.reject_if_rate_limited(&self.config.rate_limits.credential, &client_keys)
@@ -102,6 +100,7 @@ where
             .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
             .await?;
 
+        let now = self.login_challenge_clock.now();
         if challenge.is_consumed() {
             return Err(AuthError::LoginChallengeReplayed);
         }
@@ -114,19 +113,42 @@ where
             return Err(AuthError::LoginChallengeAttemptsExhausted);
         }
 
-        if self.verify_password(code, &challenge.code_hash).is_err() {
+        let reserved = store
+            .reserve_login_challenge_attempt(challenge_id, self.login_challenge_clock.now())
+            .await?;
+        if !same_challenge_definition(&challenge, &reserved)
+            || reserved.is_consumed()
+            || reserved.attempts <= challenge.attempts
+            || reserved.attempts > reserved.max_attempts
+        {
+            return Err(AuthError::AuthServiceUnavailable);
+        }
+        // The store may return long after it atomically admitted this attempt.
+        // Do not spend password work on authority that has already expired.
+        if reserved.is_expired(self.login_challenge_clock.now()) {
+            return Err(AuthError::LoginChallengeExpired);
+        }
+        let verified = self.verify_password(code, &reserved.code_hash);
+        // Password work and storage awaits can outlive the admission timestamp.
+        let verified_at = self.login_challenge_clock.now();
+        if reserved.is_expired(verified_at) {
+            return Err(AuthError::LoginChallengeExpired);
+        }
+        if verified.is_err() {
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
                 .await?;
-            let attempts = store
-                .increment_login_challenge_attempts(challenge_id, now)
-                .await?;
-            if attempts >= challenge.max_attempts {
+            if reserved.attempts >= reserved.max_attempts {
                 return Err(AuthError::LoginChallengeAttemptsExhausted);
             }
             return Err(AuthError::InvalidLoginCode);
         }
 
-        let consumed = store.consume_login_challenge(challenge_id, now).await?;
+        let consumed = store
+            .consume_login_challenge(challenge_id, verified_at)
+            .await?;
+        if reserved.is_expired(self.login_challenge_clock.now()) {
+            return Err(AuthError::LoginChallengeExpired);
+        }
         if !consumed {
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
                 .await?;
@@ -135,11 +157,25 @@ where
         self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
             .await?;
 
+        let verified_at = self.login_challenge_clock.now();
+        if reserved.is_expired(verified_at) {
+            return Err(AuthError::LoginChallengeExpired);
+        }
         Ok(VerifiedLoginChallenge {
             challenge_id,
-            principal: challenge.principal,
-            verified_at: now,
-            channel: challenge.channel,
+            principal: reserved.principal,
+            verified_at,
+            channel: reserved.channel,
         })
     }
+}
+
+fn same_challenge_definition(a: &StoredLoginChallenge, b: &StoredLoginChallenge) -> bool {
+    a.id == b.id
+        && a.principal == b.principal
+        && a.code_hash == b.code_hash
+        && a.created_at == b.created_at
+        && a.expires_at == b.expires_at
+        && a.max_attempts == b.max_attempts
+        && a.channel == b.channel
 }

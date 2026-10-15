@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.0
+
+- Require atomic login-challenge attempt admission before password work, closing
+  concurrent guesses beyond the configured budget. All admitted attempts count,
+  including successful, cancelled, or interrupted work; no refunds or fallback.
+- Recheck challenge expiry after expensive work and asynchronous consumption,
+  with a separate injectable trusted challenge clock. Challenge definitions are
+  immutable and checked for coherence across admission.
+- Breaking `LoginChallengeStore` and `StoredLoginChallenge` contract: implement
+  reservation and conditional consume; migrate as described in MIGRATION.md.
+
 ## 0.20.3
 
 - Reject empty issuer/audience, nonpositive or unrepresentable configured
