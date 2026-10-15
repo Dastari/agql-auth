@@ -790,7 +790,16 @@ where
         })
     }
 
-    /// Issues a local session for a user already verified by the host.
+    /// Issues a local session for a user already verified by the trusted host.
+    ///
+    /// This is an issuance primitive, not a credential verifier: it does not
+    /// load the user, check disabled/deleted state, validate a code/assertion,
+    /// or authorize caller-supplied roles. Resolve current identity/grants and
+    /// verify evidence first. The auth-method label does not establish MFA.
+    /// Host-issued refresh requires [`Self::with_refresh_grant_authority`].
+    /// See [`Self::issue_verified_user_session_with_scopes`] for a complete
+    /// challenge-to-session example and the
+    /// [complete host-flow guide](https://github.com/Dastari/agql-auth/blob/main/docs/secure-primitive-flows.md).
     pub async fn issue_verified_user_session(
         &self,
         user_id: impl Into<String>,
@@ -808,7 +817,31 @@ where
         .await
     }
 
-    /// Issues a local session with roles and scopes for a user already verified by the host.
+    /// Issues a local session with grants already authorized by the trusted host.
+    ///
+    /// Does not independently verify identity, current user state, grant ownership
+    /// or authentication evidence. Never pass request-selected roles/scopes here.
+    /// Configure [`Self::with_refresh_grant_authority`] for subsequent refresh.
+    /// This example consumes a bound challenge and reads current user authority;
+    /// delivery, channel/CSRF controls and cross-store transaction fencing remain
+    /// host responsibilities. Failed lookup/issuance leaves the challenge consumed.
+    ///
+    /// ```no_run
+    /// # use agql_auth::*;
+    /// # async fn email_code_login<U: UserStore + 'static, R: RefreshTokenStore + 'static, C: LoginChallengeStore>(
+    /// # auth: &AuthService<U, R>, users: &U, challenges: &C, challenge_id: uuid::Uuid,
+    /// # submitted_code: &str, metadata: ClientMetadata) -> AuthResult<AuthPayload> {
+    /// let verified = auth.verify_login_challenge_with_metadata(
+    ///     challenges, challenge_id, submitted_code, metadata.clone(),
+    /// ).await?;
+    /// let user = users.find_user_by_principal(&verified.principal).await?
+    ///     .ok_or(AuthError::InvalidCredentials)?;
+    /// if user.disabled { return Err(AuthError::UserDisabled); }
+    /// auth.issue_verified_user_session_with_scopes(
+    ///     user.id, user.roles, user.scopes, AuthMethod::EmailCode, metadata,
+    /// ).await
+    /// # }
+    /// ```
     pub async fn issue_verified_user_session_with_scopes(
         &self,
         user_id: impl Into<String>,
@@ -827,7 +860,10 @@ where
         .await
     }
 
-    /// Issues a local session with an explicit session context.
+    /// Issues a local session from host-verified identity and context.
+    ///
+    /// Shares the trusted-caller contract of [`Self::issue_verified_user_session`];
+    /// an explicit context is a host assertion, not verification of its contents.
     pub async fn issue_session_for_user(
         &self,
         user_id: impl Into<String>,
@@ -839,7 +875,11 @@ where
             .await
     }
 
-    /// Issues a local session with scopes and an explicit session context.
+    /// Issues a local session from host-authorized grants and context.
+    ///
+    /// Shares the trusted-caller contract of
+    /// [`Self::issue_verified_user_session_with_scopes`]. It does not read user
+    /// state or validate external authentication evidence.
     pub async fn issue_session_for_user_with_scopes(
         &self,
         user_id: impl Into<String>,
@@ -866,7 +906,9 @@ where
     /// metadata. Sender/resource bindings and arbitrary custom claims are not
     /// accepted here because their validity may be per-token. This records host
     /// grant provenance; refresh requires [`Self::with_refresh_grant_authority`],
-    /// including when the host verified a password itself.
+    /// including when the host verified a password itself. Structural assurance
+    /// validation cannot establish that evidence happened: current identity,
+    /// enabled state, grant ownership and MFA acceptance are host assertions.
     pub async fn issue_session_for_user_with_metadata(
         &self,
         user_id: impl Into<String>,
@@ -923,6 +965,8 @@ where
     ///
     /// This is the direct typed entry point for password, passkey, OIDC, or
     /// other host flows that have already established authoritative assurance.
+    /// It validates assurance structure, not the external proof or its meaning.
+    /// The host must bind that proof to this user/session and authorize grants.
     #[allow(clippy::too_many_arguments)]
     pub async fn issue_assured_user_session(
         &self,
@@ -949,7 +993,11 @@ where
     ///
     /// This is intended for host-verified service, device, or one-shot grants
     /// that should validate like normal user-shaped access tokens but must not
-    /// create a refreshable session.
+    /// create a refreshable session. This does not authenticate the supplied
+    /// subject, validate external evidence, or establish an active browser
+    /// session. The host authorizes all grants and bindings before calling it;
+    /// resource servers must enforce those bindings during use. For delegation
+    /// from a real active session use [`Self::issue_session_bound_access_token_only`].
     pub async fn issue_access_token_only(
         &self,
         request: AccessTokenOnlyRequest,

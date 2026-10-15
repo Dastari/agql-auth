@@ -21,7 +21,10 @@ pub trait AdditionalTokenRolesProvider: Send + Sync {
 }
 
 #[async_trait]
-/// Loads local users for password login, refresh, and verified-session flows.
+/// Loads local users for password login, refresh, and host-owned identity reads.
+/// Trusted-host `issue_verified_user_session*` / `issue_session_for_user*` calls
+/// do not automatically consult this store; their caller must establish current
+/// identity/enabled state and grants before issuance.
 pub trait UserStore: Send + Sync {
     /// Finds a local user by login principal, such as email or username.
     async fn find_user_by_principal(&self, principal: &str) -> AuthResult<Option<StoredUser>>;
@@ -345,7 +348,13 @@ pub trait ApiTokenStore: Send + Sync {
         reason: ApiTokenRevocationReason,
     ) -> AuthResult<()>;
 
-    /// Optionally revokes all tokens for a principal.
+    /// Optional bulk API-token revocation; the default is a no-op returning zero.
+    ///
+    /// `Ok(0)` alone does not prove the adapter supports bulk revocation or that
+    /// no active tokens remain. Hosts relying on this must require and test an
+    /// override, or use a known-supported per-token revocation workflow. It does
+    /// not revoke user sessions/JWTs or invalidate already accepted principals;
+    /// those require their own authoritative status/revalidation boundary.
     async fn revoke_api_tokens_for_principal(
         &self,
         _subject: &str,
@@ -356,7 +365,12 @@ pub trait ApiTokenStore: Send + Sync {
         Ok(0)
     }
 
-    /// Optionally revokes all tokens bound to a generic resource.
+    /// Optional resource bulk revocation; the default is a no-op returning zero.
+    ///
+    /// Shares the capability/zero-result contract of
+    /// [`Self::revoke_api_tokens_for_principal`]. The host authorizes the exact
+    /// resource and must know the adapter implements this operation before
+    /// presenting it as a security guarantee.
     async fn revoke_api_tokens_for_resource(
         &self,
         _resource_type: &str,

@@ -1,5 +1,16 @@
 # Migration Guide
 
+## 0.21.1 to 0.21.2: primitive and complete-flow documentation
+
+Documentation-only update; no runtime, public API, token or stored-record
+migration is required. The patch version satisfies the source-path release rule
+for call-site Rustdoc edits. Audit applications using the low-level helpers
+against the [complete secure flows](docs/secure-primitive-flows.md): host-verified
+issuance does not verify credentials/current user state, stateless TOTP can
+replay, reset validation does not consume, and optional bulk revocation defaults
+to `Ok(0)` without revoking anything. Existing primitives and defaults remain
+available; choose and implement the complete host workflow deliberately.
+
 ## 0.21.0 to 0.21.1: bounded async password work
 
 No public signature, stored record or token migration is required. Async password

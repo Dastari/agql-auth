@@ -172,13 +172,12 @@ use agql_auth::{AccessTokenOnlyRequest, AuthMethod, SessionContext};
 use time::Duration;
 
 let grant = auth
-    .issue_access_token_only(AccessTokenOnlyRequest {
-        user_id: "device-user-1".to_string(),
-        roles: vec!["Device".to_string()],
-        scopes: vec!["devices.read".to_string(), "devices.write".to_string()],
-        session: SessionContext::for_auth_method(AuthMethod::ServiceToken),
-        ttl: Some(Duration::minutes(30)),
-    })
+    .issue_access_token_only(AccessTokenOnlyRequest::new(
+        "device-user-1",
+        vec!["Device".into()],
+        vec!["devices.read".into(), "devices.write".into()],
+        SessionContext::for_auth_method(AuthMethod::ServiceToken),
+    ).with_ttl(Duration::minutes(30)))
     .await?;
 ```
 
@@ -192,3 +191,11 @@ as user sessions but no refresh-token session.
 resource binding. It does not decide what those values mean. Host applications
 own concrete authorization policy, resource lookup, rate limiting, audit
 logging, and token lifecycle workflows.
+
+## Optional bulk revocation
+
+`ApiTokenStore::revoke_api_tokens_for_principal` and
+`revoke_api_tokens_for_resource` default to `Ok(0)` without changing anything.
+Require a known supported, tested store override before promising bulk revocation;
+zero alone is not capability evidence. Already accepted principals require online
+status checks. See the [complete adapter-bound workflow](secure-primitive-flows.md#bulk-revocation-with-an-explicit-adapter-capability).

@@ -1,7 +1,9 @@
 # Recovery, Login Challenges, And MFA
 
 `agql-auth` includes primitives for recovery and step-up flows without taking
-over delivery, UI, or persistence.
+over delivery, UI, or persistence. Read the
+[primitive-versus-complete-flow contracts](secure-primitive-flows.md) before
+using a helper as an application security boundary.
 
 ## Password Reset
 
@@ -34,8 +36,12 @@ let verified = auth
     .await?;
 ```
 
-After consumption succeeds, the host updates the user's password hash and
-handles any local session-revocation policy.
+`authenticate_password_reset_token` only validates claims and does not consult
+or consume a stored token ID, check revocation, or count attempts. It cannot by
+itself authorize a one-time reset. After consumption succeeds, the host checks
+current account/expiry, updates the password hash and implements required
+session/token revocation with transaction/fencing and recovery if a later write
+fails. See the [complete reset sequence](secure-primitive-flows.md#one-time-reset-through-password-update-and-revocation).
 
 ## Login Challenges
 
@@ -79,17 +85,21 @@ The host decides what verified challenges can do. For example, the host can
 issue a local session with `AuthMethod::EmailCode`:
 
 ```rust
-use agql_auth::{AuthMethod, ClientMetadata};
+use agql_auth::{AuthError, AuthMethod, ClientMetadata};
 
-let payload = auth
-    .issue_verified_user_session(
-        local_user_id,
-        roles,
-        AuthMethod::EmailCode,
-        ClientMetadata::default(),
-    )
-    .await?;
+// The consumed challenge fixes the principal; request-selected user IDs/grants do not.
+let user = users.find_user_by_principal(&verified.principal).await?
+    .ok_or(AuthError::InvalidCredentials)?;
+if user.disabled { return Err(AuthError::UserDisabled); }
+let payload = auth.issue_verified_user_session_with_scopes(
+    user.id, user.roles, user.scopes, AuthMethod::EmailCode,
+    ClientMetadata::default(),
+).await?;
 ```
+
+Configure host refresh authority before issuing a refreshable host grant. This
+issuer does not verify credentials or read the user store itself; see the
+[complete challenge-to-session contract](secure-primitive-flows.md#bound-challenge-to-current-user-session).
 
 ## TOTP
 
@@ -107,28 +117,28 @@ let provisioning = auth.build_totp_provisioning(
     "alice@example.com",
     TotpOptions::default(),
 )?;
-
-auth.verify_totp_code_for_principal(
-    user_id,
-    &secret.base32_secret,
-    submitted_code,
-    TotpOptions::default(),
-    OffsetDateTime::now_utc(),
-    client_metadata,
-).await?;
 ```
 
-`verify_totp_code` is stateless and is kept for compatibility. Production flows
+Keep a newly provisioned secret pending until the host's authenticated enrollment
+confirmation succeeds. Generating/provisioning a secret does not enroll a factor
+or establish MFA. Verification below uses an existing confirmed factor loaded
+for the authenticated user, not the just-generated secret.
+
+`verify_totp_code` is stateless and has no attempt limiter.
+`verify_totp_code_for_principal` adds configured abuse controls but still permits
+replay. Neither changes enrollment or session assurance. Production flows
 should prefer `verify_totp_code_with_replay_store_and_metadata`, which records
 the accepted time step through `TotpReplayStore`, rejects the same step on
 reuse, and applies per-principal/per-client abuse protection:
 
 ```rust
+// Host-owned lookup must enforce confirmed enrollment and user/session ownership.
+let stored_secret = host.load_confirmed_totp_secret(user_id, "primary").await?;
 auth.verify_totp_code_with_replay_store_and_metadata(
     &totp_replay_store,
     user_id,
     Some("primary"),
-    &secret.base32_secret,
+    &stored_secret,
     submitted_code,
     TotpOptions::default(),
     OffsetDateTime::now_utc(),
@@ -136,9 +146,11 @@ auth.verify_totp_code_with_replay_store_and_metadata(
 ).await?;
 ```
 
-After a successful step-up challenge, the host can issue a new local session
-with `SessionContext` showing `AuthMethod::TotpStepUp` or update local session
-state according to its own policy.
+A successful replay-safe check still does not establish factor ownership or
+update session assurance. Bind the stored factor and submitted refresh token to
+the exact authenticated session, apply host MFA policy, then call
+`step_up_session`. See the [complete bound step-up sequence](secure-primitive-flows.md#totp-step-up-bound-to-the-existing-session).
+Do not infer MFA from an auth-method label or a client-supplied flag.
 
 ## Delivery And Persistence
 

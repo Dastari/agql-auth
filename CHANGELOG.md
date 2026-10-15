@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.2
+
+- Documentation only: clarify trusted-host issuance, TOTP replay/attempt limits,
+  validation-only password-reset checks and optional no-op bulk revocation.
+- Link complete host-bound flows and compile-check the challenge-to-session
+  example. No runtime behavior, public signature or stored-record change.
+- Patch metadata follows the source-path release rule for Rustdoc-only edits.
+
 ## 0.21.1
 
 - Move async password login and challenge hashing/verification to one runtime-neutral,
