@@ -27,7 +27,7 @@ where
     {
         validate_login_challenge_options(&options)?;
         let code = generate_numeric_code(options.code_length);
-        let code_hash = self.hash_password(&code)?;
+        let code_hash = self.hash_password_async(&code).await?;
         let now = self.login_challenge_clock.now();
         let challenge = StoredLoginChallenge {
             id: Uuid::new_v4(),
@@ -128,13 +128,25 @@ where
         if reserved.is_expired(self.login_challenge_clock.now()) {
             return Err(AuthError::LoginChallengeExpired);
         }
-        let verified = self.verify_password(code, &reserved.code_hash);
+        let verified = self
+            .verify_password_async_before(
+                code,
+                &reserved.code_hash,
+                Some((self.login_challenge_clock.clone(), reserved.expires_at)),
+            )
+            .await;
         // Password work and storage awaits can outlive the admission timestamp.
         let verified_at = self.login_challenge_clock.now();
         if reserved.is_expired(verified_at) {
             return Err(AuthError::LoginChallengeExpired);
         }
-        if verified.is_err() {
+        if let Err(error) = verified {
+            if matches!(
+                error,
+                AuthError::AuthServiceUnavailable | AuthError::LoginChallengeExpired
+            ) {
+                return Err(error);
+            }
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
                 .await?;
             if reserved.attempts >= reserved.max_attempts {

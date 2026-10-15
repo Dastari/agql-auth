@@ -40,6 +40,21 @@ pub(super) struct MemoryUserStore {
 }
 
 impl MemoryUserStore {
+    pub(super) fn corrupt_returned_id(&self, user_id: &str) {
+        self.users_by_id
+            .lock()
+            .unwrap()
+            .get_mut(user_id)
+            .unwrap()
+            .id = "wrong-id".into();
+    }
+
+    pub(super) fn remove(&self, user_id: &str) {
+        if let Some(user) = self.users_by_id.lock().unwrap().remove(user_id) {
+            self.principal_to_id.lock().unwrap().remove(&user.principal);
+        }
+    }
+
     pub(super) fn insert(&self, user: StoredUser) {
         let user_id = user.id.clone();
         let principal = user.principal.clone();

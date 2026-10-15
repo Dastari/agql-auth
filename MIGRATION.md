@@ -1,5 +1,35 @@
 # Migration Guide
 
+## 0.21.0 to 0.21.1: bounded async password work
+
+No public signature, stored record or token migration is required. Async password
+login and challenge issuance/verification now await a runtime-neutral worker pool
+shared by all service instances in the process: two running jobs and at most 32
+queued jobs. Queue saturation, worker initialization/disconnection and execution
+failure return `AuthServiceUnavailable`; they do not become bad credentials or
+increment credential-failure counters. Handle that operational error as temporary
+unavailability. Pool initialization failure makes service construction fail closed.
+
+Cancellation does not remove or refund queued/running CPU work. A login-challenge
+reservation committed before executor saturation/cancellation remains charged, as
+required by the atomic store contract; obtain another challenge if exhausted.
+Unknown/disabled logins still perform fixed dummy verification when admitted.
+After successful verification and counter-clear awaits, login re-reads the exact
+user ID before creating a session. Deleted/disabled users and changed password
+hashes deny; session roles/scopes come from this current record. Queued challenge
+verification checks expiry again inside its worker before starting Argon2.
+This is a decision-time authoritative read, not atomic fencing with later store
+writes; hosts needing atomic revocation/issuance consistency must supply that
+transaction or session-version boundary.
+The explicit `hash_password`/`verify_password` methods remain synchronous and block
+their caller; keep them outside async runtime workers when called directly.
+
+Host request admission, password/code size limits and accepted stored Argon2 cost
+parameters remain host policy. This release introduces no arbitrary password-size
+or cost cutoff. A bounded job count does not bound the size of one hostile request
+or the memory/CPU cost of one accepted hash. No password or hash is logged by the
+executor, and no application/store lock is held during password work.
+
 ## 0.20.3 to 0.21.0: atomic login-challenge admission
 
 This is a breaking pre-1.0 release. Replace

@@ -546,3 +546,18 @@ Login-code stores must atomically reserve attempts before verification and
 consume only an unexpired challenge. Every admitted guess counts, including
 correct and cancelled work. The 0.21 migration changes the store contract and
 counter field; see [MIGRATION.md](MIGRATION.md).
+
+### Bounded async password work
+
+Async password login and login-challenge issuance/verification use a runtime-neutral
+pool shared across all `AuthService` instances: two worker threads and 32 queued jobs.
+Saturation or executor failure returns `AuthServiceUnavailable` without recording a
+bad credential; admitted disabled accounts still perform fixed dummy verification.
+Cancellation retains queued/running work until completion. A committed challenge
+reservation is never refunded, including when the password queue is unavailable.
+
+The explicit `hash_password` and `verify_password` helpers remain synchronous CPU
+work. Hosts own request concurrency/body limits, password/code size policy and
+accepted stored Argon2 costs; a bounded job count does not bound one job's memory or
+CPU. The executor does not log credentials or hashes. See the
+[migration guide](MIGRATION.md#0210-to-0211-bounded-async-password-work).
