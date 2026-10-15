@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.3
+
+- Add read-only `AccessTokenValidator::current_time` so transport expiry
+  scheduling can observe the same injected clock as stateless token validation.
+- No constructor, validation, stored-record or token-format changes.
+
 ## 0.21.2
 
 - Documentation only: clarify trusted-host issuance, TOTP replay/attempt limits,

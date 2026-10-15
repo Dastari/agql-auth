@@ -1,5 +1,16 @@
 # Migration Guide
 
+## 0.21.2 to 0.21.3: validator clock observation
+
+The additive `AccessTokenValidator::current_time()` returns `time::OffsetDateTime`
+from the exact retained validation clock on each call. Transport adapters using
+an injected clock should observe this method when comparing/scheduling credential
+expiry, rather than silently substituting system time. Handle unsupported target
+clock conversions by denying authentication; never fall back to another clock.
+This accessor does not authenticate or revalidate account/session status. Existing
+constructors, stateless validation and token/store formats are unchanged; no data
+migration is required.
+
 ## 0.21.1 to 0.21.2: primitive and complete-flow documentation
 
 Documentation-only update; no runtime, public API, token or stored-record

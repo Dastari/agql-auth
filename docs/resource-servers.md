@@ -4,6 +4,13 @@
 `UserStore` or `RefreshTokenStore`. Use it in APIs, subgraphs, workers, and
 routers that only need to authenticate bearer JWTs issued by an `AuthService`.
 
+Transport expiry scheduling must use the same time basis as validation. Read
+`validator.current_time()` to observe its retained injected clock on each check;
+do not substitute system time when a custom clock is configured. The accessor
+returns `time::OffsetDateTime` without authenticating or consulting current
+account/session status. Validate target clock conversions and deny unsupported
+values rather than falling back to a different clock.
+
 ## Issuer And Validator Topology
 
 The issuer owns password login, refresh-token rotation, OIDC handoff, and token
