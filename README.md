@@ -27,6 +27,13 @@ Reusable authentication primitives for Rust services built with `async-graphql`.
 - `async-graphql` request injection and guards
 - Storage traits instead of built-in database assumptions
 
+## Current-session authority
+
+Version 0.22 adds an explicit validated pairing of an original ordinary credential
+with current session authority, without rewriting either principal. Original
+status, grant ceilings and both deadlines remain mandatory; see
+[the lifecycle contract](docs/principal-lifecycle.md#ordinary-current-session-proof).
+
 ## Install
 
 ```toml

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.22.0
+
+- Add `ResolvedPrincipal::from_current_session` for explicit ordinary-session
+  authority proof with the exact original credential reference and a distinct
+  current deadline/version. Keep the strict legacy constructor path.
+- Sensitive revalidation still checks original-token status and intersects exact
+  scope, scalar-role and authorization-role ceilings without replacing bindings.
+
 ## 0.21.3
 
 - Add read-only `AccessTokenValidator::current_time` so transport expiry

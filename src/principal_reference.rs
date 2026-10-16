@@ -201,6 +201,7 @@ pub struct ResolvedPrincipal {
     reference: PrincipalReference,
     principal: AuthPrincipal,
     resolved_at: OffsetDateTime,
+    current_session_authority: bool,
 }
 
 impl ResolvedPrincipal {
@@ -228,7 +229,74 @@ impl ResolvedPrincipal {
             reference,
             principal,
             resolved_at,
+            current_session_authority: false,
         })
+    }
+
+    /// Pairs an original ordinary user credential with current session authority.
+    ///
+    /// Use only after an authoritative read of an enabled, unrevoked ordinary
+    /// session and its current grants. This does not authenticate the original
+    /// credential or check its status: sensitive revalidation independently
+    /// checks that exact original token through [`crate::TokenStatusChecker`].
+    /// The current session need not have the access token's jti, correlation or
+    /// expiry. Neither principal is rewritten. Subject, session, family, tenant,
+    /// resource, actor, operation and any accepted session version must match;
+    /// both grant kinds must explicitly be ordinary user sessions. A current
+    /// security version and distinct, live current expiry are mandatory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Forbidden`] for unsupported kinds or invalid identity,
+    /// bindings or version proof, and [`AuthError::AccessTokenExpired`] for a
+    /// missing/expired original or current deadline. Sessionless credentials,
+    /// API tokens and delegation cannot use this constructor.
+    pub fn from_current_session(
+        reference: PrincipalReference,
+        principal: AuthPrincipal,
+        resolved_at: OffsetDateTime,
+    ) -> AuthResult<Self> {
+        let current = principal.reference();
+        if reference.kind != PrincipalReferenceKind::UserSession
+            || reference.grant_kind != Some(AccessTokenGrantKind::UserSession)
+            || current.grant_kind != Some(AccessTokenGrantKind::UserSession)
+            || reference.subject.trim().is_empty()
+            || reference
+                .token_id
+                .as_ref()
+                .is_none_or(|id| id.trim().is_empty())
+            || reference.session_id.is_none()
+            || reference
+                .session_family_id
+                .as_ref()
+                .is_none_or(|id| id.trim().is_empty())
+            || current.session_version.as_ref().is_none_or(|version| {
+                version.trim().is_empty() || version.len() > MAX_SESSION_VERSION_LENGTH
+            })
+        {
+            return Err(AuthError::Forbidden);
+        }
+        if reference.expires_at.is_none_or(|expiry| expiry <= resolved_at)
+            || current.expires_at.is_none_or(|expiry| expiry <= resolved_at)
+        {
+            return Err(AuthError::AccessTokenExpired);
+        }
+        let mut resolved = Self::new(reference, principal, resolved_at)?;
+        resolved.current_session_authority = true;
+        Ok(resolved)
+    }
+
+    pub(crate) fn matches_sensitive_reference(&self, reference: &PrincipalReference) -> bool {
+        self.reference() == reference
+            && if self.current_session_authority
+                || reference.grant_kind == Some(AccessTokenGrantKind::SessionBoundDelegation)
+            {
+                // Ordinary sessions opt in only through the validated constructor.
+                // Both paths still require independent original-token status.
+                reference.matches(self.principal())
+            } else {
+                self.principal().reference() == *reference
+            }
     }
 
     /// Returns the durable reference.
