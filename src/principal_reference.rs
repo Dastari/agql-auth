@@ -276,8 +276,12 @@ impl ResolvedPrincipal {
         {
             return Err(AuthError::Forbidden);
         }
-        if reference.expires_at.is_none_or(|expiry| expiry <= resolved_at)
-            || current.expires_at.is_none_or(|expiry| expiry <= resolved_at)
+        if reference
+            .expires_at
+            .is_none_or(|expiry| expiry <= resolved_at)
+            || current
+                .expires_at
+                .is_none_or(|expiry| expiry <= resolved_at)
         {
             return Err(AuthError::AccessTokenExpired);
         }

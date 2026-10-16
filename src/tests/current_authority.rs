@@ -566,15 +566,21 @@ impl TokenStatusChecker for OriginalStatus {
         assert_eq!(request.principal.reference(), self.0);
         assert_eq!(request.token_id, self.0.token_id.as_deref());
         assert_eq!(request.session_id, self.0.session_id.as_deref());
-        assert_eq!(request.session_family_id, self.0.session_family_id.as_deref());
+        assert_eq!(
+            request.session_family_id,
+            self.0.session_family_id.as_deref()
+        );
         assert_eq!(request.tenant_id, self.0.tenant_id.as_deref());
         Ok(TokenStatus::Active)
     }
 }
 async fn ordinary_session_pair() -> (AuthPrincipal, AuthPrincipal, OffsetDateTime) {
     let roles = Arc::new(Mutex::new(vec!["catalog.reader".into()]));
-    let auth = test_auth_service(MemoryUserStore::default(), MemoryRefreshTokenStore::default())
-        .with_additional_token_roles_provider(Arc::new(DynamicAuthorizationRoles(roles)));
+    let auth = test_auth_service(
+        MemoryUserStore::default(),
+        MemoryRefreshTokenStore::default(),
+    )
+    .with_additional_token_roles_provider(Arc::new(DynamicAuthorizationRoles(roles)));
     let issued = auth
         .issue_session_for_user_with_metadata(
             "ordinary-user",
@@ -590,8 +596,10 @@ async fn ordinary_session_pair() -> (AuthPrincipal, AuthPrincipal, OffsetDateTim
         )
         .await
         .unwrap();
-    let accepted =
-        AuthPrincipal::User(auth.authenticate_access_token(&issued.access_token).unwrap());
+    let accepted = AuthPrincipal::User(
+        auth.authenticate_access_token(&issued.access_token)
+            .unwrap(),
+    );
     let now = OffsetDateTime::now_utc();
     let mut current = accepted.clone();
     let AuthPrincipal::User(user) = &mut current else {
@@ -609,7 +617,10 @@ async fn ordinary_current_session_preserves_original_and_independent_deadline() 
     let (accepted, current, now) = ordinary_session_pair().await;
     let original = accepted.reference();
     assert!(original.token_id.is_some());
-    assert_eq!(original.correlation_id.as_deref(), Some("original-correlation"));
+    assert_eq!(
+        original.correlation_id.as_deref(),
+        Some("original-correlation")
+    );
     assert_ne!(original, current.reference());
     let proof =
         ResolvedPrincipal::from_current_session(original.clone(), current.clone(), now).unwrap();
@@ -649,7 +660,10 @@ async fn ordinary_current_session_preserves_original_and_independent_deadline() 
         user.token_claims.expires_at = Some(now + time::Duration::seconds(1));
     }
     let proof = ResolvedPrincipal::from_current_session(original, short.clone(), now).unwrap();
-    assert_eq!(proof.principal().reference().expires_at, short.reference().expires_at);
+    assert_eq!(
+        proof.principal().reference().expires_at,
+        short.reference().expires_at
+    );
     let resolver = CurrentSessionResolver {
         current: short,
         now,
@@ -752,7 +766,9 @@ async fn current_session_proof_never_widens_any_grant_and_fails_closed_on_missin
     };
     user.roles.push("new-admin".into());
     user.scopes.push("records.*".into());
-    user.token_claims.authorization_roles.push("catalog.admin".into());
+    user.token_claims
+        .authorization_roles
+        .push("catalog.admin".into());
     let mut resolver = CurrentSessionResolver {
         current,
         now,
@@ -772,7 +788,9 @@ async fn current_session_proof_never_widens_any_grant_and_fails_closed_on_missin
     };
     user.roles.retain(|role| role != "reader");
     user.scopes.retain(|scope| scope != "records.read");
-    user.token_claims.authorization_roles.retain(|role| role != "catalog.reader");
+    user.token_claims
+        .authorization_roles
+        .retain(|role| role != "catalog.reader");
     let narrowed = revalidate_sensitive_principal(
         &accepted,
         &resolver,
