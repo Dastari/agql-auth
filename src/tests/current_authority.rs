@@ -540,3 +540,276 @@ async fn typed_authorization_roles_never_widen_and_removals_survive_readdition()
         ["writer", "admin"]
     );
 }
+
+struct CurrentSessionResolver {
+    current: AuthPrincipal,
+    now: OffsetDateTime,
+    wrong_reference: bool,
+}
+#[async_trait]
+impl CurrentPrincipalResolver for CurrentSessionResolver {
+    async fn resolve(
+        &self,
+        reference: &PrincipalReference,
+    ) -> crate::AuthResult<ResolvedPrincipal> {
+        let mut reference = reference.clone();
+        if self.wrong_reference {
+            reference.correlation_id = Some("different-original".into());
+        }
+        ResolvedPrincipal::from_current_session(reference, self.current.clone(), self.now)
+    }
+}
+struct OriginalStatus(PrincipalReference);
+#[async_trait]
+impl TokenStatusChecker for OriginalStatus {
+    async fn check(&self, request: TokenStatusRequest<'_>) -> crate::AuthResult<TokenStatus> {
+        assert_eq!(request.principal.reference(), self.0);
+        assert_eq!(request.token_id, self.0.token_id.as_deref());
+        assert_eq!(request.session_id, self.0.session_id.as_deref());
+        assert_eq!(
+            request.session_family_id,
+            self.0.session_family_id.as_deref()
+        );
+        assert_eq!(request.tenant_id, self.0.tenant_id.as_deref());
+        Ok(TokenStatus::Active)
+    }
+}
+async fn ordinary_session_pair() -> (AuthPrincipal, AuthPrincipal, OffsetDateTime) {
+    let roles = Arc::new(Mutex::new(vec!["catalog.reader".into()]));
+    let auth = test_auth_service(
+        MemoryUserStore::default(),
+        MemoryRefreshTokenStore::default(),
+    )
+    .with_additional_token_roles_provider(Arc::new(DynamicAuthorizationRoles(roles)));
+    let issued = auth
+        .issue_session_for_user_with_metadata(
+            "ordinary-user",
+            vec!["reader".into()],
+            vec!["records.read".into()],
+            SessionContext::for_auth_method(AuthMethod::Password),
+            RefreshableTokenMetadata {
+                tenant_id: Some("tenant-a".into()),
+                correlation_id: Some("original-correlation".into()),
+                ..Default::default()
+            },
+            metadata(),
+        )
+        .await
+        .unwrap();
+    let accepted = AuthPrincipal::User(
+        auth.authenticate_access_token(&issued.access_token)
+            .unwrap(),
+    );
+    let now = OffsetDateTime::now_utc();
+    let mut current = accepted.clone();
+    let AuthPrincipal::User(user) = &mut current else {
+        unreachable!()
+    };
+    user.token_claims.jti = None;
+    user.token_claims.correlation_id = None;
+    user.token_claims.session_version = Some("current-v1".into());
+    user.token_claims.expires_at = Some(now + time::Duration::hours(1));
+    (accepted, current, now)
+}
+
+#[tokio::test]
+async fn ordinary_current_session_preserves_original_and_independent_deadline() {
+    let (accepted, current, now) = ordinary_session_pair().await;
+    let original = accepted.reference();
+    assert!(original.token_id.is_some());
+    assert_eq!(
+        original.correlation_id.as_deref(),
+        Some("original-correlation")
+    );
+    assert_ne!(original, current.reference());
+    let proof =
+        ResolvedPrincipal::from_current_session(original.clone(), current.clone(), now).unwrap();
+    assert_eq!(proof.reference(), &original);
+    assert_eq!(proof.principal(), &current);
+    let resolver = CurrentSessionResolver {
+        current,
+        now,
+        wrong_reference: false,
+    };
+    let result = revalidate_sensitive_principal(
+        &accepted,
+        &resolver,
+        &OriginalStatus(original.clone()),
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, accepted);
+    assert_eq!(result.reference(), original);
+    // The opt-in does not weaken the legacy exact-credential path.
+    assert!(
+        revalidate_sensitive_principal(
+            &accepted,
+            &Resolver {
+                current: resolver.current.clone(),
+                fail: false,
+            },
+            &OriginalStatus(original.clone()),
+            now,
+        )
+        .await
+        .is_err()
+    );
+    let mut short = resolver.current.clone();
+    if let AuthPrincipal::User(user) = &mut short {
+        user.token_claims.expires_at = Some(now + time::Duration::seconds(1));
+    }
+    let proof = ResolvedPrincipal::from_current_session(original, short.clone(), now).unwrap();
+    assert_eq!(
+        proof.principal().reference().expires_at,
+        short.reference().expires_at
+    );
+    let resolver = CurrentSessionResolver {
+        current: short,
+        now,
+        wrong_reference: false,
+    };
+    assert!(
+        revalidate_sensitive_principal(
+            &accepted,
+            &resolver,
+            &Status(Some(TokenStatus::Active)),
+            now + time::Duration::seconds(2),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn current_session_proof_rejects_wrong_original_and_invalid_current_bindings() {
+    let (accepted, current, now) = ordinary_session_pair().await;
+    let original = accepted.reference();
+    let resolver = CurrentSessionResolver {
+        current: current.clone(),
+        now,
+        wrong_reference: true,
+    };
+    assert!(
+        revalidate_sensitive_principal(
+            &accepted,
+            &resolver,
+            &OriginalStatus(original.clone()),
+            now,
+        )
+        .await
+        .is_err()
+    );
+    for change in 0..15 {
+        let mut wrong = current.clone();
+        let AuthPrincipal::User(user) = &mut wrong else {
+            unreachable!()
+        };
+        match change {
+            0 => user.user_id = "other".into(),
+            1 => user.session_id = Uuid::new_v4(),
+            2 => user.token_claims.session_family_id = Some("other-family".into()),
+            3 => user.token_claims.tenant_id = Some("other-tenant".into()),
+            4 => user.token_claims.grant_kind = Some(AccessTokenGrantKind::Sessionless),
+            5 => user.token_claims.grant_kind = Some(AccessTokenGrantKind::SessionBoundDelegation),
+            6 => user.token_claims.session_version = None,
+            7 => user.token_claims.session_version = Some(String::new()),
+            8 => user.token_claims.expires_at = None,
+            9 => user.token_claims.expires_at = Some(now),
+            10 => user.token_claims.resource_id = Some("different-resource".into()),
+            11 => user.token_claims.grant_kind = None,
+            12 => user.token_claims.session_version = Some("x".repeat(257)),
+            13 => {
+                user.token_claims.actor = Some(crate::ActorIdentity {
+                    sub: "other-actor".into(),
+                    amr: vec![],
+                })
+            }
+            _ => {
+                user.token_claims.operation = Some(ExactOperationBinding {
+                    operation_name: "other".into(),
+                    document_sha256: "00".repeat(32),
+                })
+            }
+        }
+        assert!(
+            ResolvedPrincipal::from_current_session(original.clone(), wrong, now).is_err(),
+            "change {change}"
+        );
+    }
+    for change in 0..7 {
+        let mut wrong = original.clone();
+        match change {
+            0 => wrong.session_version = Some("different-version".into()),
+            1 => wrong.token_id = None,
+            2 => wrong.session_family_id = None,
+            3 => wrong.grant_kind = Some(AccessTokenGrantKind::Sessionless),
+            4 => wrong.grant_kind = Some(AccessTokenGrantKind::SessionBoundDelegation),
+            5 => wrong.expires_at = None,
+            _ => wrong.expires_at = Some(now),
+        }
+        assert!(
+            ResolvedPrincipal::from_current_session(wrong, current.clone(), now).is_err(),
+            "original {change}"
+        );
+    }
+    let mut versioned = original;
+    versioned.session_version = Some("current-v1".into());
+    assert!(ResolvedPrincipal::from_current_session(versioned, current, now).is_ok());
+}
+
+#[tokio::test]
+async fn current_session_proof_never_widens_any_grant_and_fails_closed_on_missing_status() {
+    let (accepted, mut current, now) = ordinary_session_pair().await;
+    let AuthPrincipal::User(user) = &mut current else {
+        unreachable!()
+    };
+    user.roles.push("new-admin".into());
+    user.scopes.push("records.*".into());
+    user.token_claims
+        .authorization_roles
+        .push("catalog.admin".into());
+    let mut resolver = CurrentSessionResolver {
+        current,
+        now,
+        wrong_reference: false,
+    };
+    let result = revalidate_sensitive_principal(
+        &accepted,
+        &resolver,
+        &OriginalStatus(accepted.reference()),
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, accepted);
+    let AuthPrincipal::User(user) = &mut resolver.current else {
+        unreachable!()
+    };
+    user.roles.retain(|role| role != "reader");
+    user.scopes.retain(|scope| scope != "records.read");
+    user.token_claims
+        .authorization_roles
+        .retain(|role| role != "catalog.reader");
+    let narrowed = revalidate_sensitive_principal(
+        &accepted,
+        &resolver,
+        &OriginalStatus(accepted.reference()),
+        now,
+    )
+    .await
+    .unwrap();
+    assert!(narrowed.roles().is_empty());
+    assert!(narrowed.scopes().is_empty());
+    let AuthPrincipal::User(user) = narrowed else {
+        unreachable!()
+    };
+    assert!(user.token_claims.authorization_roles.is_empty());
+    for status in [None, Some(TokenStatus::Revoked), Some(TokenStatus::Expired)] {
+        assert!(
+            revalidate_sensitive_principal(&accepted, &resolver, &Status(status), now)
+                .await
+                .is_err()
+        );
+    }
+}

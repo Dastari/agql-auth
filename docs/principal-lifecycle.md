@@ -96,8 +96,9 @@ and `CurrentPrincipalResolver`, then use the returned narrowed principal for
 policy/context injection. Supply `now` from the trusted evaluation clock
 immediately before calling; do not reuse old timestamps or successful results.
 Durable-job resolvers may return refreshed credentials; the sensitive-operation
-helper instead requires exact accepted token identity, with the explicit
-session-bound-delegation parent exception below. Keep the original credential
+helper instead requires exact accepted token identity on the legacy constructor
+path. Explicit ordinary current-session proof and the session-bound-delegation
+parent exception are described below. Keep the original credential
 bindings available for
 resource/operation/tenant/audience/purpose/confirmation enforcement. Signature
 validation, periodic checks and always-active checkers do not establish immediate
@@ -114,3 +115,43 @@ result and must be enforced by the operation policy.
 
 The [compilable boundary example](../examples/current-authority.rs) shows calling
 the helper before a sensitive scope decision.
+
+## Ordinary current-session proof
+
+For an ordinary accepted JWT, a freshly read session is authority rather than a
+replacement credential. Return
+`ResolvedPrincipal::from_current_session(reference.clone(), current, verified_at)`
+from the host resolver. The wrapper retains the exact original reference and the
+unmodified current principal separately. Both must explicitly be `UserSession`
+grants with matching subject/session/family/tenant, resource/actor/operation
+bindings and any accepted version. A nonempty bounded current version and
+original/current live expiry are mandatory. Current jti and correlation need not
+match the original access-token metadata; do not manufacture those values.
+The legacy `ResolvedPrincipal::new` sensitive path remains exact-reference-only.
+Delegation/sessionless/API credentials cannot select the ordinary-session path.
+
+`revalidate_sensitive_principal` still checks **the original accepted principal**
+through the status checker, verifies the exact reference returned by the resolver,
+then intersects exact scopes, scalar roles and authorization roles independently.
+New current grants never widen the accepted credential, wildcard strings are not
+reinterpreted, and removed grants disappear. The returned principal is a clone of
+the accepted credential with only those grant vectors narrowed. It retains the
+original expiry, jti, correlation, assurance and other bindings. It must never be
+replaced by `resolved.principal()` at the protected operation.
+
+The resolver's current expiry is a separate ceiling. A host retaining work across
+awaits must check the minimum original/current deadline with its trusted clock
+and revalidate after relevant asynchronous authorization work, before release.
+The single helper call observes its status/resolver reads; it is not a reusable
+permit, asynchronous clock fence or atomic cross-store revocation transaction.
+Current/session status, disabled/deleted state, membership and grant reads must
+be authoritative and fail closed. No proof can be supplied by a deserialized
+client authority snapshot merely because its structure matches.
+
+The host must state and implement its actual original-token revocation domain:
+account, session and family status, plus per-token invalidation when applicable.
+A jti alone proves no status. This API neither creates a jti ledger nor permits
+an always-active checker to replace a real applicable status producer. Read-only
+verification must not renew idle/session/provider authority. Resource ownership,
+filters, row currentness and transaction/revision fences remain host-owned;
+revocation after the final owner read cannot be atomically ordered by this API.

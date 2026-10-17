@@ -1,5 +1,22 @@
 # Migration Guide
 
+## 0.21.3 to 0.22.0: explicit current-session authority
+
+Ordinary-session resolvers may opt into `ResolvedPrincipal::from_current_session`
+when authoritative session reconstruction lacks the original access-token jti or
+correlation and has a different expiry. Pass the exact original requested
+reference separately from the current session principal; never stamp access-token
+metadata onto current session state. This constructor requires explicit
+`UserSession` grant kinds, matching identity/session/family/tenant/bindings, a
+nonempty bounded current security version and both live deadlines. An accepted
+version, when present, must match; an absent accepted version is not invented.
+
+`ResolvedPrincipal::new` retains its existing sensitive-operation exact-credential
+behavior. Neither path authenticates credentials or proves store reads happened.
+Implement authoritative `TokenStatusChecker` for the original token and current
+session resolver; errors deny. No wire, stored-record or schema migration is
+required. See [the lifecycle contract](docs/principal-lifecycle.md#ordinary-current-session-proof).
+
 ## 0.21.2 to 0.21.3: validator clock observation
 
 The additive `AccessTokenValidator::current_time()` returns `time::OffsetDateTime`

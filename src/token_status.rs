@@ -180,6 +180,10 @@ impl ReauthorizationPolicy {
 /// intersecting its roles/scopes with current authority. Resolvers must retain
 /// the exact credential reference for this operation, including token identity;
 /// a replacement credential is not proof that the accepted token is active.
+/// For ordinary sessions, [`crate::ResolvedPrincipal::from_current_session`]
+/// explicitly permits a separately verified current session projection, retaining
+/// the exact original reference and independent current expiry. The legacy
+/// [`crate::ResolvedPrincipal::new`] path still requires exact token identity.
 /// Session-bound delegation is the explicit exception: the resolver supplies
 /// its authoritative parent session using the existing reference contract, while
 /// the checker must independently check the original delegated token's status.
@@ -218,13 +222,7 @@ pub async fn revalidate_sensitive_principal(
     let resolved = resolver.resolve(&reference).await?;
     let delegation =
         reference.grant_kind == Some(crate::AccessTokenGrantKind::SessionBoundDelegation);
-    if resolved.reference() != &reference
-        || if delegation {
-            !reference.matches(resolved.principal())
-        } else {
-            resolved.principal().reference() != reference
-        }
-    {
+    if !resolved.matches_sensitive_reference(&reference) {
         return Err(AuthError::Forbidden);
     }
     let current = resolved.principal();
