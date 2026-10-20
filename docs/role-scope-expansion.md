@@ -51,6 +51,13 @@ available at `AuthUser::token_claims.authorization_roles`; ordinary
 
 ## Signed transport
 
+The compact signature can embed the complete catalogue. Its structural ceiling
+is the inclusive `MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES` (2 MiB), rather than
+a small detached-signature size. This is not a whole-envelope or allocation
+limit: transports must cap bytes before deserialization, including the repeated
+clear-text catalogue, and may enforce a smaller host policy. Structural acceptance
+still requires actual cryptographic verification and exact claim binding.
+
 `SignedRoleScopeCatalogue` and `RoleScopeCatalogueClaims` define a neutral wire
 shape. The claims contain the exact clear-text catalogue, issuer, audience,
 issued-at time, expiry, and the fixed `role_scope_catalogue` purpose. A host:
