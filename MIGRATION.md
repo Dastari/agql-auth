@@ -1,5 +1,17 @@
 # Migration Guide
 
+## 0.22.0 to 0.22.1: bounded embedded catalogue signatures
+
+The signed catalogue structural limit is now 2 MiB, exported as
+`MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES`. Compact JWS carries the complete
+catalogue in its payload, so the former 64 KiB limit rejected otherwise legal
+host catalogues. The limit remains finite and inclusive. Host transport must
+enforce its own finite whole-envelope bound before JSON deserialization; a
+signature limit does not bound the repeated clear-text catalogue or HTTP body.
+Catalogue counts, references and values, signature verification, exact claims,
+issuer, audience and lifetime checks are unchanged. No token or stored-record
+migration is required.
+
 ## 0.21.3 to 0.22.0: explicit current-session authority
 
 Ordinary-session resolvers may opt into `ResolvedPrincipal::from_current_session`

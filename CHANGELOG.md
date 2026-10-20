@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.1
+
+- Admit large host-signed role catalogues whose compact JWS embeds the catalogue.
+  Keep a finite 2 MiB signature ceiling and all catalogue, cryptographic binding,
+  audience and lifetime checks. Hosts still bound the complete transport envelope.
+
 ## 0.22.0
 
 - Add `ResolvedPrincipal::from_current_session` for explicit ordinary-session

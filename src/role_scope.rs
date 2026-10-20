@@ -21,6 +21,11 @@ pub const MAX_ROLE_SCOPE_CATALOGUE_SCOPES_PER_ROLE: usize = 1_024;
 pub const MAX_ROLE_SCOPE_CATALOGUE_EXACT_ONLY_PATTERNS: usize = 1_024;
 /// Maximum byte length of role IDs, scope IDs, patterns, and versions.
 pub const MAX_ROLE_SCOPE_CATALOGUE_VALUE_LENGTH: usize = 512;
+/// Maximum byte length of a host-created catalogue signature, including embedded claims.
+///
+/// Compact JWS signatures repeat the catalogue in their payload. Hosts must also
+/// enforce a finite limit on the entire HTTP envelope before deserialization.
+pub const MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES: usize = 2 * 1024 * 1024;
 /// Stable purpose carried by signed catalogue claims.
 pub const ROLE_SCOPE_CATALOGUE_PURPOSE: &str = "role_scope_catalogue";
 
@@ -197,7 +202,9 @@ impl SignedRoleScopeCatalogue {
     /// Checks the unsigned envelope structure before cryptographic validation.
     pub fn validate_structure(&self) -> Result<(), RoleScopeCatalogueError> {
         self.catalogue.validate()?;
-        if self.signature.is_empty() || self.signature.len() > 64 * 1024 {
+        if self.signature.is_empty()
+            || self.signature.len() > MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES
+        {
             return invalid("catalogue signature is missing or too large");
         }
         Ok(())
@@ -474,6 +481,7 @@ fn invalid<T>(message: &'static str) -> Result<T, RoleScopeCatalogueError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 
     fn catalogue() -> RoleScopeCatalogue {
         RoleScopeCatalogue::new(
@@ -600,5 +608,124 @@ mod tests {
                     .with_clock_skew_leeway_seconds(2),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn large_embedded_catalogue_verifies_signature_and_exact_claim_binding() {
+        let scopes: Vec<_> = (0..256)
+            .map(|index| format!("inventory.partition.{index:04}.read"))
+            .collect();
+        let catalogue = RoleScopeCatalogue::new(
+            "large-revision",
+            scopes.iter().map(RoleScopeDefinition::new),
+            (0..96).map(|index| {
+                RoleScopeGrant::new(format!("role-{index}"), format!("Role {index}"), &scopes)
+            }),
+        );
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let claims = RoleScopeCatalogueClaims::new(
+            catalogue.clone(),
+            "https://issuer.test",
+            "resource-servers",
+            now,
+            now + 300,
+        );
+        // Public, synthetic fixture key; this exercises real JWS cryptography.
+        let key = b"public-role-catalogue-test-key-only";
+        let signature = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(key),
+        )
+        .unwrap();
+        assert!(signature.len() > 64 * 1024);
+        let envelope = SignedRoleScopeCatalogue::new(catalogue, signature);
+        assert!(serde_json::to_vec(&envelope).unwrap().len() > 1024 * 1024);
+        envelope.validate_structure().unwrap();
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_issuer(&["https://issuer.test"]);
+        validation.set_audience(&["resource-servers"]);
+        let verified = decode::<RoleScopeCatalogueClaims>(
+            &envelope.signature,
+            &DecodingKey::from_secret(key),
+            &validation,
+        )
+        .unwrap();
+        verified
+            .claims
+            .validate_binding(
+                &envelope,
+                "https://issuer.test",
+                "resource-servers",
+                now,
+                300,
+            )
+            .unwrap();
+        assert!(
+            decode::<RoleScopeCatalogueClaims>(
+                &envelope.signature,
+                &DecodingKey::from_secret(b"different-public-test-key"),
+                &validation
+            )
+            .is_err()
+        );
+        validation.set_audience(&["different-resource-server"]);
+        assert!(
+            decode::<RoleScopeCatalogueClaims>(
+                &envelope.signature,
+                &DecodingKey::from_secret(key),
+                &validation
+            )
+            .is_err()
+        );
+        assert!(
+            verified
+                .claims
+                .validate_binding(
+                    &envelope,
+                    "https://issuer.test",
+                    "resource-servers",
+                    now + 300,
+                    300
+                )
+                .is_err()
+        );
+        let mut mismatched = envelope;
+        mismatched.catalogue.version = "different-revision".into();
+        assert!(
+            verified
+                .claims
+                .validate_binding(
+                    &mismatched,
+                    "https://issuer.test",
+                    "resource-servers",
+                    now,
+                    300
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn signature_byte_ceiling_is_finite_and_inclusive() {
+        assert!(
+            SignedRoleScopeCatalogue::new(catalogue(), "")
+                .validate_structure()
+                .is_err()
+        );
+        SignedRoleScopeCatalogue::new(
+            catalogue(),
+            "s".repeat(MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES),
+        )
+        .validate_structure()
+        .unwrap();
+        assert!(
+            SignedRoleScopeCatalogue::new(
+                catalogue(),
+                "s".repeat(MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES + 1)
+            )
+            .validate_structure()
+            .is_err()
+        );
     }
 }

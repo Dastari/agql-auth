@@ -204,10 +204,11 @@ pub use purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
 pub use role_scope::{
     MAX_ROLE_SCOPE_CATALOGUE_EXACT_ONLY_PATTERNS, MAX_ROLE_SCOPE_CATALOGUE_ROLES,
     MAX_ROLE_SCOPE_CATALOGUE_SCOPES, MAX_ROLE_SCOPE_CATALOGUE_SCOPES_PER_ROLE,
-    MAX_ROLE_SCOPE_CATALOGUE_VALUE_LENGTH, ROLE_SCOPE_CATALOGUE_PURPOSE, RoleScopeCatalogue,
-    RoleScopeCatalogueClaims, RoleScopeCatalogueError, RoleScopeCatalogueValidationOptions,
-    RoleScopeDefinition, RoleScopeExpansion, RoleScopeExpansionError, RoleScopeExpansionProvider,
-    RoleScopeGrant, SignedRoleScopeCatalogue, StaticRoleScopeExpansion, effective_scopes,
+    MAX_ROLE_SCOPE_CATALOGUE_SIGNATURE_BYTES, MAX_ROLE_SCOPE_CATALOGUE_VALUE_LENGTH,
+    ROLE_SCOPE_CATALOGUE_PURPOSE, RoleScopeCatalogue, RoleScopeCatalogueClaims,
+    RoleScopeCatalogueError, RoleScopeCatalogueValidationOptions, RoleScopeDefinition,
+    RoleScopeExpansion, RoleScopeExpansionError, RoleScopeExpansionProvider, RoleScopeGrant,
+    SignedRoleScopeCatalogue, StaticRoleScopeExpansion, effective_scopes,
 };
 pub use scope_match::{
     AuthRuntime, ExactScopeMatch, HierarchicalScopeMatch, HierarchicalScopeOptions,
