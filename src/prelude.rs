@@ -17,12 +17,15 @@ pub use crate::claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirements,
     ConfirmationClaims, ExactOperationBinding,
 };
+pub use crate::client_auth::{
+    ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner, TokenEndpointAuthMethod,
+};
 pub use crate::clock::{Clock, FixedClock, SystemClock};
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
     ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
+    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -58,6 +61,11 @@ pub use crate::models::{
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
     StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
+};
+pub use crate::oauth2::{
+    OAuth2AuthorizationRequest, OAuth2CallbackOutcome, OAuth2EmailVerification,
+    OAuth2ProfileMapping, OAuth2Provider, OAuth2ProviderConfig, OAuth2TokenResponse,
+    OAuth2UserProfile, OAuth2VerifiedEmailList, OAuth2VerifiedEmailSelection,
 };
 pub use crate::oidc::{
     ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,

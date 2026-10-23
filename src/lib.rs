@@ -84,6 +84,17 @@
 //! successful OIDC callback, `agql-auth` returns an [`OidcLoginResult`] whose
 //! `auth` field is a normal local [`AuthPayload`].
 //!
+//! ## OAuth 2.0 Providers Without OIDC
+//!
+//! [`OAuth2Provider`] covers authorization-code + PKCE providers that issue no
+//! ID token (for example GitHub, see [`OAuth2ProviderConfig::github`]). It
+//! reuses the same one-time [`OAuthStateStore`] semantics, exchanges the code,
+//! and resolves a typed [`OAuth2UserProfile`] from the userinfo endpoint.
+//! Token-endpoint client authentication for both providers is selected with
+//! [`TokenEndpointAuthMethod`]; [`ClientJwtSigner`] mints `private_key_jwt`
+//! assertions or signed client secrets (Sign in with Apple), and
+//! [`OAuthResponseMode::FormPost`] binds `form_post` delivery into the state.
+//!
 //! ## More Documentation
 //!
 //! The repository README links focused guides for storage traits, authorization,
@@ -94,6 +105,7 @@ mod api_tokens;
 mod assurance;
 mod channel;
 mod claims;
+mod client_auth;
 mod clock;
 mod combined;
 mod config;
@@ -105,6 +117,7 @@ mod guards;
 mod keys;
 mod memory_rate_limit;
 mod models;
+mod oauth2;
 mod oidc;
 mod oidc_authorization;
 mod password_work;
@@ -140,12 +153,17 @@ pub use claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirementError,
     ClaimRequirements, ConfirmationClaims, ExactOperationBinding,
 };
+pub use client_auth::{
+    CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner,
+    DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS, MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS,
+    MAX_CLIENT_JWT_LIFETIME_SECONDS, TokenEndpointAuthMethod,
+};
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
     ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OidcProviderConfig, OidcProviderKind,
+    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -182,6 +200,12 @@ pub use models::{
     RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
     StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
+};
+pub use oauth2::{
+    MAX_OAUTH2_SUBJECT_LENGTH, MAX_OAUTH2_VERIFIED_EMAIL_ENTRIES, OAuth2AuthorizationRequest,
+    OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2ProfileMapping, OAuth2Provider,
+    OAuth2ProviderConfig, OAuth2TokenResponse, OAuth2UserProfile, OAuth2VerifiedEmailList,
+    OAuth2VerifiedEmailSelection,
 };
 pub use oidc::{
     ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,

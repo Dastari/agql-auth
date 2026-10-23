@@ -15,8 +15,9 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
+use crate::client_auth::{TokenEndpointAuthMethod, client_authentication};
 use crate::clock::{Clock, SystemClock};
-use crate::config::{ClientMetadata, OidcProviderConfig, OidcProviderKind};
+use crate::config::{ClientMetadata, OAuthResponseMode, OidcProviderConfig, OidcProviderKind};
 use crate::models::{
     ExternalIdentity, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
     OidcLoginResult, OidcTokenResponse, ValidatedOidcClaims,
@@ -60,16 +61,72 @@ const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
 const MICROSOFT_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 #[async_trait]
-/// Minimal HTTP abstraction used by [`OidcProvider`].
+/// Minimal HTTP abstraction used by [`OidcProvider`] and [`crate::OAuth2Provider`].
 ///
-/// Host applications implement this with their preferred HTTP client.
+/// Host applications implement this with their preferred HTTP client. Every
+/// method must request JSON (`Accept: application/json`), return `Err` for a
+/// non-success status or a body that is not JSON, bound response sizes and
+/// timeouts, and never log request headers, form values or response bodies:
+/// they carry client secrets, authorization codes and provider tokens.
 pub trait OidcHttpClient: Send + Sync {
     /// Performs a JSON GET request.
     async fn get_json(&self, url: &str) -> AuthResult<JsonValue>;
 
     /// Performs a form-encoded POST request and returns JSON.
     async fn post_form_json(&self, url: &str, form: &[(String, String)]) -> AuthResult<JsonValue>;
+
+    /// Whether [`Self::get_json_with_headers`] and
+    /// [`Self::post_form_json_with_headers`] send every supplied header.
+    ///
+    /// Providers that must send an `Authorization` header (HTTP Basic client
+    /// authentication, bearer userinfo requests) refuse construction when this
+    /// is `false`. Override it together with both header-aware methods.
+    fn supports_request_headers(&self) -> bool {
+        false
+    }
+
+    /// Performs a JSON GET request with additional request headers.
+    ///
+    /// The default delegates to [`Self::get_json`] when the only headers are
+    /// `Accept`, and otherwise fails closed rather than dropping a header.
+    async fn get_json_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> AuthResult<JsonValue> {
+        ensure_only_accept_headers(headers)?;
+        self.get_json(url).await
+    }
+
+    /// Performs a form-encoded POST request with additional request headers.
+    ///
+    /// The default delegates to [`Self::post_form_json`] when the only headers
+    /// are `Accept`, and otherwise fails closed rather than dropping a header.
+    async fn post_form_json_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        form: &[(String, String)],
+    ) -> AuthResult<JsonValue> {
+        ensure_only_accept_headers(headers)?;
+        self.post_form_json(url, form).await
+    }
 }
+
+fn ensure_only_accept_headers(headers: &[(String, String)]) -> AuthResult<()> {
+    if headers
+        .iter()
+        .all(|(name, _)| name.eq_ignore_ascii_case("accept"))
+    {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidConfiguration(
+            "HTTP client does not support request headers".to_string(),
+        ))
+    }
+}
+
+pub(crate) const ACCEPT_JSON: (&str, &str) = ("Accept", "application/json");
 
 /// OIDC discovery document fields used by `agql-auth`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +487,14 @@ impl OidcProvider {
         clock: Arc<dyn Clock>,
     ) -> AuthResult<Self> {
         config.validate()?;
+        if config.token_endpoint_auth_method == TokenEndpointAuthMethod::ClientSecretBasic
+            && !http_client.supports_request_headers()
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "OIDC client_secret_basic requires an HTTP client that supports request headers"
+                    .to_string(),
+            ));
+        }
         Ok(Self {
             config,
             http_client,
@@ -545,6 +610,7 @@ impl OidcProvider {
             redirect_uri: self.config.redirect_uri.clone(),
             scopes: scopes.clone(),
             authorization_policy: authorization_policy.clone(),
+            response_mode: self.config.response_mode,
             created_at: now,
             expires_at,
             consumed_at: None,
@@ -556,7 +622,10 @@ impl OidcProvider {
             ("client_id".to_string(), self.config.client_id.clone()),
             ("redirect_uri".to_string(), self.config.redirect_uri.clone()),
             ("response_type".to_string(), "code".to_string()),
-            ("response_mode".to_string(), "query".to_string()),
+            (
+                "response_mode".to_string(),
+                self.config.response_mode.as_str().to_string(),
+            ),
             ("scope".to_string(), scope),
             ("state".to_string(), state.clone()),
             ("nonce".to_string(), nonce.clone()),
@@ -591,7 +660,12 @@ impl OidcProvider {
         })
     }
 
-    /// Handles a callback through state consumption, token exchange, and ID-token validation.
+    /// Handles a query-mode callback through state consumption, token
+    /// exchange, and ID-token validation.
+    ///
+    /// Equivalent to [`Self::handle_callback_in_mode`] with
+    /// [`OAuthResponseMode::Query`]; a provider configured for `form_post`
+    /// refuses it.
     pub async fn handle_callback<S>(
         &self,
         state_store: &S,
@@ -600,6 +674,32 @@ impl OidcProvider {
     where
         S: OAuthStateStore,
     {
+        self.handle_callback_in_mode(state_store, input, OAuthResponseMode::Query)
+            .await
+    }
+
+    /// Handles a callback delivered in `delivered_mode`.
+    ///
+    /// For [`OAuthResponseMode::FormPost`], the host parses `code`, `state`,
+    /// `error` and `error_description` from the `POST` form body into
+    /// [`OidcCallbackInput`]. A delivery mode other than the configured mode is
+    /// refused before the state is consumed; a consumed state bound to another
+    /// mode is refused too.
+    pub async fn handle_callback_in_mode<S>(
+        &self,
+        state_store: &S,
+        input: OidcCallbackInput,
+        delivered_mode: OAuthResponseMode,
+    ) -> AuthResult<OidcCallbackOutcome>
+    where
+        S: OAuthStateStore,
+    {
+        if delivered_mode != self.config.response_mode {
+            return Err(AuthError::OidcCallback(
+                "authorization response was delivered in an unexpected response mode".to_string(),
+            ));
+        }
+
         if let Some(error) = input.error {
             let _ = (error, input.error_description);
             return Err(AuthError::OidcCallback(
@@ -626,6 +726,16 @@ impl OidcProvider {
             return Err(AuthError::OAuthStateExpired);
         }
 
+        if state.nonce.is_empty() {
+            return Err(AuthError::InvalidOAuthState);
+        }
+
+        if state.response_mode != delivered_mode {
+            return Err(AuthError::OidcCallback(
+                "authorization response mode does not match state".to_string(),
+            ));
+        }
+
         if let Some(policy) = &state.authorization_policy {
             policy.validate_stored().map_err(|_| {
                 AuthError::OidcTokenValidation("stored authorization policy is invalid".to_string())
@@ -650,10 +760,12 @@ impl OidcProvider {
         })
     }
 
-    /// Completes an OIDC login and issues a local `agql-auth` session.
+    /// Completes an OIDC login from a query-mode callback and issues a local
+    /// `agql-auth` session.
     ///
     /// This method validates the provider callback, resolves or links a local
     /// user through host extension points, and returns an [`OidcLoginResult`].
+    /// Use [`Self::login_with_callback_in_mode`] for `form_post`.
     #[allow(clippy::too_many_arguments)]
     pub async fn login_with_callback<U, R, S, E, P, M>(
         &self,
@@ -673,7 +785,46 @@ impl OidcProvider {
         P: ExternalUserProvisioner,
         M: ClaimsMapper,
     {
-        let outcome = self.handle_callback(state_store, input).await?;
+        self.login_with_callback_in_mode(
+            auth_service,
+            state_store,
+            external_identity_store,
+            provisioner,
+            claims_mapper,
+            input,
+            OAuthResponseMode::Query,
+            metadata,
+        )
+        .await
+    }
+
+    /// Completes an OIDC login from a callback delivered in `delivered_mode`
+    /// and issues a local `agql-auth` session.
+    ///
+    /// See [`Self::handle_callback_in_mode`] for response-mode binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn login_with_callback_in_mode<U, R, S, E, P, M>(
+        &self,
+        auth_service: &AuthService<U, R>,
+        state_store: &S,
+        external_identity_store: &E,
+        provisioner: &P,
+        claims_mapper: &M,
+        input: OidcCallbackInput,
+        delivered_mode: OAuthResponseMode,
+        metadata: ClientMetadata,
+    ) -> AuthResult<OidcLoginResult>
+    where
+        U: UserStore + 'static,
+        R: RefreshTokenStore + 'static,
+        S: OAuthStateStore,
+        E: ExternalIdentityStore,
+        P: ExternalUserProvisioner,
+        M: ClaimsMapper,
+    {
+        let outcome = self
+            .handle_callback_in_mode(state_store, input, delivered_mode)
+            .await?;
         let now = self.clock.now();
         let existing_identity = external_identity_store
             .find_external_identity(
@@ -765,31 +916,49 @@ impl OidcProvider {
     }
 
     /// Exchanges an authorization code using the stored PKCE verifier.
+    ///
+    /// Client authentication follows
+    /// [`OidcProviderConfig::token_endpoint_auth_method`]. A configured
+    /// [`crate::ClientJwtSigner`] mints a fresh JWT for this request only.
     pub async fn exchange_code(
         &self,
         code: &str,
         state: &OAuthLoginState,
     ) -> AuthResult<OidcTokenResponse> {
         let discovery = self.discover().await?;
+        let authentication = client_authentication(
+            self.config.token_endpoint_auth_method,
+            &self.config.client_id,
+            self.config.client_secret.as_deref(),
+            self.config.client_jwt.as_ref(),
+            &discovery.token_endpoint,
+            self.clock.now(),
+        )
+        .map_err(|_| {
+            AuthError::OidcTokenExchange("client authentication could not be prepared".to_string())
+        })?;
         let mut form = vec![
             ("grant_type".to_string(), "authorization_code".to_string()),
-            ("client_id".to_string(), self.config.client_id.clone()),
             ("code".to_string(), code.to_string()),
             ("redirect_uri".to_string(), state.redirect_uri.clone()),
             ("code_verifier".to_string(), state.code_verifier.clone()),
         ];
+        form.extend(authentication.form);
 
-        if let Some(client_secret) = &self.config.client_secret {
-            form.push(("client_secret".to_string(), client_secret.clone()));
-        }
-
-        let raw = self
-            .http_client
-            .post_form_json(&discovery.token_endpoint, &form)
-            .await
-            .map_err(|_| {
-                AuthError::OidcTokenExchange("provider token endpoint request failed".to_string())
-            })?;
+        let response = if authentication.headers.is_empty() {
+            self.http_client
+                .post_form_json(&discovery.token_endpoint, &form)
+                .await
+        } else {
+            let mut headers = authentication.headers;
+            headers.push((ACCEPT_JSON.0.to_string(), ACCEPT_JSON.1.to_string()));
+            self.http_client
+                .post_form_json_with_headers(&discovery.token_endpoint, &headers, &form)
+                .await
+        };
+        let raw = response.map_err(|_| {
+            AuthError::OidcTokenExchange("provider token endpoint request failed".to_string())
+        })?;
 
         if raw.get("error").is_some() {
             return Err(AuthError::OidcTokenExchange(
@@ -1052,6 +1221,10 @@ impl OidcProvider {
             nonce,
             tenant_id,
             object_id: claims.oid,
+            email_verified: claims
+                .extra
+                .get("email_verified")
+                .and_then(parse_email_verified),
             email: claims.email,
             name: claims.name,
             preferred_username: claims.preferred_username,
@@ -1399,13 +1572,24 @@ fn unix_timestamp_to_datetime(timestamp: i64) -> AuthResult<OffsetDateTime> {
     })
 }
 
+/// Parses an `email_verified` value: a JSON boolean or the exact strings
+/// `"true"` / `"false"`. Anything else is `None`.
+pub(crate) fn parse_email_verified(value: &JsonValue) -> Option<bool> {
+    match value {
+        JsonValue::Bool(verified) => Some(*verified),
+        JsonValue::String(verified) if verified == "true" => Some(true),
+        JsonValue::String(verified) if verified == "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn generate_urlsafe_secret() -> String {
     let mut bytes = [0u8; 48];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn ensure_no_reserved_authorization_parameters(endpoint: &str) -> AuthResult<()> {
+pub(crate) fn ensure_no_reserved_authorization_parameters(endpoint: &str) -> AuthResult<()> {
     const RESERVED: &[&str] = &[
         "client_id",
         "redirect_uri",
@@ -1439,7 +1623,7 @@ fn ensure_no_reserved_authorization_parameters(endpoint: &str) -> AuthResult<()>
     Ok(())
 }
 
-fn append_query(base_url: &str, params: &[(String, String)]) -> String {
+pub(crate) fn append_query(base_url: &str, params: &[(String, String)]) -> String {
     let separator = if base_url.contains('?') { '&' } else { '?' };
     let query = params
         .iter()

@@ -1,5 +1,71 @@
 # Migration Guide
 
+## 0.22.1 to 0.23.0: OAuth 2.0 providers, form_post and client credentials
+
+New behavior is opt-in. Existing `OidcProvider` flows keep `response_mode=query`,
+`client_secret_post`, the same token request parameters and the same public
+error codes. Breaking changes:
+
+1. **`OidcProviderConfig` struct literals.** New public fields
+   `response_mode`, `token_endpoint_auth_method` and `client_jwt`. Code that
+   builds the struct with a literal must add them; code using
+   `OidcProviderConfig::new` or `MicrosoftEntraConfig` is unaffected.
+   Serialized configurations without the new fields deserialize to the
+   defaults. `client_jwt` is never serialized: give a deserialized configuration
+   its signer again before `OidcProvider::new`, which fails closed when
+   `private_key_jwt` or `client_secret_basic` lacks a credential.
+2. **`OAuthLoginState` struct literals and persistence.** New public field
+   `response_mode` (`OAuthResponseMode`). Add it to struct literals
+   (`OAuthResponseMode::Query` keeps earlier behavior). JSON-serialized records
+   omit it for `query` and old records read as `query`. Column-mapped stores
+   must add a `response_mode` column (`query`/`form_post`, default `query`),
+   write it on insert and return it from `consume_oauth_state`. A store that
+   drops it makes `form_post` callbacks fail closed. `OAuth2Provider` states
+   store an empty `nonce`; allow an empty value in that column.
+3. **`ValidatedOidcClaims` struct literals.** New public field
+   `email_verified: Option<bool>` (serde default `None`). Test doubles that
+   construct the struct must add it. Hosts that read `raw["email_verified"]`
+   may switch to the typed field.
+4. **`AuthError` variants.** `OAuthProviderError`, `OAuthCallback(String)`,
+   `OAuthTokenExchange(String)`, `OAuthUserInfo(String)` and
+   `OAuthMissingSubject` are new. Exhaustive matches need arms or a wildcard.
+   They are produced only by `OAuth2Provider`; `OidcProvider` errors are
+   unchanged.
+5. **`client_secret` is no longer serialized.** `OidcProviderConfig`,
+   `MicrosoftEntraConfig` and the new `OAuth2ProviderConfig` skip
+   `client_secret` when serializing, so a serialize/deserialize round trip
+   yields `client_secret: None`. Deserializing a document that contains
+   `client_secret` still works. Hosts that persisted configurations by
+   serializing them must store the secret separately (encrypted) and set it
+   after loading. A missing secret makes `client_secret_basic` fail at
+   construction and `client_secret_post` send no secret, which the provider
+   rejects.
+6. **Empty-nonce states.** `OidcProvider` now returns `InvalidOAuthState` for a
+   consumed state whose nonce is empty. Stores that round-trip the nonce are
+   unaffected; a store that loses the nonce previously failed at ID-token
+   validation and now fails earlier.
+
+Non-breaking additions and changes:
+
+- `OidcHttpClient` gains `supports_request_headers`, `get_json_with_headers`
+  and `post_form_json_with_headers` with defaults. Defaults delegate when only
+  `Accept` is supplied and otherwise fail closed. Implement all three (sending
+  every header, never logging them) to use `client_secret_basic` or
+  `OAuth2Provider`.
+- `OidcProviderConfig` and `MicrosoftEntraConfig` `Debug` output redacts
+  `client_secret`.
+- Never give an `OidcProvider` and an `OAuth2Provider` the same
+  `provider_name`; they share the state and identity namespace.
+- `ClientJwtClaims::issued_at_skew` (default 30 s, serde default for older
+  documents) backdates `iat`; `exp = iat + lifetime`. The OIDC token request now lists client credentials after
+  `code_verifier`; parameter order has no protocol meaning.
+- For `form_post`, add a POST callback route that parses the form body into
+  `OidcCallbackInput` and calls `handle_callback_in_mode(..,
+  OAuthResponseMode::FormPost)`. Read the cross-site POST and SameSite guidance
+  in [OIDC form_post and signed client credentials](docs/oidc-form-post-and-client-credentials.md).
+
+No token or stored-session migration is required.
+
 ## 0.22.0 to 0.22.1: bounded embedded catalogue signatures
 
 The signed catalogue structural limit is now 2 MiB, exported as

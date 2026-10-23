@@ -130,6 +130,32 @@ pub enum AuthError {
     /// OIDC ID-token validation failed.
     #[error("oidc token validation failed: {0}")]
     OidcTokenValidation(String),
+    /// An OAuth 2.0 provider redirected back with an authorization error
+    /// (for example the user cancelled). Provider text is never retained.
+    #[error("oauth provider returned an authorization error")]
+    OAuthProviderError,
+    /// An OAuth 2.0 callback was malformed, for example missing its code.
+    ///
+    /// The inner string is for server-side diagnostics only.
+    #[error("oauth callback failed: {0}")]
+    OAuthCallback(String),
+    /// The OAuth 2.0 token endpoint request failed or returned an error or an
+    /// invalid response.
+    ///
+    /// The inner string is for server-side diagnostics only and never contains
+    /// provider response text.
+    #[error("oauth token exchange failed: {0}")]
+    OAuthTokenExchange(String),
+    /// The OAuth 2.0 userinfo or verified-email request failed or returned an
+    /// invalid response.
+    ///
+    /// The inner string is for server-side diagnostics only and never contains
+    /// provider response text.
+    #[error("oauth userinfo request failed: {0}")]
+    OAuthUserInfo(String),
+    /// The OAuth 2.0 profile had no usable subject at the configured pointer.
+    #[error("oauth profile is missing a usable subject")]
+    OAuthMissingSubject,
     /// Host provisioning or linking policy rejected external login.
     #[error("external login rejected: {0}")]
     ExternalLoginRejected(String),
@@ -202,6 +228,12 @@ impl AuthError {
             AuthError::OidcCallback(_) => "UNAUTHENTICATED",
             AuthError::InvalidOidcAuthorizationOptions(_) => "INVALID_CONFIGURATION",
             AuthError::OidcTokenValidation(_) => "UNAUTHENTICATED",
+            AuthError::OAuthProviderError
+            | AuthError::OAuthCallback(_)
+            | AuthError::OAuthMissingSubject => "UNAUTHENTICATED",
+            AuthError::OAuthTokenExchange(_) | AuthError::OAuthUserInfo(_) => {
+                "AUTH_SERVICE_UNAVAILABLE"
+            }
             AuthError::ExternalLoginRejected(_) => "FORBIDDEN",
             AuthError::JwksUnsupported => "INVALID_CONFIGURATION",
             AuthError::InvalidConfiguration(_) => "INVALID_CONFIGURATION",
@@ -222,7 +254,10 @@ impl AuthError {
             | AuthError::MissingAuthorizationData
             | AuthError::MissingConnectionInitAuth
             | AuthError::OidcCallback(_)
-            | AuthError::OidcTokenValidation(_) => "unauthenticated",
+            | AuthError::OidcTokenValidation(_)
+            | AuthError::OAuthProviderError
+            | AuthError::OAuthCallback(_)
+            | AuthError::OAuthMissingSubject => "unauthenticated",
             AuthError::Forbidden | AuthError::ExternalLoginRejected(_) => "forbidden",
             AuthError::InvalidBearerToken => "invalid bearer token",
             AuthError::InvalidAccessToken => "invalid access token",
@@ -254,6 +289,8 @@ impl AuthError {
             AuthError::OAuthStateReplayed => "oauth state replay detected",
             AuthError::OidcDiscovery(_)
             | AuthError::OidcTokenExchange(_)
+            | AuthError::OAuthTokenExchange(_)
+            | AuthError::OAuthUserInfo(_)
             | AuthError::TokenCreation(_)
             | AuthError::PasswordHashing(_)
             | AuthError::Store(_)
@@ -272,6 +309,9 @@ impl AuthError {
             | AuthError::OidcTokenExchange(detail)
             | AuthError::OidcCallback(detail)
             | AuthError::OidcTokenValidation(detail)
+            | AuthError::OAuthCallback(detail)
+            | AuthError::OAuthTokenExchange(detail)
+            | AuthError::OAuthUserInfo(detail)
             | AuthError::ExternalLoginRejected(detail)
             | AuthError::InvalidConfiguration(detail)
             | AuthError::TokenCreation(detail)

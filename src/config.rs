@@ -3,6 +3,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
+use crate::client_auth::{
+    ClientJwtSigner, TokenEndpointAuthMethod, validate_client_authentication,
+};
 use crate::errors::AuthError;
 
 /// Runtime configuration for [`crate::AuthService`].
@@ -411,10 +414,44 @@ pub enum OidcProviderKind {
     MicrosoftEntra,
 }
 
+/// OAuth 2.0 authorization response mode.
+///
+/// The mode is sent as `response_mode` and bound into the one-time state, so a
+/// callback delivered in a different mode is refused.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OAuthResponseMode {
+    /// Parameters arrive in the redirect URI query string (`GET`).
+    #[default]
+    Query,
+    /// Parameters arrive as an `application/x-www-form-urlencoded` body in a
+    /// cross-site `POST` (OAuth 2.0 Form Post Response Mode).
+    FormPost,
+}
+
+impl OAuthResponseMode {
+    /// Protocol value for the `response_mode` parameter.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::FormPost => "form_post",
+        }
+    }
+
+    /// Whether this is the default query mode.
+    pub fn is_query(&self) -> bool {
+        matches!(self, Self::Query)
+    }
+}
+
 /// Provider-agnostic OIDC configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` redacts `client_secret` and `client_jwt`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OidcProviderConfig {
-    /// Stable provider name used in state and external-identity storage.
+    /// Stable provider name used in state and external-identity storage. It
+    /// must not be shared with an [`crate::OAuth2Provider`] or another provider.
     pub provider_name: String,
     /// Provider-specific validation behavior.
     pub provider_kind: OidcProviderKind,
@@ -422,7 +459,9 @@ pub struct OidcProviderConfig {
     pub discovery_url: String,
     /// OAuth2 client ID.
     pub client_id: String,
-    /// Optional client secret for confidential clients.
+    /// Optional client secret for confidential clients. Deserialized but
+    /// never serialized; `Debug` redacts it.
+    #[serde(skip_serializing)]
     pub client_secret: Option<String>,
     /// Redirect URI registered with the provider.
     pub redirect_uri: String,
@@ -450,6 +489,58 @@ pub struct OidcProviderConfig {
     pub state_ttl: Duration,
     /// Allowed ID-token signature algorithms.
     pub allowed_id_token_algs: Vec<String>,
+    /// Authorization response mode. Defaults to [`OAuthResponseMode::Query`].
+    #[serde(default)]
+    pub response_mode: OAuthResponseMode,
+    /// Token-endpoint client authentication. Defaults to
+    /// [`TokenEndpointAuthMethod::ClientSecretPost`].
+    #[serde(default)]
+    pub token_endpoint_auth_method: TokenEndpointAuthMethod,
+    /// Host-supplied signer for `private_key_jwt` assertions or a signed
+    /// `client_secret`. Mutually exclusive with `client_secret`. Never
+    /// serialized; a deserialized configuration must be given its signer again.
+    #[serde(skip)]
+    pub client_jwt: Option<ClientJwtSigner>,
+}
+
+impl fmt::Debug for OidcProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcProviderConfig")
+            .field("provider_name", &self.provider_name)
+            .field("provider_kind", &self.provider_kind)
+            .field("discovery_url", &self.discovery_url)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[redacted]"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .field("requested_scopes", &self.requested_scopes)
+            .field("request_offline_access", &self.request_offline_access)
+            .field("allowed_tenants", &self.allowed_tenants)
+            .field("allowed_issuers", &self.allowed_issuers)
+            .field("allow_consumer_accounts", &self.allow_consumer_accounts)
+            .field("jwks_cache_ttl", &self.jwks_cache_ttl)
+            .field("discovery_cache_ttl", &self.discovery_cache_ttl)
+            .field(
+                "jwks_forced_refresh_cooldown",
+                &self.jwks_forced_refresh_cooldown,
+            )
+            .field(
+                "allowed_additional_audiences",
+                &self.allowed_additional_audiences,
+            )
+            .field("clock_skew", &self.clock_skew)
+            .field("state_ttl", &self.state_ttl)
+            .field("allowed_id_token_algs", &self.allowed_id_token_algs)
+            .field("response_mode", &self.response_mode)
+            .field(
+                "token_endpoint_auth_method",
+                &self.token_endpoint_auth_method,
+            )
+            .field("client_jwt", &self.client_jwt)
+            .finish()
+    }
 }
 
 impl OidcProviderConfig {
@@ -483,6 +574,9 @@ impl OidcProviderConfig {
             clock_skew: Duration::seconds(60),
             state_ttl: Duration::minutes(10),
             allowed_id_token_algs: vec!["RS256".to_string()],
+            response_mode: OAuthResponseMode::Query,
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretPost,
+            client_jwt: None,
         }
     }
 
@@ -564,6 +658,13 @@ impl OidcProviderConfig {
             ));
         }
 
+        validate_client_authentication(
+            "OIDC",
+            self.token_endpoint_auth_method,
+            self.client_secret.as_deref(),
+            self.client_jwt.as_ref(),
+        )?;
+
         Ok(())
     }
 
@@ -603,7 +704,9 @@ impl MicrosoftEntraTenant {
 }
 
 /// Microsoft Entra ID OIDC configuration helper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` redacts `client_secret`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MicrosoftEntraConfig {
     /// Stable provider name used in state and external-identity storage.
     pub provider_name: String,
@@ -611,7 +714,9 @@ pub struct MicrosoftEntraConfig {
     pub tenant: MicrosoftEntraTenant,
     /// Microsoft application client ID.
     pub client_id: String,
-    /// Optional client secret for confidential clients.
+    /// Optional client secret for confidential clients. Deserialized but
+    /// never serialized; `Debug` redacts it.
+    #[serde(skip_serializing)]
     pub client_secret: Option<String>,
     /// Registered redirect URI.
     pub redirect_uri: String,
@@ -637,6 +742,38 @@ pub struct MicrosoftEntraConfig {
     pub state_ttl: Duration,
     /// Whether Microsoft consumer accounts are allowed.
     pub allow_consumers: bool,
+}
+
+impl fmt::Debug for MicrosoftEntraConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MicrosoftEntraConfig")
+            .field("provider_name", &self.provider_name)
+            .field("tenant", &self.tenant)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[redacted]"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .field("allowed_tenants", &self.allowed_tenants)
+            .field("allowed_issuers", &self.allowed_issuers)
+            .field("requested_scopes", &self.requested_scopes)
+            .field("request_offline_access", &self.request_offline_access)
+            .field("jwks_cache_ttl", &self.jwks_cache_ttl)
+            .field("discovery_cache_ttl", &self.discovery_cache_ttl)
+            .field(
+                "jwks_forced_refresh_cooldown",
+                &self.jwks_forced_refresh_cooldown,
+            )
+            .field(
+                "allowed_additional_audiences",
+                &self.allowed_additional_audiences,
+            )
+            .field("clock_skew", &self.clock_skew)
+            .field("state_ttl", &self.state_ttl)
+            .field("allow_consumers", &self.allow_consumers)
+            .finish()
+    }
 }
 
 impl MicrosoftEntraConfig {

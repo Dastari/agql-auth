@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.23.0
+
+- Add `OAuth2Provider` for OAuth 2.0 authorization-code + PKCE providers
+  without OpenID Connect (for example GitHub, `OAuth2ProviderConfig::github`).
+  It reuses one-time hashed state, exchanges the code, and resolves a typed
+  `OAuth2UserProfile` from a bearer userinfo request: required JSON-pointer
+  subject (string or integer), email, `email_verified` (pointer, unknown or
+  provider-verified), name, picture and raw JSON, plus an optional
+  verified-email list (primary/first verified). No nonce; no token storage.
+- Add opt-in `OidcProviderConfig::response_mode` (`query` default,
+  `form_post`). The mode is sent, bound into `OAuthLoginState::response_mode`,
+  and enforced by the new `handle_callback_in_mode` /
+  `login_with_callback_in_mode`; mismatched delivery is refused.
+- Add `TokenEndpointAuthMethod` (`client_secret_post` default,
+  `client_secret_basic`, `private_key_jwt`) for both providers, and
+  `ClientJwtSigner` (ES256/ES384/RS256/PS256) minting a fresh RFC 7523 client
+  assertion or signed client secret (Sign in with Apple) per token request.
+  `iat` is backdated by a configurable `issued_at_skew` (default 30 s) and
+  `exp - iat` stays within the configured lifetime (at least 1 s).
+  Keys stay in memory, are never serialized and are redacted from `Debug`.
+- Add `ValidatedOidcClaims::email_verified`, accepting a JSON boolean or the
+  exact strings `"true"`/`"false"`.
+- Add header-aware `OidcHttpClient` methods with fail-closed defaults; token
+  requests that send headers include `Accept: application/json`.
+- Add distinct OAuth 2.0 errors: `OAuthProviderError`, `OAuthCallback`,
+  `OAuthTokenExchange`, `OAuthUserInfo` and `OAuthMissingSubject`, mapped to the
+  existing stable public codes without provider text.
+- Hardening: `OidcProvider` refuses consumed states with an empty nonce.
+  `OidcProviderConfig`/`MicrosoftEntraConfig` `Debug` now redact
+  `client_secret`, and `client_secret` is no longer serialized. It is still
+  deserialized, including from `OAuth2ProviderConfig`.
+- Breaking: new public fields on `OidcProviderConfig`, `OAuthLoginState` and
+  `ValidatedOidcClaims` break struct literals, new `AuthError` variants break
+  exhaustive matches, stores must persist `OAuthLoginState::response_mode`,
+  and serialized OIDC/Entra configurations no longer include `client_secret`.
+  See MIGRATION.md.
+
 ## 0.22.1
 
 - Admit large host-signed role catalogues whose compact JWS embeds the catalogue.
