@@ -155,6 +155,7 @@ pub use claims::{
 };
 pub use client_auth::{
     CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner,
+    DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS, MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS,
     MAX_CLIENT_JWT_LIFETIME_SECONDS, TokenEndpointAuthMethod,
 };
 pub use clock::{Clock, FixedClock, SystemClock};

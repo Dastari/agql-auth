@@ -14,7 +14,10 @@ use super::oidc::{
 };
 use super::provider_http::RecordingHttpClient;
 use crate::prelude::*;
-use crate::{CLIENT_ASSERTION_TYPE_JWT_BEARER, MAX_CLIENT_JWT_LIFETIME_SECONDS};
+use crate::{
+    CLIENT_ASSERTION_TYPE_JWT_BEARER, DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS,
+    MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS, MAX_CLIENT_JWT_LIFETIME_SECONDS,
+};
 
 const APPLE_AUDIENCE: &str = "https://appleid.apple.com";
 const TEAM_ID: &str = "TEAM123456";
@@ -380,8 +383,9 @@ async fn signed_client_secret_is_fresh_verifiable_and_short_lived() {
     let header = decode_header(&secret).unwrap();
     assert_eq!(header.alg, Algorithm::ES256);
     assert_eq!(header.kid.as_deref(), Some("APPLEKEY01"));
-    let issued_at = clock.now().unix_timestamp();
-    let claims = decode_client_jwt(&secret, issued_at).unwrap();
+    let signed_at = clock.now().unix_timestamp();
+    let issued_at = signed_at - DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS;
+    let claims = decode_client_jwt(&secret, signed_at).unwrap();
     let mut names: Vec<_> = claims.as_object().unwrap().keys().cloned().collect();
     names.sort();
     assert_eq!(names, vec!["aud", "exp", "iat", "iss", "sub"]);
@@ -429,7 +433,10 @@ async fn signed_client_secret_is_fresh_verifiable_and_short_lived() {
         .to_string();
     assert_ne!(second, secret);
     let reissued = decode_client_jwt(&second, clock.now().unix_timestamp()).unwrap();
-    assert_eq!(reissued["iat"], clock.now().unix_timestamp());
+    assert_eq!(
+        reissued["iat"],
+        clock.now().unix_timestamp() - DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS
+    );
 }
 
 #[tokio::test]
@@ -539,6 +546,11 @@ fn client_jwt_configuration_fails_closed() {
         claims().with_lifetime(Duration::ZERO),
         claims().with_lifetime(Duration::seconds(-1)),
         claims().with_lifetime(Duration::seconds(MAX_CLIENT_JWT_LIFETIME_SECONDS + 1)),
+        claims().with_lifetime(Duration::milliseconds(500)),
+        claims().with_lifetime(Duration::seconds(30)),
+        claims().with_lifetime(Duration::seconds(1)),
+        claims().with_issued_at_skew(Duration::seconds(-1)),
+        claims().with_issued_at_skew(Duration::seconds(MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS + 1)),
         claims().with_audience(" "),
         claims().with_key_id(""),
         ClientJwtClaims::new("", CLIENT_ID),
@@ -555,6 +567,34 @@ fn client_jwt_configuration_fails_closed() {
         claims().with_lifetime(Duration::seconds(MAX_CLIENT_JWT_LIFETIME_SECONDS)),
     )
     .unwrap();
+    for accepted in [
+        claims().with_lifetime(Duration::seconds(31)),
+        claims()
+            .with_lifetime(Duration::seconds(1))
+            .with_issued_at_skew(Duration::ZERO),
+        claims()
+            .with_lifetime(Duration::seconds(MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS + 1))
+            .with_issued_at_skew(Duration::seconds(MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS)),
+    ] {
+        ClientJwtSigner::from_pem(
+            ClientJwtAlgorithm::ES256,
+            P256_PRIVATE_KEY.as_bytes(),
+            accepted,
+        )
+        .unwrap();
+    }
+    let legacy_claims: ClientJwtClaims = serde_json::from_value(json!({
+        "key_id": null,
+        "issuer": TEAM_ID,
+        "subject": CLIENT_ID,
+        "audience": null,
+        "lifetime": serde_json::to_value(Duration::minutes(5)).unwrap()
+    }))
+    .unwrap();
+    assert_eq!(
+        legacy_claims.issued_at_skew,
+        Duration::seconds(DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS)
+    );
 
     let signer = apple_signer(Duration::minutes(5));
     let mut both = form_post_config();

@@ -222,8 +222,9 @@ callback must arrive in. The typed-options API binds that policy to the exact
 state; legacy/default requests store `None`. The raw state is returned only to
 the browser redirect flow. `OAuth2Provider` states carry an empty nonce;
 `OidcProvider` refuses such a state and `OAuth2Provider` refuses a state with a
-nonce, so providers sharing a `provider_name` cannot complete each other's
-flows.
+nonce. Give every provider its own `provider_name`: an OIDC provider and an
+OAuth 2.0 provider must never share one. The nonce check is defense in depth,
+not a supported way to share a state namespace.
 
 `consume_oauth_state` must consume state exactly once. A replayed callback with
 the same state must not be accepted.

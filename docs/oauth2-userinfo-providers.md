@@ -23,6 +23,15 @@ userinfo response.
 sign-up and email-trust policy stay with the host. Key identities by
 `(provider_name, subject)`.
 
+`provider_name` must be unique across every `OAuth2Provider` and
+`OidcProvider` the host runs. Never give an OIDC provider and an OAuth 2.0
+provider the same name. They share the state-store and identity namespace,
+and the empty-nonce cross-check only refuses mistakes; it does not make a
+shared name safe.
+
+`client_secret` is deserialized but never serialized, so a serialized
+configuration does not carry the secret. Supply it again from secret storage.
+
 ## Configuration
 
 Endpoints are explicit (no discovery). They must be `https://` URLs; `http://`

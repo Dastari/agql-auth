@@ -31,7 +31,16 @@ error codes. Breaking changes:
    `OAuthMissingSubject` are new. Exhaustive matches need arms or a wildcard.
    They are produced only by `OAuth2Provider`; `OidcProvider` errors are
    unchanged.
-5. **Empty-nonce states.** `OidcProvider` now returns `InvalidOAuthState` for a
+5. **`client_secret` is no longer serialized.** `OidcProviderConfig`,
+   `MicrosoftEntraConfig` and the new `OAuth2ProviderConfig` skip
+   `client_secret` when serializing, so a serialize/deserialize round trip
+   yields `client_secret: None`. Deserializing a document that contains
+   `client_secret` still works. Hosts that persisted configurations by
+   serializing them must store the secret separately (encrypted) and set it
+   after loading. A missing secret makes `client_secret_basic` fail at
+   construction and `client_secret_post` send no secret, which the provider
+   rejects.
+6. **Empty-nonce states.** `OidcProvider` now returns `InvalidOAuthState` for a
    consumed state whose nonce is empty. Stores that round-trip the nonce are
    unaffected; a store that loses the nonce previously failed at ID-token
    validation and now fails earlier.
@@ -44,7 +53,11 @@ Non-breaking additions and changes:
   every header, never logging them) to use `client_secret_basic` or
   `OAuth2Provider`.
 - `OidcProviderConfig` and `MicrosoftEntraConfig` `Debug` output redacts
-  `client_secret`. The OIDC token request now lists client credentials after
+  `client_secret`.
+- Never give an `OidcProvider` and an `OAuth2Provider` the same
+  `provider_name`; they share the state and identity namespace.
+- `ClientJwtClaims::issued_at_skew` (default 30 s, serde default for older
+  documents) backdates `iat`; `exp = iat + lifetime`. The OIDC token request now lists client credentials after
   `code_verifier`; parameter order has no protocol meaning.
 - For `form_post`, add a POST callback route that parses the form body into
   `OidcCallbackInput` and calls `handle_callback_in_mode(..,

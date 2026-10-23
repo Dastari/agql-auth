@@ -21,6 +21,17 @@ use crate::{AuthError, AuthResult};
 /// recommended; [`ClientJwtClaims::new`] defaults to five minutes.
 pub const MAX_CLIENT_JWT_LIFETIME_SECONDS: i64 = 15_777_000;
 
+/// Default backdating of a client JWT `iat` (30 seconds), absorbing clock skew
+/// at identity providers that reject an `iat` in their future.
+pub const DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS: i64 = 30;
+
+/// Largest accepted `iat` backdating (five minutes).
+pub const MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS: i64 = 300;
+
+fn default_issued_at_skew() -> Duration {
+    Duration::seconds(DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS)
+}
+
 /// RFC 7523 client assertion type for `private_key_jwt`.
 pub const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
     "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
@@ -95,8 +106,17 @@ pub struct ClientJwtClaims {
     /// `aud` claim. `None` uses the token endpoint URL, as OIDC Core recommends
     /// for `private_key_jwt`. Sign in with Apple requires `https://appleid.apple.com`.
     pub audience: Option<String>,
-    /// Lifetime of each minted JWT (`exp - iat`).
+    /// Lifetime of each minted JWT (`exp - iat`), in whole seconds. At least
+    /// one second longer than `issued_at_skew` and at most
+    /// [`MAX_CLIENT_JWT_LIFETIME_SECONDS`].
     pub lifetime: Duration,
+    /// How far `iat` is backdated from the signing time, in whole seconds
+    /// (default [`DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS`], at most
+    /// [`MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS`]). `exp` is `iat + lifetime`,
+    /// so the total lifetime never exceeds `lifetime` and the JWT stays
+    /// valid for `lifetime - issued_at_skew` after minting.
+    #[serde(default = "default_issued_at_skew")]
+    pub issued_at_skew: Duration,
 }
 
 impl ClientJwtClaims {
@@ -109,6 +129,7 @@ impl ClientJwtClaims {
             subject: subject.into(),
             audience: None,
             lifetime: Duration::minutes(5),
+            issued_at_skew: default_issued_at_skew(),
         }
     }
 
@@ -127,6 +148,12 @@ impl ClientJwtClaims {
     /// Sets the lifetime of each minted JWT.
     pub fn with_lifetime(mut self, lifetime: Duration) -> Self {
         self.lifetime = lifetime;
+        self
+    }
+
+    /// Sets how far `iat` is backdated from the signing time.
+    pub fn with_issued_at_skew(mut self, issued_at_skew: Duration) -> Self {
+        self.issued_at_skew = issued_at_skew;
         self
     }
 
@@ -154,12 +181,24 @@ impl ClientJwtClaims {
                 "client JWT audience must not be empty when set".to_string(),
             ));
         }
-        if self.lifetime <= Duration::ZERO
-            || self.lifetime > Duration::seconds(MAX_CLIENT_JWT_LIFETIME_SECONDS)
+        let lifetime = self.lifetime.whole_seconds();
+        if !(1..=MAX_CLIENT_JWT_LIFETIME_SECONDS).contains(&lifetime) {
+            return Err(AuthError::InvalidConfiguration(
+                "client JWT lifetime must be at least one second and at most the supported maximum"
+                    .to_string(),
+            ));
+        }
+        let skew = self.issued_at_skew;
+        if skew < Duration::ZERO || skew > Duration::seconds(MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS)
         {
             return Err(AuthError::InvalidConfiguration(
-                "client JWT lifetime must be positive and at most the supported maximum"
+                "client JWT issued_at_skew must be between zero and the supported maximum"
                     .to_string(),
+            ));
+        }
+        if lifetime - skew.whole_seconds() < 1 {
+            return Err(AuthError::InvalidConfiguration(
+                "client JWT lifetime must exceed issued_at_skew by at least one second".to_string(),
             ));
         }
         Ok(())
@@ -255,7 +294,8 @@ impl ClientJwtSigner {
         &self.claims
     }
 
-    /// Mints a client JWT issued at `now`.
+    /// Mints a client JWT signed at `now`, with `iat = now - issued_at_skew`
+    /// and `exp = iat + lifetime`.
     ///
     /// `default_audience` is used when the claim template has no fixed
     /// audience. `include_jti` adds a random `jti` (required for
@@ -266,7 +306,10 @@ impl ClientJwtSigner {
         default_audience: &str,
         include_jti: bool,
     ) -> AuthResult<String> {
-        let iat = now.unix_timestamp();
+        let iat = now
+            .unix_timestamp()
+            .checked_sub(self.claims.issued_at_skew.whole_seconds())
+            .ok_or_else(|| AuthError::TokenCreation("client JWT iat overflowed".to_string()))?;
         let exp = iat
             .checked_add(self.claims.lifetime.whole_seconds())
             .ok_or_else(|| AuthError::TokenCreation("client JWT expiry overflowed".to_string()))?;

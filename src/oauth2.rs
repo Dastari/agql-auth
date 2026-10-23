@@ -141,6 +141,7 @@ impl OAuth2VerifiedEmailList {
 #[non_exhaustive]
 pub struct OAuth2ProviderConfig {
     /// Stable provider name used in state storage and as the identity namespace.
+    /// It must not be shared with an [`crate::OidcProvider`] or another provider.
     pub provider_name: String,
     /// Authorization endpoint.
     pub authorization_endpoint: String,
@@ -150,7 +151,9 @@ pub struct OAuth2ProviderConfig {
     pub userinfo_endpoint: String,
     /// OAuth 2.0 client ID.
     pub client_id: String,
-    /// Optional static client secret for confidential clients.
+    /// Optional static client secret for confidential clients. Deserialized
+    /// but never serialized; `Debug` redacts it.
+    #[serde(skip_serializing)]
     pub client_secret: Option<String>,
     /// Host-supplied client JWT signer. Mutually exclusive with
     /// `client_secret`. Never serialized.
@@ -280,7 +283,14 @@ impl OAuth2ProviderConfig {
         ] {
             validate_endpoint(name, value)?;
         }
-        ensure_no_reserved_authorization_parameters(&self.authorization_endpoint)?;
+        ensure_no_reserved_authorization_parameters(&self.authorization_endpoint).map_err(
+            |_| {
+                AuthError::InvalidConfiguration(
+                    "OAuth 2.0 authorization_endpoint contains a reserved query parameter"
+                        .to_string(),
+                )
+            },
+        )?;
         if self.client_secret.as_deref().is_some_and(str::is_empty) {
             return Err(AuthError::InvalidConfiguration(
                 "OAuth 2.0 client_secret must not be empty when set".to_string(),
@@ -365,14 +375,17 @@ fn validate_endpoint(name: &str, value: &str) -> AuthResult<()> {
         .next()
         .filter(|authority| !authority.is_empty() && !authority.contains('@'))
         .ok_or_else(invalid)?;
-    if scheme.eq_ignore_ascii_case("https") {
-        return Ok(());
-    }
     let host = if let Some(bracketed) = authority.strip_prefix('[') {
         bracketed.split(']').next().unwrap_or_default()
     } else {
         authority.split(':').next().unwrap_or_default()
     };
+    if host.is_empty() {
+        return Err(invalid());
+    }
+    if scheme.eq_ignore_ascii_case("https") {
+        return Ok(());
+    }
     if scheme.eq_ignore_ascii_case("http")
         && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1")
     {

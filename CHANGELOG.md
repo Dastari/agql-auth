@@ -17,6 +17,8 @@
   `client_secret_basic`, `private_key_jwt`) for both providers, and
   `ClientJwtSigner` (ES256/ES384/RS256/PS256) minting a fresh RFC 7523 client
   assertion or signed client secret (Sign in with Apple) per token request.
+  `iat` is backdated by a configurable `issued_at_skew` (default 30 s) and
+  `exp - iat` stays within the configured lifetime (at least 1 s).
   Keys stay in memory, are never serialized and are redacted from `Debug`.
 - Add `ValidatedOidcClaims::email_verified`, accepting a JSON boolean or the
   exact strings `"true"`/`"false"`.
@@ -25,12 +27,14 @@
 - Add distinct OAuth 2.0 errors: `OAuthProviderError`, `OAuthCallback`,
   `OAuthTokenExchange`, `OAuthUserInfo` and `OAuthMissingSubject`, mapped to the
   existing stable public codes without provider text.
-- Hardening: `OidcProvider` refuses consumed states with an empty nonce, and
+- Hardening: `OidcProvider` refuses consumed states with an empty nonce.
   `OidcProviderConfig`/`MicrosoftEntraConfig` `Debug` now redact
-  `client_secret`.
+  `client_secret`, and `client_secret` is no longer serialized. It is still
+  deserialized, including from `OAuth2ProviderConfig`.
 - Breaking: new public fields on `OidcProviderConfig`, `OAuthLoginState` and
   `ValidatedOidcClaims` break struct literals, new `AuthError` variants break
-  exhaustive matches, and stores must persist `OAuthLoginState::response_mode`.
+  exhaustive matches, stores must persist `OAuthLoginState::response_mode`,
+  and serialized OIDC/Entra configurations no longer include `client_secret`.
   See MIGRATION.md.
 
 ## 0.22.1

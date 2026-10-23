@@ -10,7 +10,8 @@ use super::oidc::{MemoryOAuthStateStore, query_pairs};
 use super::provider_http::{RecordingHttpClient, bearer_token_response};
 use crate::prelude::*;
 use crate::{
-    CLIENT_ASSERTION_TYPE_JWT_BEARER, MAX_OAUTH2_SUBJECT_LENGTH, MAX_OAUTH2_VERIFIED_EMAIL_ENTRIES,
+    CLIENT_ASSERTION_TYPE_JWT_BEARER, DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS,
+    MAX_OAUTH2_SUBJECT_LENGTH, MAX_OAUTH2_VERIFIED_EMAIL_ENTRIES,
 };
 
 const GITHUB_TOKEN: &str = "https://github.com/login/oauth/access_token";
@@ -570,8 +571,14 @@ async fn private_key_jwt_assertion_targets_the_token_endpoint() {
     .claims;
     assert_eq!(claims["iss"], "client id");
     assert_eq!(claims["sub"], "client id");
-    assert_eq!(claims["iat"], 1_800_000_000);
-    assert_eq!(claims["exp"], 1_800_000_300);
+    assert_eq!(
+        claims["iat"],
+        1_800_000_000 - DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS
+    );
+    assert_eq!(
+        claims["exp"],
+        1_800_000_300 - DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS
+    );
     assert!(claims["jti"].as_str().is_some_and(|jti| jti.len() >= 43));
 }
 
@@ -598,6 +605,9 @@ fn constructors_fail_closed_on_unsafe_configuration() {
         Box::new(|config| config.userinfo_endpoint = "https://user@api.github.com/".to_string()),
         Box::new(|config| config.userinfo_endpoint = "https:///user".to_string()),
         Box::new(|config| config.token_endpoint = "https://github.com/ token".to_string()),
+        Box::new(|config| config.token_endpoint = "https://:443/token".to_string()),
+        Box::new(|config| config.userinfo_endpoint = "https://[]/user".to_string()),
+        Box::new(|config| config.userinfo_endpoint = "http://:80/user".to_string()),
         Box::new(|config| {
             config.authorization_endpoint = "https://github.com/authorize?state=fixed".to_string()
         }),
@@ -638,11 +648,7 @@ fn constructors_fail_closed_on_unsafe_configuration() {
         let mut config = github_config();
         mutate(&mut config);
         assert!(
-            matches!(
-                config.validate(),
-                Err(AuthError::InvalidConfiguration(_)
-                    | AuthError::InvalidOidcAuthorizationOptions(_))
-            ),
+            matches!(config.validate(), Err(AuthError::InvalidConfiguration(_))),
             "mutation {index} was accepted"
         );
     }
@@ -695,4 +701,35 @@ async fn oidc_and_oauth2_states_cannot_be_crossed() {
         .unwrap_err();
     assert!(matches!(crossed, AuthError::InvalidOAuthState));
     assert!(oauth_client.posts().is_empty());
+}
+
+#[test]
+fn client_secrets_deserialize_but_never_serialize() {
+    let github = serde_json::to_value(github_config()).unwrap();
+    assert!(github.get("client_secret").is_none());
+    assert!(!github.to_string().contains("s:cret"));
+    let mut with_secret = github.clone();
+    with_secret["client_secret"] = json!("s:cret/+");
+    let restored: OAuth2ProviderConfig = serde_json::from_value(with_secret).unwrap();
+    assert_eq!(restored.client_secret.as_deref(), Some("s:cret/+"));
+    let restored: OAuth2ProviderConfig = serde_json::from_value(github).unwrap();
+    assert_eq!(restored.client_secret, None);
+
+    let mut entra = MicrosoftEntraConfig::organizations("client", REDIRECT);
+    entra.client_secret = Some("entra-secret".to_string());
+    let value = serde_json::to_value(&entra).unwrap();
+    assert!(value.get("client_secret").is_none());
+    let mut with_secret = value;
+    with_secret["client_secret"] = json!("entra-secret");
+    let restored: MicrosoftEntraConfig = serde_json::from_value(with_secret).unwrap();
+    assert_eq!(restored.client_secret.as_deref(), Some("entra-secret"));
+    assert!(!format!("{restored:?}").contains("entra-secret"));
+
+    let oidc = restored.into_oidc_provider_config().unwrap();
+    let value = serde_json::to_value(&oidc).unwrap();
+    assert!(value.get("client_secret").is_none());
+    let mut with_secret = value;
+    with_secret["client_secret"] = json!("entra-secret");
+    let restored: OidcProviderConfig = serde_json::from_value(with_secret).unwrap();
+    assert_eq!(restored.client_secret.as_deref(), Some("entra-secret"));
 }

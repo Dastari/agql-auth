@@ -69,14 +69,18 @@ A fresh JWT is minted for every token request:
 
 - header: `alg`, `typ: JWT`, optional `kid`;
 - claims: `iss`, `sub`, `aud` (the configured audience, or the token endpoint
-  URL), `iat` (provider clock) and `exp = iat + lifetime`;
+  URL), `iat` and `exp = iat + lifetime`;
+- `iat` is the provider clock minus `issued_at_skew` (default 30 s, at most
+  300 s), so identity providers whose clock runs behind do not reject a
+  future `iat`. The total lifetime `exp - iat` stays `lifetime`, and the JWT
+  is valid for `lifetime - issued_at_skew` after minting;
 - `jti` (256 random bits) only for `PrivateKeyJwt`.
 
 With `PrivateKeyJwt` the JWT is the `client_assertion`. With
 `ClientSecretPost`/`ClientSecretBasic` it is the `client_secret` value, a
-signed client secret. Lifetimes must be positive and at most
-`MAX_CLIENT_JWT_LIFETIME_SECONDS` (15,777,000 s, Apple's maximum); the default
-is five minutes. `client_secret` and `client_jwt` are mutually exclusive.
+signed client secret. Lifetimes are whole seconds, at least one second longer
+than `issued_at_skew` and at most `MAX_CLIENT_JWT_LIFETIME_SECONDS`
+(15,777,000 s, Apple's maximum). The default is five minutes. `client_secret` and `client_jwt` are mutually exclusive.
 
 ## `email_verified`
 

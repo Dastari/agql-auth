@@ -450,7 +450,8 @@ impl OAuthResponseMode {
 /// `Debug` redacts `client_secret` and `client_jwt`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OidcProviderConfig {
-    /// Stable provider name used in state and external-identity storage.
+    /// Stable provider name used in state and external-identity storage. It
+    /// must not be shared with an [`crate::OAuth2Provider`] or another provider.
     pub provider_name: String,
     /// Provider-specific validation behavior.
     pub provider_kind: OidcProviderKind,
@@ -458,7 +459,9 @@ pub struct OidcProviderConfig {
     pub discovery_url: String,
     /// OAuth2 client ID.
     pub client_id: String,
-    /// Optional client secret for confidential clients.
+    /// Optional client secret for confidential clients. Deserialized but
+    /// never serialized; `Debug` redacts it.
+    #[serde(skip_serializing)]
     pub client_secret: Option<String>,
     /// Redirect URI registered with the provider.
     pub redirect_uri: String,
@@ -711,7 +714,9 @@ pub struct MicrosoftEntraConfig {
     pub tenant: MicrosoftEntraTenant,
     /// Microsoft application client ID.
     pub client_id: String,
-    /// Optional client secret for confidential clients.
+    /// Optional client secret for confidential clients. Deserialized but
+    /// never serialized; `Debug` redacts it.
+    #[serde(skip_serializing)]
     pub client_secret: Option<String>,
     /// Registered redirect URI.
     pub redirect_uri: String,
