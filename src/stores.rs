@@ -239,7 +239,8 @@ pub trait OAuthStateStore: Send + Sync {
     ///   AND state_hash = ?
     ///   AND consumed_at IS NULL
     /// RETURNING provider_name, state_hash, nonce, code_verifier, redirect_uri,
-    ///           scopes, created_at, expires_at, NULL AS consumed_at;
+    ///           scopes, authorization_policy, response_mode, created_at,
+    ///           expires_at, NULL AS consumed_at;
     /// ```
     async fn consume_oauth_state(
         &self,

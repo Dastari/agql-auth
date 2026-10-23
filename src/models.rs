@@ -1325,6 +1325,12 @@ pub struct ValidatedOidcClaims {
     pub object_id: Option<String>,
     /// Email claim, when present.
     pub email: Option<String>,
+    /// `email_verified` claim: a JSON boolean or the exact strings `"true"` /
+    /// `"false"` (as Sign in with Apple sends). Any other type or value is
+    /// `None`. Only `Some(true)` asserts a verified address; whether to trust
+    /// it remains host policy.
+    #[serde(default)]
+    pub email_verified: Option<bool>,
     /// Display name, when present.
     pub name: Option<String>,
     /// Preferred username, when present.
@@ -1357,6 +1363,7 @@ impl fmt::Debug for ValidatedOidcClaims {
             .field("tenant_id", &self.tenant_id)
             .field("object_id", &self.object_id)
             .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
             .field("name", &self.name)
             .field("preferred_username", &self.preferred_username)
             .field("role_count", &self.roles.len())
@@ -1413,7 +1420,9 @@ pub struct OAuthLoginState {
     pub provider_name: String,
     /// Hash of the raw state value.
     pub state_hash: String,
-    /// OIDC nonce bound to this authorization request.
+    /// OIDC nonce bound to this authorization request. Empty for plain
+    /// OAuth 2.0 requests from [`crate::OAuth2Provider`]; [`crate::OidcProvider`]
+    /// refuses a state with an empty nonce.
     pub nonce: String,
     /// PKCE code verifier.
     pub code_verifier: String,
@@ -1425,6 +1434,12 @@ pub struct OAuthLoginState {
     /// therefore carry no step-up requirement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_policy: Option<crate::OidcAuthorizationPolicy>,
+    /// Authorization response mode bound to this request. Legacy records omit
+    /// this field and therefore mean [`crate::OAuthResponseMode::Query`]. Stores
+    /// must persist it: a `form_post` state reloaded as `query` refuses its
+    /// callback.
+    #[serde(default, skip_serializing_if = "crate::OAuthResponseMode::is_query")]
+    pub response_mode: crate::OAuthResponseMode,
     /// Creation time.
     pub created_at: OffsetDateTime,
     /// Expiry time.
@@ -1443,6 +1458,7 @@ impl fmt::Debug for OAuthLoginState {
             .field("redirect_uri", &self.redirect_uri)
             .field("scope_count", &self.scopes.len())
             .field("authorization_policy", &self.authorization_policy)
+            .field("response_mode", &self.response_mode)
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
             .field("consumed_at", &self.consumed_at)

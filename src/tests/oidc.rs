@@ -14,19 +14,20 @@ type RecordedPost = (String, Vec<(String, String)>);
 
 const TENANT_ID: &str = "11111111-1111-1111-1111-111111111111";
 const OBJECT_ID: &str = "22222222-2222-2222-2222-222222222222";
-const SUBJECT: &str = "subject-value";
-const CLIENT_ID: &str = "client-id";
-const REDIRECT_URI: &str = "https://app.example.test/auth/microsoft/callback";
-const DISCOVERY_URL: &str = "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/v2.0/.well-known/openid-configuration";
+pub(super) const SUBJECT: &str = "subject-value";
+pub(super) const CLIENT_ID: &str = "client-id";
+pub(super) const REDIRECT_URI: &str = "https://app.example.test/auth/microsoft/callback";
+pub(super) const DISCOVERY_URL: &str = "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/v2.0/.well-known/openid-configuration";
 const AUTH_ENDPOINT: &str =
     "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/oauth2/v2.0/authorize";
-const TOKEN_ENDPOINT: &str =
+pub(super) const TOKEN_ENDPOINT: &str =
     "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/oauth2/v2.0/token";
-const JWKS_URI: &str =
+pub(super) const JWKS_URI: &str =
     "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/discovery/v2.0/keys";
-const ISSUER: &str = "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/v2.0";
+pub(super) const ISSUER: &str =
+    "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/v2.0";
 
-const RSA_PRIVATE_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+pub(super) const RSA_PRIVATE_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTL
 UTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2V
 rUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8H
@@ -122,7 +123,7 @@ impl OidcHttpClient for MockOidcHttpClient {
 }
 
 #[derive(Clone, Default)]
-struct MemoryOAuthStateStore {
+pub(super) struct MemoryOAuthStateStore {
     states: Arc<Mutex<HashMap<(String, String), OAuthLoginState>>>,
 }
 
@@ -346,6 +347,7 @@ async fn oauth_state_store_contract_returns_pre_consumption_snapshot() {
         redirect_uri: REDIRECT_URI.to_string(),
         scopes: vec!["openid".to_string()],
         authorization_policy: None,
+        response_mode: OAuthResponseMode::Query,
         created_at: OffsetDateTime::now_utc(),
         expires_at: OffsetDateTime::now_utc() + Duration::minutes(10),
         consumed_at: None,
@@ -442,6 +444,7 @@ async fn microsoft_claim_mapper_maps_roles_groups_tenant_and_object_id() {
         tenant_id: Some(TENANT_ID.to_string()),
         object_id: Some(OBJECT_ID.to_string()),
         email: None,
+        email_verified: None,
         name: None,
         preferred_username: None,
         roles: vec!["App.Admin".to_string()],
@@ -1991,7 +1994,7 @@ async fn run_bound_case(
         .await
 }
 
-fn query_pairs(url: &str) -> Vec<(String, String)> {
+pub(super) fn query_pairs(url: &str) -> Vec<(String, String)> {
     url.split_once('?')
         .map(|(_, query)| query)
         .unwrap_or_default()
@@ -2055,7 +2058,7 @@ async fn run_generic_validation_case(
         .await
 }
 
-fn discovery_document() -> JsonValue {
+pub(super) fn discovery_document() -> JsonValue {
     json!({
         "issuer": ISSUER,
         "authorization_endpoint": AUTH_ENDPOINT,
@@ -2064,7 +2067,7 @@ fn discovery_document() -> JsonValue {
     })
 }
 
-fn jwks_document(kid: &str) -> JsonValue {
+pub(super) fn jwks_document(kid: &str) -> JsonValue {
     json!({
         "keys": [
             {
@@ -2079,7 +2082,7 @@ fn jwks_document(kid: &str) -> JsonValue {
     })
 }
 
-fn valid_claims(nonce: &str) -> JsonValue {
+pub(super) fn valid_claims(nonce: &str) -> JsonValue {
     let now = OffsetDateTime::now_utc();
     json!({
         "iss": ISSUER,
@@ -2099,7 +2102,7 @@ fn valid_claims(nonce: &str) -> JsonValue {
     })
 }
 
-fn signed_id_token(claims: JsonValue, kid: &str) -> String {
+pub(super) fn signed_id_token(claims: JsonValue, kid: &str) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(kid.to_string());
     encode(

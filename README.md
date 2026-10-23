@@ -339,6 +339,13 @@ See [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md).
 For typed recent-authentication requests bound to one-time state, see
 [OIDC reauthentication and step-up](docs/oidc-step-up.md).
 
+Providers without OpenID Connect (for example GitHub) use `OAuth2Provider`,
+which exchanges the code with PKCE and resolves a typed profile from the
+userinfo endpoint. See [OAuth 2.0 userinfo providers](docs/oauth2-userinfo-providers.md).
+`form_post` responses, `client_secret_basic`, `private_key_jwt` and signed
+client secrets (Sign in with Apple) are covered in
+[OIDC form_post and signed client credentials](docs/oidc-form-post-and-client-credentials.md).
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
@@ -358,6 +365,8 @@ For typed recent-authentication requests bound to one-time state, see
 - [JWT signing and JWKS](docs/jwt-signing-and-jwks.md)
 - [Microsoft Entra OIDC](docs/microsoft-entra-oidc.md)
 - [OIDC reauthentication and step-up](docs/oidc-step-up.md)
+- [OAuth 2.0 userinfo providers](docs/oauth2-userinfo-providers.md)
+- [OIDC form_post and signed client credentials](docs/oidc-form-post-and-client-credentials.md)
 - [Recovery, login challenges, and MFA](docs/recovery-mfa-and-challenges.md)
 - [Primitives and complete secure host flows](docs/secure-primitive-flows.md)
 - [Session assurance and recent MFA](docs/session-assurance.md)

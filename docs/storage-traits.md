@@ -212,13 +212,18 @@ for the coordinated old-worker shutdown and outstanding-challenge invalidation.
 
 ## OIDC State
 
-`OAuthStateStore` is required for OIDC authorization-code flows.
+`OAuthStateStore` is required for OIDC and plain OAuth 2.0 authorization-code
+flows.
 
 `create_authorization_request` stores an `OAuthLoginState` containing the hashed
-state, nonce, PKCE verifier, redirect URI, requested scopes, expiry, and an
-optional versioned `authorization_policy`. The typed-options API binds that
-policy to the exact state; legacy/default requests store `None`. The raw state
-is returned only to the browser redirect flow.
+state, nonce, PKCE verifier, redirect URI, requested scopes, expiry, an
+optional versioned `authorization_policy`, and the `response_mode` the
+callback must arrive in. The typed-options API binds that policy to the exact
+state; legacy/default requests store `None`. The raw state is returned only to
+the browser redirect flow. `OAuth2Provider` states carry an empty nonce;
+`OidcProvider` refuses such a state and `OAuth2Provider` refuses a state with a
+nonce, so providers sharing a `provider_name` cannot complete each other's
+flows.
 
 `consume_oauth_state` must consume state exactly once. A replayed callback with
 the same state must not be accepted.
@@ -237,7 +242,7 @@ WHERE provider_name = ?
   AND state_hash = ?
   AND consumed_at IS NULL
 RETURNING provider_name, state_hash, nonce, code_verifier, redirect_uri,
-          scopes, authorization_policy, created_at, expires_at,
+          scopes, authorization_policy, response_mode, created_at, expires_at,
           NULL AS consumed_at;
 ```
 
@@ -247,6 +252,9 @@ Recommended database constraints:
 - nullable `consumed_at`
 - nullable JSON/typed `authorization_policy`; missing legacy values mean no
   request, never satisfied step-up
+- `response_mode` (`query` or `form_post`); a missing legacy value means
+  `query`. A store that drops it makes `form_post` callbacks fail closed
+- `nonce` may be empty (plain OAuth 2.0 states)
 - compare expiry before accepting the callback
 - update `consumed_at` in the same statement that verifies it is currently null
 

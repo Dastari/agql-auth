@@ -27,6 +27,22 @@ clients by default.
 | `AUTH_SERVICE_UNAVAILABLE` | Store failures, OIDC transport failures, token creation failures |
 | `INVALID_CONFIGURATION` | Host misconfiguration (usually fail-fast at startup) |
 
+OAuth 2.0 (`OAuth2Provider`) failures are distinct variants that map onto the
+stable codes above, so hosts branch on the variant and clients see no provider
+detail:
+
+| Variant | Code |
+|---------|------|
+| `InvalidOAuthState` / `OAuthStateExpired` / `OAuthStateReplayed` | `INVALID_OAUTH_STATE` / `OAUTH_STATE_EXPIRED` / `OAUTH_STATE_REPLAYED` |
+| `OAuthProviderError` (error callback, e.g. cancelled) | `UNAUTHENTICATED` |
+| `OAuthCallback` (malformed callback, missing code) | `UNAUTHENTICATED` |
+| `OAuthTokenExchange` | `AUTH_SERVICE_UNAVAILABLE` |
+| `OAuthUserInfo` (userinfo or verified-email list) | `AUTH_SERVICE_UNAVAILABLE` |
+| `OAuthMissingSubject` | `UNAUTHENTICATED` |
+
+Their internal detail is a fixed diagnostic string; provider response bodies,
+`error_description` text and tokens are never copied into an `AuthError`.
+
 Additional codes remain available for specific flows (refresh, password reset,
 login challenges, TOTP). Prefer the table above for cross-service contracts.
 
