@@ -51,6 +51,10 @@ lanes and the protected release gate when maintaining workflows, following
    explicit validation matrix. Never substitute `--all-features`.
 5. Run `cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)"
    --default-features` with pinned cargo-semver-checks 0.46.0.
+   Report actual executed/skipped SemVer check counts; a permitted minor bump
+   does not prove source compatibility. Also run the independent minimal and
+   additive consumers and resolved-graph assertions in
+   [GraphQL feature selection](graphql-features.md).
 6. Review the diff, open a PR, and merge after CI succeeds. Do not tag locally.
    On Gema's shared host, launch every compiling Cargo command, including
    installation, rustdoc and SemVer checks, through

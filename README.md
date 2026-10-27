@@ -41,6 +41,14 @@ status, grant ceilings and both deadlines remain mandatory; see
 agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1d2e9fe2e1576105212a7b340a11abf8cad0382d", version = "0.19.0" }
 ```
 
+## GraphQL features
+
+Auth 0.24 contributes no async-graphql default or named features. Hosts enable
+extra capabilities directly on their own async-graphql dependency. This changes
+transitive build defaults; see [migration](MIGRATION.md) and the
+[minimal/additive consumer guide](docs/graphql-features.md). Auth APIs and
+authentication behavior are unchanged.
+
 ## Basic Usage
 
 Create the service with your user and refresh-token stores:

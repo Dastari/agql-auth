@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.24.0
+
+- Breaking build-feature change: stop enabling async-graphql default features
+  transitively. Auth requires no named async-graphql features. Hosts using
+  email validation, GraphiQL, playground, dynamic schemas or tempfile uploads
+  must enable those features directly; see MIGRATION.md. Cargo feature
+  unification remains additive.
+- Auth public APIs, guards, context, errors/redaction, tokens, cryptography,
+  MFA/OIDC, request/response behavior, storage and concurrency are unchanged.
+  No persistence or wire migration is required.
+- Add independent minimal and explicit additive GraphQL consumer fixtures and
+  resolved-graph assertions. The MIT grant and license file are unchanged.
+
 ## 0.23.0
 
 - Add `OAuth2Provider` for OAuth 2.0 authorization-code + PKCE providers
