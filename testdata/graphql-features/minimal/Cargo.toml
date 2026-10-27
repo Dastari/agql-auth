@@ -1,0 +1,20 @@
+[package]
+name = "auth-graphql-minimal-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Independent resolution: do not unify these consumers with the library workspace.
+[workspace]
+
+[dependencies]
+agql-auth = { path = "../../.." }
+async-graphql = { version = "7", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "auth_contract"
+path = "../auth_contract.rs"

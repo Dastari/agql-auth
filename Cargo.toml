@@ -1,6 +1,6 @@
 [package]
 name = "agql-auth"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 license = "MIT"
 authors = ["Toby Martin <toby@dastari.net>"]
@@ -14,7 +14,7 @@ categories = ["authentication", "web-programming"]
 publish = false
 
 [dependencies]
-async-graphql = "7"
+async-graphql = { version = "7", default-features = false }
 async-trait = "0.1"
 argon2 = "0.5"
 base64 = "0.22"

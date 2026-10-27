@@ -1,5 +1,35 @@
 # Migration Guide
 
+## 0.23.0 to 0.24.0: explicit async-graphql features
+
+This is a breaking transitive build-feature change, requiring a pre-1.0 minor
+bump. Auth now uses `async-graphql = { version = "7", default-features = false }`
+with no named features. Auth APIs and behavior are unchanged, including UUID/time
+domain values, guard decisions, context injection, errors/redaction, request/response
+helpers, tokens, refresh rotation, crypto, MFA/OIDC, storage and concurrency.
+There is no data, SDL or wire migration.
+
+Hosts that relied on incidental feature unification must request their own
+capabilities on the same resolved async-graphql package. For example:
+
+```toml
+[dependencies]
+# Keep your reviewed agql-auth Git selector; update it to the reviewed 0.24.0 commit.
+async-graphql = { version = "7", default-features = false, features = ["graphiql", "playground", "dynamic-schema", "tempfile"] }
+```
+
+Select only what the host uses. `tempfile` keeps file-backed multipart upload
+content (`UploadValue::content`); without it async-graphql uses bytes-backed
+content. Add `email-validator` explicitly if the host uses its email validator.
+A host may also choose async-graphql defaults explicitly; this restores its full
+default contribution and its dependencies. Extra features remain additive and
+do not require an Auth feature. Review the host's complete resolved dependency
+graph and third-party notices; a minimal Auth edge cannot remove features
+enabled by other consumers. No dependency versions or license grants change.
+
+See [GraphQL feature selection](docs/graphql-features.md) for executable minimal
+and additive consumer checks.
+
 ## 0.22.1 to 0.23.0: OAuth 2.0 providers, form_post and client credentials
 
 New behavior is opt-in. Existing `OidcProvider` flows keep `response_mode=query`,
