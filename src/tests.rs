@@ -186,6 +186,10 @@ pub(super) const TEST_HS256_SECRET: &str = "test-secret-must-be-at-least-32-byte
 pub(super) struct MemoryApiTokenStore {
     pub(super) tokens_by_id: Arc<Mutex<HashMap<Uuid, StoredApiToken>>>,
     token_hash_to_id: Arc<Mutex<HashMap<String, Uuid>>>,
+    /// Number of `touch_api_token` calls.
+    pub(super) touches: Arc<std::sync::atomic::AtomicUsize>,
+    /// When set, `touch_api_token` fails like a contended database write.
+    pub(super) fail_touches: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemoryApiTokenStore {
@@ -229,6 +233,13 @@ impl ApiTokenStore for MemoryApiTokenStore {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> crate::AuthResult<()> {
+        use std::sync::atomic::Ordering;
+        self.touches.fetch_add(1, Ordering::SeqCst);
+        if self.fail_touches.load(Ordering::SeqCst) {
+            return Err(crate::AuthError::Store(
+                "could not serialize access due to concurrent update".to_string(),
+            ));
+        }
         if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id) {
             token.last_used_at = Some(used_at);
             token.ip_address = ip_address;

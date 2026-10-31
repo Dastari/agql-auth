@@ -16,6 +16,14 @@ use crate::{AuthError, AuthResult};
 /// period separators.
 pub const DEFAULT_API_TOKEN_PREFIX: &str = "agql_api_";
 
+/// How old a token's `last_used_at` must be before authentication records a
+/// new use.
+///
+/// Usage metadata only needs to be roughly current. Recording every request
+/// makes concurrent requests that share one token contend for the same stored
+/// row, which on PostgreSQL surfaces as serialization failures under load.
+pub const API_TOKEN_TOUCH_INTERVAL: Duration = Duration::seconds(60);
+
 /// Service for issuing and authenticating long-lived opaque API tokens.
 ///
 /// This service is independent of [`crate::AuthService`] and does not require
@@ -127,14 +135,24 @@ where
             return Err(AuthError::ApiTokenRevoked);
         }
 
-        if stored.is_expired(OffsetDateTime::now_utc()) {
+        let now = OffsetDateTime::now_utc();
+        if stored.is_expired(now) {
             return Err(AuthError::ApiTokenExpired);
         }
 
-        let used_at = OffsetDateTime::now_utc();
-        self.store
-            .touch_api_token(stored.id, used_at, metadata.ip_address, metadata.user_agent)
-            .await?;
+        // Usage metadata is advisory: record it at most once per
+        // API_TOKEN_TOUCH_INTERVAL, and never let a failed write (such as a
+        // serialization conflict between concurrent requests sharing this
+        // token) deny an otherwise valid token.
+        let stale = stored
+            .last_used_at
+            .is_none_or(|last_used| now - last_used >= API_TOKEN_TOUCH_INTERVAL);
+        if stale {
+            let _ = self
+                .store
+                .touch_api_token(stored.id, now, metadata.ip_address, metadata.user_agent)
+                .await;
+        }
 
         Ok(stored.to_principal())
     }

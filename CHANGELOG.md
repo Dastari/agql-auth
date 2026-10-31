@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.2
+
+### Fixed
+
+- API-token authentication no longer fails when recording the token's last
+  use fails. Usage metadata is advisory; a contended write (for example a
+  PostgreSQL serialization failure when concurrent requests share a token)
+  previously denied a valid token with `AUTH_SERVICE_UNAVAILABLE`.
+- `last_used_at`, IP and user-agent are now recorded at most once per
+  `API_TOKEN_TOUCH_INTERVAL` (60 seconds), so concurrent requests with one
+  token no longer contend for its stored row.
+
 ## 0.19.1
 
 - Declare the MIT license and include its full text, matching graphql-orm.

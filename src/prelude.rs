@@ -3,7 +3,7 @@
 //! Import this module when you want the primary service, models, stores,
 //! guards, OIDC helpers, and session types in one place.
 
-pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use crate::api_tokens::{API_TOKEN_TOUCH_INTERVAL, ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
 pub use crate::assurance::{
     AssuranceDenial, AssuranceDenialCode, AssuranceEvaluation, AssuranceEvaluationState,
     AssuranceInputError, AssuranceMatchMode, AssurancePolicyId, AssurancePolicyIdError,

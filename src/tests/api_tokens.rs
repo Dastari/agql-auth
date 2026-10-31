@@ -187,3 +187,82 @@ async fn api_token_service_can_inject_principal_for_graphql_guards() {
         "svc-inventory"
     );
 }
+
+fn set_last_used(store: &MemoryApiTokenStore, token_id: uuid::Uuid, last_used: OffsetDateTime) {
+    store
+        .tokens_by_id
+        .lock()
+        .unwrap()
+        .get_mut(&token_id)
+        .unwrap()
+        .last_used_at = Some(last_used);
+}
+
+#[tokio::test]
+async fn failed_usage_write_does_not_reject_a_valid_api_token() {
+    let store = MemoryApiTokenStore::default();
+    let service = ApiTokenService::new(Arc::new(store.clone()));
+    let issued = service.issue_token(issue_request()).await.unwrap();
+    store
+        .fail_touches
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let principal = service
+        .authenticate_token(&issued.token, metadata())
+        .await
+        .unwrap();
+
+    assert_eq!(principal.token_id, issued.token_id);
+    assert_eq!(store.touches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        store
+            .get_by_raw_token(&issued.token)
+            .unwrap()
+            .last_used_at
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn recently_used_api_token_is_not_touched_again() {
+    let store = MemoryApiTokenStore::default();
+    let service = ApiTokenService::new(Arc::new(store.clone()));
+    let issued = service.issue_token(issue_request()).await.unwrap();
+    let recent = OffsetDateTime::now_utc() - Duration::seconds(5);
+    set_last_used(&store, issued.token_id, recent);
+
+    service
+        .authenticate_token(&issued.token, metadata())
+        .await
+        .unwrap();
+
+    assert_eq!(store.touches.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        store.get_by_raw_token(&issued.token).unwrap().last_used_at,
+        Some(recent)
+    );
+}
+
+#[tokio::test]
+async fn stale_api_token_use_is_recorded() {
+    let store = MemoryApiTokenStore::default();
+    let service = ApiTokenService::new(Arc::new(store.clone()));
+    let issued = service.issue_token(issue_request()).await.unwrap();
+    let stale = OffsetDateTime::now_utc() - API_TOKEN_TOUCH_INTERVAL - Duration::seconds(1);
+    set_last_used(&store, issued.token_id, stale);
+
+    service
+        .authenticate_token(&issued.token, metadata())
+        .await
+        .unwrap();
+
+    assert_eq!(store.touches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        store
+            .get_by_raw_token(&issued.token)
+            .unwrap()
+            .last_used_at
+            .unwrap()
+            > stale
+    );
+}
