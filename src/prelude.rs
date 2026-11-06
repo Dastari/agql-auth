@@ -96,7 +96,7 @@ pub use crate::scope_match::{
     HierarchicalScopeValidationError, HierarchicalScopeValidationWarning, ScopeMatch, ScopeMatcher,
 };
 pub use crate::scopes::{has_all_scopes, has_any_scope, has_scope};
-pub use crate::service::AuthService;
+pub use crate::service::{AuthService, FixedAudienceDelegation};
 pub use crate::session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use crate::stores::{
     AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,

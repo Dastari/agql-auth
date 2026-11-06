@@ -142,6 +142,8 @@ pub struct SessionBoundAccessTokenOnlyRequest {
     pub(crate) ttl: Option<Duration>,
     pub(crate) cnf: Option<ConfirmationClaims>,
     pub(crate) additional_claims: BTreeMap<String, JsonValue>,
+    /// Set only by [`crate::FixedAudienceDelegation`]; never caller-selected.
+    pub(crate) fixed_audience: Option<String>,
 }
 
 impl SessionBoundAccessTokenOnlyRequest {
@@ -159,6 +161,7 @@ impl SessionBoundAccessTokenOnlyRequest {
             ttl: None,
             cnf: None,
             additional_claims: BTreeMap::new(),
+            fixed_audience: None,
         }
     }
 
@@ -196,6 +199,7 @@ impl fmt::Debug for SessionBoundAccessTokenOnlyRequest {
                 "additional_claim_names",
                 &self.additional_claims.keys().collect::<Vec<_>>(),
             )
+            .field("fixed_audience", &self.fixed_audience)
             .finish()
     }
 }

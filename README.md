@@ -274,6 +274,12 @@ session state during issuance, narrows current authority, requires exact
 actor/resource/correlation/operation bindings, and creates no durable delegated
 session. See [Access-token-only grants](docs/access-token-only.md).
 
+When those tokens must be accepted only by one private receiver, create a
+`FixedAudienceDelegation` at startup with
+`into_shared_with_fixed_audience_delegation`. It uses the same owner, keys, and
+checks; only the startup-selected audience differs. See
+[Restricted fixed-audience delegation](docs/access-token-only.md#restricted-fixed-audience-delegation).
+
 ## API And Service Tokens
 
 Use `ApiTokenService` for long-lived server-to-server credentials. API tokens

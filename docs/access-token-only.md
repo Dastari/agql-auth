@@ -158,10 +158,99 @@ session store. The signed session version closes that boundary at the next
 status check: hosts must compare it to the authoritative record and fail closed
 when it changes.
 
+## Restricted Fixed-Audience Delegation
+
+Use `FixedAudienceDelegation` when a session-bound delegated token must be
+accepted only by one private receiver and rejected by the general router. Create
+it once at startup, in place of `Arc::new`, from the fully configured owner:
+
+```rust
+let (auth, receiver) = AuthService::new(config, users, refresh_tokens)?
+    .with_active_user_session_resolver(active_sessions)
+    .into_shared_with_fixed_audience_delegation(private_receiver_audience)?;
+
+let request = receiver
+    .prepare_session_bound_access_token_only(
+        &initially_resolved_principal,
+        narrowed_roles,
+        narrowed_scopes,
+        binding,
+    )
+    .await?
+    .with_ttl(Duration::minutes(5));
+let grant = receiver.issue_session_bound_access_token_only(request).await?;
+```
+
+The facade is a weak pointer to the owner plus the audience, so only `aud`
+differs. Signing, key identity, configuration, stores, resolver, scope matching,
+abuse state and clocks are the owner's, and both reads, the authority checks,
+expiry caps and every guarantee in the previous section still apply. The facade
+adds one check normal delegated issuance does not make: at both reads the parent
+must be a current, enabled user in the owner's `UserStore`. A missing user is
+refused with `Forbidden` and a disabled one with `UserDisabled`.
+
+- **Audience selection.** The constructor takes the service by value, so code
+  sharing an `Arc<AuthService>` cannot select an audience. A sole holder could
+  unwrap the `Arc`, which retires the owner and its facade. Issuance callers receive
+  the facade, which has no audience setter; `aud` stays a reserved claim, and
+  `issue_purpose_token` refuses the reserved audience. A request is bound to the
+  audience that prepared it, and the owner and other facades refuse it. An
+  owner-prepared request is refused by the facade. This is an API boundary for
+  ordinary callers, not a sandbox against hostile in-process code.
+- **Refused at startup.** An empty, padded, control-character or over-1024-byte
+  audience; the owner's normal audience, ignoring ASCII case; an owner without an
+  active-session resolver; and any owner not signing with RS256. A receiver
+  verifying HS256 would hold the secret that signs normal-audience tokens, so
+  migrate to RS256 first. One audience per owner.
+- **Lifecycle.** An owner's keys and policy cannot change while it is shared. To
+  change them, build a replacement owner and facade together. The facade does not
+  keep its owner alive: once every `Arc` to the old owner is gone, the old facade
+  fails closed with `AuthServiceUnavailable`, so keep the returned `Arc` for the
+  service's lifetime. In-flight calls and other live `Arc` clones can still use the
+  old owner, exactly as they can call it directly.
+
+Host responsibilities:
+
+- Do not list the receiver audience on the general router's validator. Pin the
+  receiver's validator to that one audience and to the owner's JWKS or public key,
+  and require the delegation claims (shown below).
+  `FixedAudienceDelegation::authenticate_access_token` applies these for an
+  in-process receiver. A receiver that does not use `AccessTokenValidator` must
+  also require `typ = access`.
+- Keep every delegating user in the store passed to the owner.
+- At the receiver, run the normal current-session/status check and compare the
+  signed session version. Enforce the actor, resource, correlation and operation
+  bindings. Validation alone proves signature and claims, not current status.
+
+```rust
+let receiver_validator = AccessTokenValidator::builder()
+    .issuer(issuer)
+    .audience(private_receiver_audience)
+    .jwks_json(owner_jwks_json)
+    .key_id(owner_key_id)
+    .purpose_policy(PurposePolicy::RequireAccessToken)
+    .claim_requirements(ClaimRequirements {
+        require_jti: true,
+        require_purpose: true,
+        require_actor: true,
+        require_resource_binding: true,
+        require_correlation_id: true,
+        required_grant_kind: Some(AccessTokenGrantKind::SessionBoundDelegation),
+        require_session_version: true,
+        require_operation_binding: true,
+        ..ClaimRequirements::default()
+    })
+    .build()?;
+```
+
+Delegated issuance has never consulted abuse counters, and this facade does not
+change that. Rate-limit issuance in the host if the caller is untrusted.
+
 ## Validation
 
 Issued tokens validate through both `AuthService` and `AccessTokenValidator`
-using the shared decode core. Use `ClaimRequirements` to require delegation
+using the shared decode core; fixed-audience tokens are validated by the facade or
+a validator pinned to that audience, and `AuthService` rejects them. Use `ClaimRequirements` to require delegation
 kind, session version, actor/resource/correlation, confirmation, and operation
 claims at resource-server boundaries.
 

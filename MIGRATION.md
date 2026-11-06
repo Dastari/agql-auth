@@ -1,5 +1,17 @@
 # Migration Guide
 
+## 0.24.0 to 0.25.0: restricted fixed-audience delegation
+
+No action is required. The new `FixedAudienceDelegation` API is additive, with no
+data, SDL or wire migration, and hosts that do not use it see no behavior change.
+
+To adopt it, replace `Arc::new(auth)` at startup with
+`auth.into_shared_with_fixed_audience_delegation(audience)?`, give issuance callers
+the returned facade, and pin the receiver's validator to that audience. The owner
+must sign with RS256, every delegating user must be in its `UserStore`, and purpose
+tokens can no longer use the reserved audience on that owner. See
+[Restricted fixed-audience delegation](docs/access-token-only.md#restricted-fixed-audience-delegation).
+
 ## 0.23.0 to 0.24.0: explicit async-graphql features
 
 This is a breaking transitive build-feature change, requiring a pre-1.0 minor
