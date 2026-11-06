@@ -13,6 +13,8 @@ use super::validator::rs256_config;
 use super::{MemoryRefreshTokenStore, MemoryUserStore};
 use crate::prelude::*;
 
+mod fixed_audience;
+
 #[tokio::test]
 async fn issue_access_token_only_validates_without_refresh_row() {
     let refresh_store = MemoryRefreshTokenStore::default();

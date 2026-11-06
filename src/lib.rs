@@ -55,7 +55,8 @@
 //! [`AuthService::issue_session_bound_access_token_only`] contract for narrow,
 //! non-refreshable delegation from an existing active user session; it re-reads
 //! authoritative session state through [`VerifiedActiveUserSessionResolver`]
-//! immediately before issuance.
+//! immediately before issuance. [`FixedAudienceDelegation`] issues the same
+//! tokens for one private audience selected at startup.
 //!
 //! ## JWT Signing And JWKS
 //!
@@ -239,7 +240,7 @@ pub use scope_match::{
     HierarchicalScopeValidationError, HierarchicalScopeValidationWarning, ScopeMatch, ScopeMatcher,
 };
 pub use scopes::{has_all_scopes, has_any_scope, has_scope};
-pub use service::AuthService;
+pub use service::{AuthService, FixedAudienceDelegation};
 pub use session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use stores::{
     AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,

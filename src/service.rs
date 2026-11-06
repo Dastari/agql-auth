@@ -1,6 +1,9 @@
 mod challenge;
+mod fixed_audience;
 mod password_reset;
 mod totp;
+
+pub use fixed_audience::FixedAudienceDelegation;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,7 +29,7 @@ use crate::AuthResult;
 use crate::assurance::{
     MfaAcceptance, RefreshableTokenMetadata, SessionAssurance, StepUpAuthentication,
 };
-use crate::claims::{AccessTokenGrantKind, AccessTokenMetadata};
+use crate::claims::{AccessTokenGrantKind, AccessTokenMetadata, ClaimRequirements};
 use crate::clock::{Clock, SystemClock};
 use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
 use crate::errors::AuthError;
@@ -51,7 +54,8 @@ use crate::stores::{
 };
 use crate::token_decode::{
     ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
-    access_token_claims_to_user, audience_claim, decode_access_token_claims, issued_scope_claims,
+    PurposePolicy, access_token_claims_to_user, audience_claim, decode_access_token_claims,
+    issued_scope_claims,
 };
 use crate::util::{
     extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
@@ -121,6 +125,7 @@ pub struct AuthService<U, R> {
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
     refresh_grant_authority: Option<Arc<dyn crate::RefreshGrantAuthority>>,
+    fixed_delegation_audience: Option<String>,
     #[cfg(test)]
     pub(super) password_work: Arc<std::sync::Mutex<Vec<String>>>,
     #[cfg(test)]
@@ -197,6 +202,7 @@ where
             active_user_session_resolver: None,
             additional_token_roles_provider: None,
             refresh_grant_authority: None,
+            fixed_delegation_audience: None,
             config,
             user_store,
             refresh_store,
@@ -676,6 +682,28 @@ where
         access_token_claims_to_user(claims)
     }
 
+    fn authenticate_fixed_audience_access_token(
+        &self,
+        token: &str,
+        audience: &str,
+    ) -> AuthResult<AuthUser> {
+        let mut config = self.access_token_decode_config();
+        config.validation = self.validation_for_audience(audience);
+        config.purpose_policy = PurposePolicy::RequireAccessToken;
+        config.claim_requirements = ClaimRequirements {
+            require_jti: true,
+            require_purpose: true,
+            require_actor: true,
+            require_resource_binding: true,
+            require_correlation_id: true,
+            required_grant_kind: Some(AccessTokenGrantKind::SessionBoundDelegation),
+            require_session_version: true,
+            require_operation_binding: true,
+            ..ClaimRequirements::default()
+        };
+        access_token_claims_to_user(decode_access_token_claims(token, &config)?)
+    }
+
     /// Validates a bearer token with or without the `Bearer ` prefix.
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
@@ -706,12 +734,20 @@ where
     /// access tokens but carry a distinct `typ`, exact `purpose`, and caller
     /// supplied `aud` claim. Validate them with
     /// [`AuthService::authenticate_purpose_token`], not
-    /// [`AuthService::authenticate_access_token`].
+    /// [`AuthService::authenticate_access_token`]. An audience reserved by
+    /// [`Self::into_shared_with_fixed_audience_delegation`] is refused.
     pub fn issue_purpose_token(
         &self,
         request: PurposeTokenIssueRequest,
     ) -> AuthResult<IssuedPurposeToken> {
         validate_purpose_token_issue_request(&request)?;
+        if self
+            .fixed_delegation_audience
+            .as_deref()
+            .is_some_and(|reserved| reserved.eq_ignore_ascii_case(&request.audience))
+        {
+            return Err(AuthError::Forbidden);
+        }
         let issued_at = OffsetDateTime::now_utc();
         let expires_at =
             crate::util::checked_jwt_expiry(issued_at, request.ttl, "purpose-token ttl")?;
@@ -1130,10 +1166,22 @@ where
     /// The resolver contract is read-only: issuance must not extend idle expiry
     /// or last-active state.
     /// No refresh token, refresh-store row, session family, or new login session
-    /// is created.
+    /// is created. A request prepared by a [`FixedAudienceDelegation`] is refused.
     pub async fn issue_session_bound_access_token_only(
         &self,
         request: SessionBoundAccessTokenOnlyRequest,
+    ) -> AuthResult<AccessTokenOnlyGrant> {
+        if request.fixed_audience.is_some() {
+            return Err(AuthError::Forbidden);
+        }
+        self.issue_session_bound_access_token_only_for_audience(request, &self.config.audience)
+            .await
+    }
+
+    async fn issue_session_bound_access_token_only_for_audience(
+        &self,
+        request: SessionBoundAccessTokenOnlyRequest,
+        audience: &str,
     ) -> AuthResult<AccessTokenOnlyGrant> {
         validate_session_bound_access_token_only_request(&request, &self.config)?;
         let resolver = self.active_user_session_resolver.as_ref().ok_or_else(|| {
@@ -1149,6 +1197,10 @@ where
         }
         let current = verified.user();
         self.validate_session_bound_current_authority(current, &request)?;
+        if request.fixed_audience.is_some() {
+            self.require_enabled_delegation_parent(&current.user_id)
+                .await?;
+        }
 
         let now = OffsetDateTime::now_utc();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
@@ -1204,14 +1256,33 @@ where
                 additional: request.additional_claims,
             },
         };
-        let (access_token, user) =
-            self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
+        let (access_token, user) = self.issue_access_token_with_user_for_audience(
+            auth_user,
+            now,
+            access_token_expires_at,
+            audience,
+        )?;
 
         Ok(AccessTokenOnlyGrant {
             access_token,
             access_token_expires_at,
             user,
         })
+    }
+
+    async fn require_enabled_delegation_parent(&self, subject: &str) -> AuthResult<()> {
+        let user = self
+            .user_store
+            .find_user_by_id(subject)
+            .await?
+            .ok_or(AuthError::Forbidden)?;
+        if user.id != subject {
+            return Err(AuthError::AuthServiceUnavailable);
+        }
+        if user.disabled {
+            return Err(AuthError::UserDisabled);
+        }
+        Ok(())
     }
 
     fn validate_session_bound_current_authority(
@@ -1384,9 +1455,24 @@ where
 
     fn issue_access_token_with_user(
         &self,
+        auth_user: AuthUser,
+        issued_at: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> AuthResult<(String, AuthUser)> {
+        self.issue_access_token_with_user_for_audience(
+            auth_user,
+            issued_at,
+            expires_at,
+            &self.config.audience,
+        )
+    }
+
+    fn issue_access_token_with_user_for_audience(
+        &self,
         mut auth_user: AuthUser,
         issued_at: OffsetDateTime,
         expires_at: OffsetDateTime,
+        audience: &str,
     ) -> AuthResult<(String, AuthUser)> {
         let jti = auth_user
             .token_claims
@@ -1420,7 +1506,7 @@ where
             legacy_scopes,
             ctx: auth_user.session.clone(),
             iss: self.config.issuer.clone(),
-            aud: audience_claim(&self.config.audience),
+            aud: audience_claim(audience),
             exp: expires_at.unix_timestamp(),
             iat: issued_at.unix_timestamp(),
             nbf: None,

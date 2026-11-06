@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.25.0
+
+- Add `FixedAudienceDelegation` and
+  `AuthService::into_shared_with_fixed_audience_delegation`: an owner-created,
+  startup-only facade that issues session-bound delegated tokens for one private
+  audience. It holds a weak reference to the owner, so keys, configuration,
+  stores, resolver, scope matching, abuse state and clocks are shared, and only
+  `aud` differs. It runs the existing preparation and second authoritative read,
+  keeps the same expiry caps, and creates no refresh row or idle extension. At
+  both reads it also requires a current, enabled parent in the owner's `UserStore`.
+- The audience is selected only by consuming the service at startup, and
+  `issue_purpose_token` refuses it on that owner. Requests are bound to the path
+  and audience that prepared them. RS256 owners with an active-session resolver are
+  required; a retired owner makes its facade fail closed with
+  `AuthServiceUnavailable`.
+- Existing APIs, tokens and configuration behave as before for hosts that do not
+  use the facade. No persistence or wire migration is required.
+
 ## 0.24.0
 
 - Breaking build-feature change: stop enabling async-graphql default features
