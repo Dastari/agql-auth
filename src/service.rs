@@ -46,6 +46,10 @@ use crate::models::{
 use crate::principal_reference::{
     PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSessionResolver,
 };
+use crate::refresh_reuse_grace::{
+    MAX_REFRESH_REUSE_GRACE, RefreshReuseGraceEvent, RefreshReuseGraceObserver, can_replace_newest,
+    superseded_within,
+};
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{
@@ -67,6 +71,7 @@ const PASSWORD_RESET_TOKEN_TYPE: &str = "password_reset";
 const PASSWORD_RESET_TOKEN_PURPOSE: &str = "password_reset";
 const PURPOSE_TOKEN_TYPE: &str = "purpose_token";
 const MAX_RATE_LIMIT_CAS_RETRIES: usize = 256;
+const MAX_REFRESH_REUSE_GRACE_RETRIES: usize = 32;
 const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWdxbC1hdXRoLWR1bW15LXNsdA$8ClNuSX6M3l/dalOcz8a117s1wLv/AbzbJiKA7dS4Ak";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +130,9 @@ pub struct AuthService<U, R> {
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
     refresh_grant_authority: Option<Arc<dyn crate::RefreshGrantAuthority>>,
+    refresh_rotation_clock: Arc<dyn Clock>,
+    refresh_reuse_grace: Option<Duration>,
+    refresh_reuse_grace_observer: Option<Arc<dyn RefreshReuseGraceObserver>>,
     fixed_delegation_audience: Option<String>,
     #[cfg(test)]
     pub(super) password_work: Arc<std::sync::Mutex<Vec<String>>>,
@@ -202,6 +210,9 @@ where
             active_user_session_resolver: None,
             additional_token_roles_provider: None,
             refresh_grant_authority: None,
+            refresh_rotation_clock: Arc::new(SystemClock),
+            refresh_reuse_grace: None,
+            refresh_reuse_grace_observer: None,
             fixed_delegation_audience: None,
             config,
             user_store,
@@ -234,6 +245,62 @@ where
         authority: Arc<dyn crate::RefreshGrantAuthority>,
     ) -> Self {
         self.refresh_grant_authority = Some(authority);
+        self
+    }
+
+    /// Accepts reuse of a just-rotated refresh token for `window`. Off by default.
+    ///
+    /// Without this, any reuse of a superseded token counts as theft and revokes
+    /// its session family, including when the server committed a rotation but
+    /// the client never received the response. With it, a token superseded by
+    /// rotation less than `window` ago receives a new token, and the family's
+    /// newest token is rotated out in the same store transaction, so the family
+    /// keeps exactly one live token. Grants and assurance are never wider than
+    /// ordinary rotation would give.
+    ///
+    /// The store must override
+    /// [`RefreshTokenStore::find_live_refresh_tokens_in_family`]; otherwise
+    /// reuse stays replay. Refresh and step-up on this service both follow this
+    /// setting, so use a separate service for credentials that should stay
+    /// strict. See `docs/refresh-reuse-grace.md` for the theft cost.
+    ///
+    /// Returns [`AuthError::InvalidConfiguration`] unless `window` is positive,
+    /// at most [`MAX_REFRESH_REUSE_GRACE`] and shorter than the refresh-token
+    /// lifetime.
+    pub fn with_refresh_reuse_grace(mut self, window: Duration) -> AuthResult<Self> {
+        if window <= Duration::ZERO
+            || window > MAX_REFRESH_REUSE_GRACE
+            || window >= self.config.refresh_token_ttl
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "refresh reuse grace must be positive, at most 30 seconds and shorter than the refresh-token ttl"
+                    .to_string(),
+            ));
+        }
+        self.refresh_reuse_grace = Some(window);
+        Ok(self)
+    }
+
+    /// Installs the observer for accepted grace reuses.
+    ///
+    /// It is called only for a reuse accepted under
+    /// [`Self::with_refresh_reuse_grace`], never for ordinary rotation.
+    pub fn with_refresh_reuse_grace_observer(
+        mut self,
+        observer: Arc<dyn RefreshReuseGraceObserver>,
+    ) -> Self {
+        self.refresh_reuse_grace_observer = Some(observer);
+        self
+    }
+
+    /// Sets the trusted clock for refresh and step-up rotation.
+    ///
+    /// It stamps rotations and decides refresh-token expiry and the reuse grace,
+    /// and it sets the times in the tokens those calls issue. It does not change
+    /// login, logout or validation, which keep the system clock. Defaults to the
+    /// system clock.
+    pub fn with_refresh_rotation_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.refresh_rotation_clock = clock;
         self
     }
 
@@ -506,7 +573,7 @@ where
         metadata: ClientMetadata,
         assurance_override: Option<SessionAssurance>,
     ) -> AuthResult<AuthPayload> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.refresh_rotation_clock.now();
         let token_hash = hash_refresh_token(refresh_token);
         let existing = self
             .refresh_store
@@ -515,6 +582,12 @@ where
             .ok_or(AuthError::InvalidRefreshToken)?;
 
         if existing.is_revoked() {
+            if let Some(payload) = self
+                .reissue_within_reuse_grace(&existing, &metadata, &assurance_override)
+                .await?
+            {
+                return Ok(payload);
+            }
             self.refresh_store
                 .revoke_refresh_token_family(
                     existing.session_family_id,
@@ -537,84 +610,13 @@ where
             return Err(AuthError::RefreshTokenExpired);
         }
 
-        let user = self
-            .user_store
-            .find_user_by_id(&existing.user_id)
-            .await?
-            .ok_or(AuthError::InvalidRefreshToken)?;
-
-        if user.disabled {
-            return Err(AuthError::UserDisabled);
-        }
-
-        let current_grant = match existing.grant_source {
-            crate::RefreshGrantSource::StoredUser => crate::CurrentRefreshGrant {
-                roles: user.roles.clone(),
-                scopes: user.scopes.clone(),
-            },
-            crate::RefreshGrantSource::Host => {
-                self.refresh_grant_authority
-                    .as_ref()
-                    .ok_or(AuthError::Forbidden)?
-                    .current_grant(&existing, &user)
-                    .await?
-            }
-            crate::RefreshGrantSource::Legacy => return Err(AuthError::Forbidden),
-        };
-        let roles = existing
-            .roles
-            .iter()
-            .filter(|role| current_grant.roles.contains(role))
-            .cloned()
-            .collect();
-        let scopes = existing
-            .scopes
-            .iter()
-            .filter(|scope| current_grant.scopes.contains(scope))
-            .cloned()
-            .collect();
-
-        let mut session = existing.session.clone();
-        if let Some(assurance) = assurance_override {
-            session = session.with_assurance(assurance);
-        }
-        let refreshable_metadata = existing.refreshable_metadata.clone().unwrap_or_default();
-        let auth_time = session.assurance.as_ref().map(SessionAssurance::auth_time);
-        let amr = session
-            .assurance
-            .as_ref()
-            .map(|value| value.methods.clone());
-        let acr = session
-            .assurance
-            .as_ref()
-            .and_then(|value| value.acr.clone());
-        let auth_user = AuthUser {
-            user_id: user.id,
-            session_id: existing.session_id,
-            roles: dedupe_stable(roles),
-            scopes: dedupe_stable(scopes),
-            session,
-            token_claims: AccessTokenMetadata {
-                session_family_id: Some(existing.session_family_id.to_string()),
-                tenant_id: refreshable_metadata.tenant_id,
-                organization_id: refreshable_metadata.organization_id,
-                actor: refreshable_metadata.actor,
-                auth_time,
-                amr,
-                acr,
-                correlation_id: refreshable_metadata.correlation_id,
-                ..AccessTokenMetadata::default()
-            },
-        };
-
         let (new_raw_refresh_token, new_record, access_token, access_token_expires_at, user) = self
-            .issue_tokens_only(
-                auth_user,
-                existing.session_family_id,
+            .prepare_rotation(
+                &existing,
+                None,
                 metadata.clone(),
+                assurance_override.clone(),
                 now,
-                existing.grant_source,
-                Some(&existing.authorization_roles),
             )
             .await?;
 
@@ -624,12 +626,26 @@ where
                 existing.id,
                 new_record.clone(),
                 now,
-                metadata.ip_address,
-                metadata.user_agent,
+                metadata.ip_address.clone(),
+                metadata.user_agent.clone(),
             )
             .await?;
 
         if !rotated {
+            if self.refresh_reuse_grace.is_some() {
+                // The record read above is stale: re-read why this call lost.
+                let current = self
+                    .refresh_store
+                    .find_refresh_token_by_hash(&token_hash)
+                    .await?;
+                if let Some(current) = current
+                    && let Some(payload) = self
+                        .reissue_within_reuse_grace(&current, &metadata, &assurance_override)
+                        .await?
+                {
+                    return Ok(payload);
+                }
+            }
             self.refresh_store
                 .revoke_refresh_token_family(
                     existing.session_family_id,
@@ -647,6 +663,207 @@ where
             refresh_token: new_raw_refresh_token,
             refresh_token_expires_at: new_record.expires_at,
         })
+    }
+
+    /// Issues the next token for `presented` if the reuse grace covers it.
+    ///
+    /// `Ok(None)` means the reuse is replay. The family's newest token is read
+    /// and then replaced through [`RefreshTokenStore::rotate_refresh_token`],
+    /// which is a compare-and-swap on that token. If another call replaced it
+    /// first, this reads the new one and rebuilds the replacement, so each commit
+    /// moves the one live token and no caller can branch the family. A reuse only
+    /// ever writes the newest token: the presented token's `revoked_at`, and so
+    /// its window, cannot move.
+    async fn reissue_within_reuse_grace(
+        &self,
+        presented: &StoredRefreshToken,
+        metadata: &ClientMetadata,
+        assurance_override: &Option<SessionAssurance>,
+    ) -> AuthResult<Option<AuthPayload>> {
+        let Some(window) = self.refresh_reuse_grace else {
+            return Ok(None);
+        };
+
+        for _ in 0..MAX_REFRESH_REUSE_GRACE_RETRIES {
+            let now = self.refresh_rotation_clock.now();
+            if !superseded_within(presented, now, window) {
+                return Ok(None);
+            }
+            // None: the store has no support. Empty: the family has been revoked.
+            // More than one: the store has broken its contract.
+            let Some(live) = self
+                .refresh_store
+                .find_live_refresh_tokens_in_family(presented.session_family_id)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let [newest] = live.as_slice() else {
+                return Ok(None);
+            };
+            if !can_replace_newest(presented, newest, now) {
+                return Ok(None);
+            }
+
+            let (new_raw_refresh_token, new_record, access_token, access_token_expires_at, user) =
+                self.prepare_rotation(
+                    presented,
+                    Some(newest),
+                    metadata.clone(),
+                    assurance_override.clone(),
+                    now,
+                )
+                .await?;
+
+            let replaced = self
+                .refresh_store
+                .rotate_refresh_token(
+                    newest.id,
+                    new_record.clone(),
+                    now,
+                    metadata.ip_address.clone(),
+                    metadata.user_agent.clone(),
+                )
+                .await?;
+            if !replaced {
+                continue;
+            }
+
+            if let (Some(observer), Some(presented_revoked_at)) =
+                (&self.refresh_reuse_grace_observer, presented.revoked_at)
+            {
+                observer
+                    .refresh_reuse_granted(&RefreshReuseGraceEvent {
+                        session_family_id: presented.session_family_id,
+                        session_id: presented.session_id,
+                        user_id: presented.user_id.clone(),
+                        presented_token_id: presented.id,
+                        presented_revoked_at,
+                        superseded_token_id: newest.id,
+                        replacement_token_id: new_record.id,
+                        occurred_at: now,
+                        ip_address: metadata.ip_address.clone(),
+                        user_agent: metadata.user_agent.clone(),
+                    })
+                    .await;
+            }
+
+            return Ok(Some(AuthPayload {
+                user,
+                access_token,
+                access_token_expires_at,
+                refresh_token: new_raw_refresh_token,
+                refresh_token_expires_at: new_record.expires_at,
+            }));
+        }
+
+        // Contention, not evidence of theft: leave the family alone. The caller
+        // can retry while the window lasts.
+        Err(AuthError::Store(
+            "refresh reuse grace retry limit exceeded".to_string(),
+        ))
+    }
+
+    /// Builds the replacement for `source` under current authority.
+    ///
+    /// On a grace reuse `newest` is the family's live token. Session, assurance
+    /// and metadata still come from `source`, and every grant must also be in
+    /// `newest`, so a reuse never exceeds what either token would rotate to.
+    async fn prepare_rotation(
+        &self,
+        source: &StoredRefreshToken,
+        newest: Option<&StoredRefreshToken>,
+        metadata: ClientMetadata,
+        assurance_override: Option<SessionAssurance>,
+        now: OffsetDateTime,
+    ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
+        let user = self
+            .user_store
+            .find_user_by_id(&source.user_id)
+            .await?
+            .ok_or(AuthError::InvalidRefreshToken)?;
+
+        if user.disabled {
+            return Err(AuthError::UserDisabled);
+        }
+
+        let current_grant = match source.grant_source {
+            crate::RefreshGrantSource::StoredUser => crate::CurrentRefreshGrant {
+                roles: user.roles.clone(),
+                scopes: user.scopes.clone(),
+            },
+            crate::RefreshGrantSource::Host => {
+                self.refresh_grant_authority
+                    .as_ref()
+                    .ok_or(AuthError::Forbidden)?
+                    .current_grant(newest.unwrap_or(source), &user)
+                    .await?
+            }
+            crate::RefreshGrantSource::Legacy => return Err(AuthError::Forbidden),
+        };
+        let roles = source
+            .roles
+            .iter()
+            .filter(|role| current_grant.roles.contains(role))
+            .filter(|role| newest.is_none_or(|newest| newest.roles.contains(role)))
+            .cloned()
+            .collect();
+        let scopes = source
+            .scopes
+            .iter()
+            .filter(|scope| current_grant.scopes.contains(scope))
+            .filter(|scope| newest.is_none_or(|newest| newest.scopes.contains(scope)))
+            .cloned()
+            .collect();
+        let authorization_role_ceiling: Vec<String> = source
+            .authorization_roles
+            .iter()
+            .filter(|role| newest.is_none_or(|newest| newest.authorization_roles.contains(role)))
+            .cloned()
+            .collect();
+
+        let mut session = source.session.clone();
+        if let Some(assurance) = assurance_override {
+            session = session.with_assurance(assurance);
+        }
+        let refreshable_metadata = source.refreshable_metadata.clone().unwrap_or_default();
+        let auth_time = session.assurance.as_ref().map(SessionAssurance::auth_time);
+        let amr = session
+            .assurance
+            .as_ref()
+            .map(|value| value.methods.clone());
+        let acr = session
+            .assurance
+            .as_ref()
+            .and_then(|value| value.acr.clone());
+        let auth_user = AuthUser {
+            user_id: user.id,
+            session_id: source.session_id,
+            roles: dedupe_stable(roles),
+            scopes: dedupe_stable(scopes),
+            session,
+            token_claims: AccessTokenMetadata {
+                session_family_id: Some(source.session_family_id.to_string()),
+                tenant_id: refreshable_metadata.tenant_id,
+                organization_id: refreshable_metadata.organization_id,
+                actor: refreshable_metadata.actor,
+                auth_time,
+                amr,
+                acr,
+                correlation_id: refreshable_metadata.correlation_id,
+                ..AccessTokenMetadata::default()
+            },
+        };
+
+        self.issue_tokens_only(
+            auth_user,
+            source.session_family_id,
+            metadata,
+            now,
+            source.grant_source,
+            Some(&authorization_role_ceiling),
+        )
+        .await
     }
 
     /// Revokes a refresh token or its full session family.
@@ -669,6 +886,10 @@ where
                     RefreshTokenRevocationReason::Logout,
                 )
                 .await
+        } else if self.refresh_reuse_grace.is_some() && existing.is_revoked() {
+            // A second revocation could move `revoked_at` in some stores, which
+            // would let the holder of a superseded token renew its window.
+            Ok(())
         } else {
             self.refresh_store
                 .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)

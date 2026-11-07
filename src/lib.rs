@@ -31,7 +31,9 @@
 //! application roles, scopes, optional typed authorization roles, and
 //! [`SessionContext`]. Refresh tokens are opaque, hashed
 //! before storage, and rotated on refresh. A replayed refresh token revokes the
-//! token family through the host's [`RefreshTokenStore`].
+//! token family through the host's [`RefreshTokenStore`]. Hosts can opt in to a
+//! short grace window for a response lost after commit with
+//! [`AuthService::with_refresh_reuse_grace`].
 //! [`SessionAssurance`] carries host-accepted authentication time, AMR, ACR,
 //! and MFA acceptance unchanged through refresh rotation. Resource servers can
 //! enforce freshness with [`RecentMfaPolicy`] and an injected [`Clock`].
@@ -126,6 +128,7 @@ pub mod prelude;
 mod principal_reference;
 mod purpose_grant;
 mod refresh_authority;
+mod refresh_reuse_grace;
 mod role_scope;
 mod scope_match;
 mod scopes;
@@ -262,6 +265,9 @@ pub type AuthResult<T> = Result<T, AuthError>;
 
 pub use crate::refresh_authority::{
     CurrentRefreshGrant, RefreshGrantAuthority, RefreshGrantSource,
+};
+pub use crate::refresh_reuse_grace::{
+    MAX_REFRESH_REUSE_GRACE, RefreshReuseGraceEvent, RefreshReuseGraceObserver,
 };
 
 pub use memory_rate_limit::DEFAULT_MEMORY_AUTH_RATE_LIMIT_CAPACITY;

@@ -100,6 +100,42 @@ pub trait RefreshTokenStore: Send + Sync {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AuthResult<bool>;
+
+    /// Optional support for [`AuthService::with_refresh_reuse_grace`](crate::AuthService::with_refresh_reuse_grace):
+    /// reads every unrevoked token in a session family.
+    ///
+    /// The default returns `Ok(None)`, meaning not supported, and reuse stays
+    /// replay. An override must:
+    ///
+    /// - Return `Ok(Some(tokens))`, with an empty list for a family with no
+    ///   unrevoked token. Include unrevoked tokens past their expiry.
+    /// - Read committed state in one consistent snapshot, so a concurrent
+    ///   [`Self::rotate_refresh_token`] appears either wholly applied or not at
+    ///   all. One plain `SELECT` does this at `READ COMMITTED`. Do not lock the
+    ///   rows it returns.
+    ///
+    /// Overriding it also commits the store to these rules, which keep a family
+    /// to one live token:
+    ///
+    /// - [`Self::rotate_refresh_token`] must keep its documented compare-and-swap
+    ///   behavior: when the token is already revoked, return `Ok(false)` and change
+    ///   nothing. Two calls replacing the same token must not both succeed.
+    /// - `replaced_by_token_id` is set only by rotation.
+    /// - Nothing moves `revoked_at` on an already revoked token while its family
+    ///   has an unrevoked token. A window is measured from that value, so moving
+    ///   it would extend the window.
+    /// - [`Self::revoke_refresh_token_family`] must not miss a replacement
+    ///   committed while it runs, or that token stays live after sign-out. A
+    ///   single `UPDATE` at PostgreSQL `READ COMMITTED` can miss one. Serialize
+    ///   this method and [`Self::rotate_refresh_token`] per family, for example
+    ///   with a transaction-scoped advisory lock taken in its own statement. See
+    ///   `docs/refresh-reuse-grace.md`.
+    async fn find_live_refresh_tokens_in_family(
+        &self,
+        _session_family_id: Uuid,
+    ) -> AuthResult<Option<Vec<StoredRefreshToken>>> {
+        Ok(None)
+    }
 }
 
 #[async_trait]

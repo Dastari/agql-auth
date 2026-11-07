@@ -364,6 +364,7 @@ client secrets (Sign in with Apple) are covered in
 
 - [Getting started](docs/getting-started.md)
 - [Storage traits](docs/storage-traits.md)
+- [Refresh reuse grace](docs/refresh-reuse-grace.md)
 - [Authorization, scopes, and guards](docs/authorization.md)
 - [Access-token scope claims](docs/access-token-scope-claims.md)
 - [Resource servers](docs/resource-servers.md)

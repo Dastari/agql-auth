@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.26.0
+
+- Add an opt-in grace window for reuse of a just-rotated refresh token, off by
+  default: `AuthService::with_refresh_reuse_grace` and `MAX_REFRESH_REUSE_GRACE`
+  (30 seconds). Inside the window, a token superseded by rotation gets a new token
+  and the family's newest token is rotated out in the same store transaction, so
+  the family keeps one live token. Losing the rotation race follows the same rule.
+  Outside the window, reuse is replay as before.
+- Add the optional `RefreshTokenStore::find_live_refresh_tokens_in_family`. Its
+  default reports no support, which behaves as if the window is off. Stores need no
+  new column and no new write operation; overriding it adds requirements listed in
+  `docs/refresh-reuse-grace.md`.
+- Add `RefreshReuseGraceObserver`, `RefreshReuseGraceEvent` and
+  `AuthService::with_refresh_reuse_grace_observer`, so hosts can tell a grace reuse
+  from a rotation. Events carry IDs and never a token or hash.
+- Add `AuthService::with_refresh_rotation_clock`, which defaults to the system clock.
+- A grace reuse never exceeds rotation: disabled users, current authority, legacy
+  grants and assurance apply as usual, and it cannot regain a grant the newest token
+  has lost. The theft cost and its bound are in `docs/refresh-reuse-grace.md`.
+- No breaking change. Existing APIs, errors, store calls, tokens and configuration
+  behave as before for hosts that do not opt in. No persistence or wire migration
+  is required.
+
 ## 0.25.0
 
 - Add `FixedAudienceDelegation` and

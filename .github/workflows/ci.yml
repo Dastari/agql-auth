@@ -41,7 +41,9 @@ jobs:
       - name: Run the same contract against SQLite and PostgreSQL
         env:
           AGQL_AUTH_TEST_POSTGRES_URL: postgresql://agql_test:agql_test@127.0.0.1:5432/agql_conformance
-        run: cargo test --locked password_login_consumer_conformance -- --ignored
+        run: |
+          cargo test --locked password_login_consumer_conformance -- --ignored
+          cargo test --locked refresh_reuse_grace_consumer_conformance -- --ignored
 
   validate:
     runs-on: ubuntu-latest
