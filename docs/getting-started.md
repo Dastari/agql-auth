@@ -100,7 +100,9 @@ let next_payload = auth.refresh(refresh_token, metadata).await?;
 ```
 
 If a revoked refresh token is reused, `agql-auth` treats that as replay and asks
-the store to revoke the token family.
+the store to revoke the token family. Hosts whose clients can lose a response after
+commit, such as browsers, can opt in to a short
+[refresh reuse grace](refresh-reuse-grace.md).
 
 Logout revokes either one refresh token or the whole family:
 

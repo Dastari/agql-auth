@@ -1,5 +1,16 @@
 # Migration Guide
 
+## 0.25.0 to 0.26.0: optional refresh reuse grace
+
+No action is required. The new API is additive, with no data, SDL or wire migration,
+and hosts that do not opt in see no behavior change. `RefreshTokenStore` gains one
+method with a default, so existing implementations compile unchanged and stay strict.
+
+To adopt it, override `RefreshTokenStore::find_live_refresh_tokens_in_family`, meet the
+store rules in [Refresh reuse grace](docs/refresh-reuse-grace.md#what-the-store-must-do),
+and call `with_refresh_reuse_grace` on the service. A wrapper store must forward the new
+method, otherwise the window stays off. The window cost is described in the same guide.
+
 ## 0.24.0 to 0.25.0: restricted fixed-audience delegation
 
 No action is required. The new `FixedAudienceDelegation` API is additive, with no

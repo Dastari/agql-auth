@@ -7,6 +7,7 @@ mod challenges;
 mod channel;
 mod claims_and_status;
 mod combined;
+mod consumer_refresh_store;
 mod consumer_store;
 mod current_authority;
 mod grant;
@@ -20,6 +21,7 @@ mod principal_reference;
 mod provider_http;
 mod rate_limits;
 mod recovery;
+mod refresh_reuse_grace;
 mod scope_match;
 mod scopes;
 mod time_invariants;
@@ -133,7 +135,9 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
         replaced_by_token_id: Option<Uuid>,
         _reason: RefreshTokenRevocationReason,
     ) -> crate::AuthResult<()> {
-        if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id) {
+        if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id)
+            && token.revoked_at.is_none()
+        {
             token.revoked_at = Some(revoked_at);
             token.replaced_by_token_id = replaced_by_token_id;
         }
@@ -201,6 +205,23 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
         token_hash_to_id.insert(replacement.token_hash.clone(), replacement.id);
         tokens.insert(replacement.id, replacement);
         Ok(true)
+    }
+
+    async fn find_live_refresh_tokens_in_family(
+        &self,
+        session_family_id: Uuid,
+    ) -> crate::AuthResult<Option<Vec<StoredRefreshToken>>> {
+        Ok(Some(
+            self.tokens_by_id
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|token| {
+                    token.session_family_id == session_family_id && token.revoked_at.is_none()
+                })
+                .cloned()
+                .collect(),
+        ))
     }
 }
 

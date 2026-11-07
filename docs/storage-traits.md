@@ -77,6 +77,10 @@ COMMIT;
 Use a unique index on the refresh-token hash and indexes on session-family IDs
 to make revocation efficient.
 
+`find_live_refresh_tokens_in_family` is optional. Its default reports no support.
+It is only needed for the opt-in [refresh reuse grace](refresh-reuse-grace.md), and
+overriding it adds requirements listed there.
+
 ## Abuse Protection
 
 `AuthRateLimitStore` persists counters for rate limiting, exponential backoff,

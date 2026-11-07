@@ -50,7 +50,12 @@ lanes and the protected release gate when maintaining workflows, following
    There are currently no Cargo features; adding one requires extending the
    explicit validation matrix. Never substitute `--all-features`.
 5. Run `cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)"
-   --default-features` with pinned cargo-semver-checks 0.46.0.
+   --default-features --release-type minor` with pinned cargo-semver-checks 0.46.0.
+   Without `--release-type minor`, a pre-1.0 minor bump counts as major and every
+   breaking-change lint is skipped. A release that declares breaking changes in the
+   changelog and migration guide fails this lane by design, so record the reported
+   breaks in those documents before dispatching. The lane checks the Rust API only,
+   not behavior or wire formats.
    Report actual executed/skipped SemVer check counts; a permitted minor bump
    does not prove source compatibility. Also run the independent minimal and
    additive consumers and resolved-graph assertions in
