@@ -2,8 +2,10 @@
 //! transactions, without additional Cargo dependencies.
 use std::{
     io::Write,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Duration as StdDuration,
 };
 
 use async_trait::async_trait;
@@ -12,8 +14,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::refresh_reuse_grace::{
-    double_refresh_contract, racing_different_tokens_contract, racing_reuses_contract,
-    reuse_races_family_revocation_contract, sequential_contract,
+    SEED_TOKEN, double_refresh_contract, logout_racing_rotation_contract,
+    racing_different_tokens_contract, racing_reuses_contract, seed_record, sequential_contract,
 };
 use crate::prelude::*;
 
@@ -21,6 +23,8 @@ struct ConsumerRefreshStore {
     backend: &'static str,
     database: String,
     table: String,
+    /// Holds the next rotation open before COMMIT until `release` appears here.
+    pause_next_rotation: Mutex<Option<PathBuf>>,
 }
 
 impl ConsumerRefreshStore {
@@ -29,6 +33,7 @@ impl ConsumerRefreshStore {
             backend,
             database,
             table: format!("agql_refresh_conformance_{}", Uuid::new_v4().simple()),
+            pause_next_rotation: Mutex::default(),
         });
         store.call(json!({"op": "init"})).await.unwrap();
         store
@@ -161,6 +166,7 @@ impl RefreshTokenStore for ConsumerRefreshStore {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> crate::AuthResult<bool> {
+        let pause = self.pause_next_rotation.lock().unwrap().take();
         Ok(self
             .call(json!({
                 "op": "rotate",
@@ -169,6 +175,7 @@ impl RefreshTokenStore for ConsumerRefreshStore {
                 "rotated_at": rotated_at,
                 "ip_address": ip_address,
                 "user_agent": user_agent,
+                "pause_dir": pause,
             }))
             .await?
             == json!(true))
@@ -186,11 +193,104 @@ impl RefreshTokenStore for ConsumerRefreshStore {
     }
 }
 
+/// The dev-dependency has no tokio timer, so sleep on the blocking pool.
+async fn sleep_ms(ms: u64) {
+    tokio::task::spawn_blocking(move || std::thread::sleep(StdDuration::from_millis(ms)))
+        .await
+        .unwrap();
+}
+
+async fn wait_for(what: &str, mut ready: impl AsyncFnMut() -> bool) {
+    for _ in 0..1500 {
+        if ready().await {
+            return;
+        }
+        sleep_ms(20).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// Family revocation that starts while a rotation is uncommitted.
+///
+/// The rotation is held after its writes and before COMMIT, the revocation is
+/// started and shown to be blocked, then the rotation is released. Nothing else
+/// runs, so a replacement the revocation missed is still live when both finish.
+async fn family_revocation_during_rotation_contract(store: Arc<ConsumerRefreshStore>) {
+    let now = OffsetDateTime::now_utc();
+    let family = Uuid::new_v4();
+    let current = seed_record(SEED_TOKEN, family, Uuid::new_v4(), now);
+    store.insert_refresh_token(current.clone()).await.unwrap();
+    let replacement = seed_record("replacement", family, current.session_id, now);
+
+    let pause = std::env::temp_dir().join(format!("agql-refresh-pause-{}", Uuid::new_v4()));
+    std::fs::create_dir(&pause).unwrap();
+    *store.pause_next_rotation.lock().unwrap() = Some(pause.clone());
+
+    let rotation = tokio::spawn({
+        let store = store.clone();
+        let id = current.id;
+        async move {
+            store
+                .rotate_refresh_token(id, replacement, now, None, None)
+                .await
+        }
+    });
+    let paused = pause.join("paused");
+    wait_for("the rotation to hold", async || Path::new(&paused).exists()).await;
+
+    let revocation = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .revoke_refresh_token_family(family, now, RefreshTokenRevocationReason::Logout)
+                .await
+        }
+    });
+    let blocked = store
+        .call(json!({"op": "blocked_lock_requests"}))
+        .await
+        .unwrap();
+    if blocked.is_null() {
+        // SQLite has no lock view. Its writer lock serializes the revocation
+        // whenever it starts, so the order does not change the outcome.
+        sleep_ms(300).await;
+    } else {
+        wait_for("the revocation to block", async || {
+            store
+                .call(json!({"op": "blocked_lock_requests"}))
+                .await
+                .unwrap()
+                != json!(0)
+        })
+        .await;
+    }
+    assert!(
+        !revocation.is_finished(),
+        "the revocation must wait for the rotation"
+    );
+
+    std::fs::write(pause.join("release"), b"").unwrap();
+    assert!(rotation.await.unwrap().unwrap());
+    revocation.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&pause);
+
+    let live = store
+        .find_live_refresh_tokens_in_family(family)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        live.is_empty(),
+        "a replacement committed during sign-out must not survive it: {} live",
+        live.len()
+    );
+}
+
 /// Races are repeated because one interleaving proves little.
 const RACE_ROUNDS: usize = 8;
 
 async fn contract(backend: &'static str, database: &str) {
-    for contract in 0..5 {
+    for contract in 0..6 {
         let rounds = if contract == 0 { 1 } else { RACE_ROUNDS };
         for _ in 0..rounds {
             let database = if backend == "sqlite" {
@@ -211,7 +311,8 @@ async fn contract(backend: &'static str, database: &str) {
                 1 => double_refresh_contract(store.clone()).await,
                 2 => racing_reuses_contract(store.clone()).await,
                 3 => racing_different_tokens_contract(store.clone()).await,
-                _ => reuse_races_family_revocation_contract(store.clone()).await,
+                4 => logout_racing_rotation_contract(store.clone()).await,
+                _ => family_revocation_during_rotation_contract(store.clone()).await,
             }
             store.cleanup().await;
         }

@@ -11,6 +11,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from urllib.parse import unquote, urlsplit
 
 request = json.load(sys.stdin)
@@ -124,7 +125,8 @@ elif op == "find_live":
 elif op == "revoke":
     sql = (f"UPDATE {table} SET revoked_at = {literal(stamp(request['revoked_at']))}, "
            f"replaced_by = {literal(request.get('replaced_by'))}, reason = {literal(request['reason'])} "
-           f"WHERE id = {literal(request['id'])}")
+           # A revoked record is left alone, so a stale caller cannot overwrite a rotation.
+           f"WHERE id = {literal(request['id'])} AND revoked_at IS NULL")
     if backend == "sqlite":
         with sqlite_connection() as connection:
             connection.execute(sql)
@@ -162,24 +164,41 @@ elif op == "rotate":
               f"ip_address = {literal(request.get('ip_address'))}, "
               f"user_agent = {literal(request.get('user_agent'))} "
               f"WHERE id = {literal(request['current'])} AND revoked_at IS NULL")
+    pause = request.get("pause_dir")
+    if pause and not re.fullmatch(r"[A-Za-z0-9_./-]+", pause):
+        raise ValueError("invalid pause directory")
     if backend == "sqlite":
         with sqlite_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             result = connection.execute(update).rowcount == 1
             if result:
                 connection.execute(f"INSERT INTO {table} VALUES ({insert_values(token)})")
+            if pause:
+                open(os.path.join(pause, "paused"), "w").close()
+                while not os.path.exists(os.path.join(pause, "release")):
+                    time.sleep(0.02)
             connection.execute("COMMIT")
     else:
         # One statement: the revoke and the insert commit together or not at
         # all. A concurrent caller blocks on the row, re-evaluates revoked_at
         # after the first commit and then matches no row, so it inserts nothing.
+        # A test can hold the transaction open before COMMIT, after the writes.
+        hold = (f"\n\\! touch {pause}/paused\n"
+                f"\\! while [ ! -e {pause}/release ]; do sleep 0.02; done\n") if pause else " "
         rows = psql(
             f"BEGIN; {family_lock(token['session_family_id'])} "
             f"WITH updated AS ({update} RETURNING id) "
             f"INSERT INTO {table} SELECT v.* FROM (VALUES ({insert_values(token)})) AS v, updated "
-            f"RETURNING 1; SELECT pg_sleep(0.2); COMMIT;"
+            f"RETURNING 1;{hold}COMMIT;"
         )
         result = len([line for line in rows if line.strip() == "1"]) == 1
+elif op == "blocked_lock_requests":
+    # Lock requests waiting in this database; None where the backend has no view.
+    if backend == "sqlite":
+        result = None
+    else:
+        result = int(psql("SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                          "WHERE NOT l.granted AND a.datname = current_database();")[0])
 else:
     raise ValueError("unsupported fixture operation")
 

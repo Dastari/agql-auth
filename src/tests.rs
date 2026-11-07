@@ -135,7 +135,9 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
         replaced_by_token_id: Option<Uuid>,
         _reason: RefreshTokenRevocationReason,
     ) -> crate::AuthResult<()> {
-        if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id) {
+        if let Some(token) = self.tokens_by_id.lock().unwrap().get_mut(&token_id)
+            && token.revoked_at.is_none()
+        {
             token.revoked_at = Some(revoked_at);
             token.replaced_by_token_id = replaced_by_token_id;
         }

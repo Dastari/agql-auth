@@ -54,6 +54,13 @@ pub trait RefreshTokenStore: Send + Sync {
     ) -> AuthResult<Option<StoredRefreshToken>>;
 
     /// Revokes a single refresh token.
+    ///
+    /// A store that overrides [`Self::find_live_refresh_tokens_in_family`] must
+    /// leave an already revoked record unchanged, checked in the same atomic
+    /// statement, for example `UPDATE ... WHERE id = ? AND revoked_at IS NULL`.
+    /// Otherwise a sign-out that read the token before a concurrent rotation
+    /// overwrites that rotation's `revoked_at` and `replaced_by_token_id`, which
+    /// ends the token's reuse grace early.
     async fn revoke_refresh_token(
         &self,
         token_id: Uuid,
@@ -121,9 +128,10 @@ pub trait RefreshTokenStore: Send + Sync {
     ///   behavior: when the token is already revoked, return `Ok(false)` and change
     ///   nothing. Two calls replacing the same token must not both succeed.
     /// - `replaced_by_token_id` is set only by rotation.
-    /// - Nothing moves `revoked_at` on an already revoked token while its family
-    ///   has an unrevoked token. A window is measured from that value, so moving
-    ///   it would extend the window.
+    /// - Nothing changes `revoked_at` or `replaced_by_token_id` on an already
+    ///   revoked token while its family has an unrevoked token. A window is
+    ///   measured from them. [`Self::revoke_refresh_token`] must enforce this
+    ///   atomically, because a caller's earlier read can be stale.
     /// - [`Self::revoke_refresh_token_family`] must not miss a replacement
     ///   committed while it runs, or that token stays live after sign-out. A
     ///   single `UPDATE` at PostgreSQL `READ COMMITTED` can miss one. Serialize

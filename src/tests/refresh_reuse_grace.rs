@@ -15,13 +15,18 @@ use crate::util::hash_refresh_token;
 
 const WINDOW_SECONDS: i64 = 10;
 const USER_ID: &str = "user-1";
-const SEED_TOKEN: &str = "seed-token-a";
+pub(super) const SEED_TOKEN: &str = "seed-token-a";
 
 fn grant(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
-fn seed_record(raw: &str, family: Uuid, session: Uuid, now: OffsetDateTime) -> StoredRefreshToken {
+pub(super) fn seed_record(
+    raw: &str,
+    family: Uuid,
+    session: Uuid,
+    now: OffsetDateTime,
+) -> StoredRefreshToken {
     StoredRefreshToken {
         id: Uuid::new_v4(),
         user_id: USER_ID.to_string(),
@@ -580,33 +585,135 @@ pub(super) async fn racing_different_tokens_contract<S: RefreshTokenStore + 'sta
     race(&h, tokens).await;
 }
 
-pub(super) async fn reuse_races_family_revocation_contract<S: RefreshTokenStore + 'static>(
-    store: Arc<S>,
-) {
-    let h = Harness::new(store).await;
-    let second = h.rotated(SEED_TOKEN).await;
-    let mut tasks = Vec::new();
-    for _ in 0..4 {
-        let auth = h.auth.clone();
-        tasks.push(tokio::spawn(async move {
-            auth.refresh(SEED_TOKEN, metadata()).await.map(|_| ())
-        }));
-    }
-    let auth = h.auth.clone();
-    tasks.push(tokio::spawn(
-        async move { auth.logout(&second, true).await },
-    ));
-    for task in tasks {
-        match task.await.unwrap() {
-            Ok(()) | Err(AuthError::RefreshTokenReplayDetected) => {}
-            Err(error) => panic!("unexpected error: {error}"),
-        }
-    }
+/// Sign-out reads a token, then a rotation of it commits before sign-out revokes it.
+///
+/// The service's read cannot see the rotation, so only the store's atomic check
+/// keeps the rotation's `revoked_at` and replacement, and with them the grace.
+pub(super) async fn logout_racing_rotation_contract<S: RefreshTokenStore + 'static>(store: Arc<S>) {
+    let racing = Arc::new(RotateBeforeRevoke {
+        inner: store,
+        armed: Mutex::default(),
+    });
+    let h = Harness::new(racing.clone()).await;
+    let seed = h.record(SEED_TOKEN).await;
+    let competitor = StoredRefreshToken {
+        id: Uuid::new_v4(),
+        token_hash: hash_refresh_token(COMPETITOR_TOKEN),
+        ..seed.clone()
+    };
+    let rotated_at = h.clock.now() - Duration::seconds(1);
+    *racing.armed.lock().unwrap() = Some((competitor.clone(), rotated_at));
+
+    h.auth.logout(SEED_TOKEN, false).await.unwrap();
+
+    let after = h.record(SEED_TOKEN).await;
     assert_eq!(
-        h.live_count().await,
-        0,
-        "a replacement committed during sign-out must not survive it"
+        after.revoked_at,
+        Some(rotated_at),
+        "the rotation's time stays"
     );
+    assert_eq!(after.replaced_by_token_id, Some(competitor.id));
+    h.assert_only_live(COMPETITOR_TOKEN).await;
+
+    // The token keeps its grace: a reuse replaces the newest token, no replay.
+    let reused = h.rotated(SEED_TOKEN).await;
+    h.assert_only_live(&reused).await;
+}
+
+/// Commits one armed rotation of a token just before revoking it.
+struct RotateBeforeRevoke<S> {
+    inner: Arc<S>,
+    armed: Mutex<Option<(StoredRefreshToken, OffsetDateTime)>>,
+}
+
+#[async_trait]
+impl<S: RefreshTokenStore + 'static> RefreshTokenStore for RotateBeforeRevoke<S> {
+    async fn insert_refresh_token(&self, token: StoredRefreshToken) -> crate::AuthResult<()> {
+        self.inner.insert_refresh_token(token).await
+    }
+
+    async fn find_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> crate::AuthResult<Option<StoredRefreshToken>> {
+        self.inner.find_refresh_token_by_hash(token_hash).await
+    }
+
+    async fn revoke_refresh_token(
+        &self,
+        token_id: Uuid,
+        revoked_at: OffsetDateTime,
+        replaced_by_token_id: Option<Uuid>,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        let armed = self.armed.lock().unwrap().take();
+        if let Some((replacement, rotated_at)) = armed {
+            assert!(
+                self.inner
+                    .rotate_refresh_token(token_id, replacement, rotated_at, None, None)
+                    .await?
+            );
+        }
+        self.inner
+            .revoke_refresh_token(token_id, revoked_at, replaced_by_token_id, reason)
+            .await
+    }
+
+    async fn revoke_refresh_token_family(
+        &self,
+        session_family_id: Uuid,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .revoke_refresh_token_family(session_family_id, revoked_at, reason)
+            .await
+    }
+
+    async fn touch_refresh_token(
+        &self,
+        token_id: Uuid,
+        used_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> crate::AuthResult<()> {
+        self.inner
+            .touch_refresh_token(token_id, used_at, ip_address, user_agent)
+            .await
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        current_token_id: Uuid,
+        replacement: StoredRefreshToken,
+        rotated_at: OffsetDateTime,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> crate::AuthResult<bool> {
+        self.inner
+            .rotate_refresh_token(
+                current_token_id,
+                replacement,
+                rotated_at,
+                ip_address,
+                user_agent,
+            )
+            .await
+    }
+
+    async fn find_live_refresh_tokens_in_family(
+        &self,
+        session_family_id: Uuid,
+    ) -> crate::AuthResult<Option<Vec<StoredRefreshToken>>> {
+        self.inner
+            .find_live_refresh_tokens_in_family(session_family_id)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn logout_racing_a_rotation_keeps_the_rotation_and_its_grace() {
+    logout_racing_rotation_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -622,11 +729,6 @@ async fn racing_reuses_of_one_token_leave_one_live_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_reuses_of_different_tokens_leave_one_live_token() {
     racing_different_tokens_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn reuse_racing_a_family_revocation_leaves_no_live_token() {
-    reuse_races_family_revocation_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
 }
 
 // No widening.

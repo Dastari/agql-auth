@@ -121,9 +121,12 @@ Overriding it also commits the store to these rules:
    new write operation.
 2. **`replaced_by_token_id` is set only by rotation.** The record has no reason field,
    so this is how a rotation is recognized.
-3. **`revoked_at` does not move on a revoked token while its family is live.** A window
-   is measured from it, so moving it extends the window. Moving it during family
-   revocation is harmless, because no live token remains.
+3. **A revoked token's `revoked_at` and `replaced_by_token_id` do not change while its
+   family is live.** A window is measured from them. `revoke_refresh_token` must check
+   this in the same statement, `UPDATE ... WHERE id = ? AND revoked_at IS NULL`, because
+   its caller may have read the token before a concurrent rotation. Without the check,
+   a sign-out racing a rotation overwrites the rotation and ends that token's grace early.
+   Changing them during family revocation is harmless, because no live token remains.
 4. **Family revocation cannot miss a replacement.** At PostgreSQL `READ COMMITTED`, a
    single `UPDATE ... WHERE session_family_id = ? AND revoked_at IS NULL` can block on
    the newest row while a rotation commits. It then skips that row and never sees the
@@ -182,8 +185,13 @@ time, for as long as it lasts. If a real client never refreshes again, the thief
 the session until something else ends it. That is also true without this option, for a
 thief who rotates a stolen live token first.
 
-So the option gives up detection of a theft only for a reuse inside the window. Keep the
-window as short as the host's clients allow.
+So the option gives up detection of a theft only for a reuse inside the window.
+
+**Use a window of a few seconds, not the 30-second maximum.** The window only has to
+cover a response lost after commit and the client's next attempt, which on a working
+connection follow within a second or two. Every extra second is time in which a reuse of
+a stolen token goes unnoticed, and widens the overlap that alternating refreshes need to
+stay hidden. Raise it only for clients that measurably retry later.
 
 Each accepted reuse inserts a token record, as a rotation does. Reuses are limited only
 by the window, so hosts that bound a family's history should allow for that.

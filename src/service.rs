@@ -264,6 +264,10 @@ where
     /// setting, so use a separate service for credentials that should stay
     /// strict. See `docs/refresh-reuse-grace.md` for the theft cost.
     ///
+    /// Use a few seconds: the window only has to cover a lost response and the
+    /// client's next attempt, and each extra second is time in which a reuse of
+    /// a stolen token goes unnoticed.
+    ///
     /// Returns [`AuthError::InvalidConfiguration`] unless `window` is positive,
     /// at most [`MAX_REFRESH_REUSE_GRACE`] and shorter than the refresh-token
     /// lifetime.

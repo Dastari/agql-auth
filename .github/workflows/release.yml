@@ -82,7 +82,9 @@ jobs:
       - name: Check compatibility with the last version tag
         run: |
           cargo install cargo-semver-checks --version 0.46.0 --locked
-          cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)" --default-features
+          # A pre-1.0 minor bump counts as major, which skips every breaking-change
+          # lint. Check it as a minor so additive releases are really verified.
+          cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)" --default-features --release-type minor
 
   release:
     needs: [guard, validate, semver]
