@@ -7,8 +7,11 @@ using a helper as an application security boundary.
 
 ## Password Reset
 
-Password reset tokens are signed local JWTs with a `password_reset` purpose and
-a token ID. To make them one-time use, pair them with `PasswordResetTokenStore`.
+Password reset tokens are signed local JWTs with a `password_reset` type and
+purpose and a token ID. Every token is recorded in a `PasswordResetTokenStore`
+at issuance; the crate does not issue an unrecorded token, because one could
+only pass validation, which repeats until expiry. A token without the
+`password_reset` type is refused.
 
 ```rust
 use time::Duration;
@@ -24,6 +27,10 @@ let issued = auth
 send_reset_email(&issued.token).await?;
 ```
 
+Issuing a token invalidates the user's other outstanding reset tokens, so only
+the newest link works. `issue_password_reset_token(&reset_store, user_id)` does
+the same with a one-hour TTL.
+
 When the token is submitted:
 
 ```rust
@@ -35,6 +42,9 @@ let verified = auth
     )
     .await?;
 ```
+
+Consumption also invalidates the user's other outstanding reset tokens. If
+that store call fails, the token stays consumed and an error is returned.
 
 `authenticate_password_reset_token` only validates claims and does not consult
 or consume a stored token ID, check revocation, or count attempts. It cannot by

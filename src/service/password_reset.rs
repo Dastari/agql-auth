@@ -17,22 +17,26 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
-    /// Issues a signed password-reset token with the default one-hour TTL.
+    /// Issues a password-reset token with the default one-hour TTL and records
+    /// it in `store`.
     ///
-    /// This does not persist a one-time-use record, send delivery, check user
-    /// state or apply request admission. Complete reset flows should use
-    /// [`Self::should_process_password_reset_request`] and
-    /// [`Self::issue_password_reset_token_with_store`].
-    pub fn issue_password_reset_token(
+    /// Shares the contract of [`Self::issue_password_reset_token_with_store`].
+    pub async fn issue_password_reset_token<S>(
         &self,
+        store: &S,
         user_id: impl Into<String>,
-    ) -> AuthResult<PasswordResetToken> {
-        self.issue_password_reset_token_with_ttl(user_id, Duration::hours(1))
+    ) -> AuthResult<PasswordResetToken>
+    where
+        S: PasswordResetTokenStore,
+    {
+        self.issue_password_reset_token_with_store(store, user_id, Duration::hours(1))
+            .await
     }
 
-    /// Issues a signed reset token without persisting its one-time-use record.
-    /// Shares the primitive contract of [`Self::issue_password_reset_token`].
-    pub fn issue_password_reset_token_with_ttl(
+    /// Signs a reset token. Callers must record it before returning it: a
+    /// token without a store record could only pass validation, which is
+    /// repeatable until expiry, so the crate never hands one out.
+    fn sign_password_reset_token(
         &self,
         user_id: impl Into<String>,
         ttl: Duration,
@@ -62,7 +66,13 @@ where
         })
     }
 
-    /// Issues a password-reset token and records its token ID in a store.
+    /// Issues a password-reset token, records its token ID in a store, and
+    /// invalidates the user's other outstanding reset tokens.
+    ///
+    /// Only the newest token for a user can be consumed. If invalidation fails
+    /// the error is returned and the new token must not be delivered. This does
+    /// not send delivery, check user state or apply request admission; call
+    /// [`Self::should_process_password_reset_request`] first.
     pub async fn issue_password_reset_token_with_store<S>(
         &self,
         store: &S,
@@ -72,16 +82,24 @@ where
     where
         S: PasswordResetTokenStore,
     {
-        let issued = self.issue_password_reset_token_with_ttl(user_id, ttl)?;
+        let issued = self.sign_password_reset_token(user_id, ttl)?;
         store
             .insert_password_reset_token(issued.token_id, &issued.user_id, issued.expires_at)
+            .await?;
+        store
+            .invalidate_password_reset_tokens_for_user(
+                &issued.user_id,
+                Some(issued.token_id),
+                OffsetDateTime::now_utc(),
+            )
             .await?;
         Ok(issued)
     }
 
     /// Validates a signed reset token without consulting or consuming its store.
     ///
-    /// Checks cryptographic claims/purpose/expiry, not one-time use, store
+    /// Checks cryptographic claims, the reset `typ` and purpose, and expiry, not
+    /// one-time use, store
     /// revocation, attempt limits, current user state or a password change.
     /// Repeated validation can succeed for the same token. Never use validation
     /// alone to authorize a reset; use
@@ -98,10 +116,8 @@ where
             decode::<PasswordResetTokenClaims>(token, &self.decoding_key, &self.validation)
                 .map_err(map_password_reset_decode_error)?;
         let claims = token_data.claims;
-        if !matches!(
-            claims.typ.as_deref(),
-            None | Some(PASSWORD_RESET_TOKEN_TYPE)
-        ) || claims.purpose != PASSWORD_RESET_TOKEN_PURPOSE
+        if claims.typ.as_deref() != Some(PASSWORD_RESET_TOKEN_TYPE)
+            || claims.purpose != PASSWORD_RESET_TOKEN_PURPOSE
         {
             return Err(AuthError::InvalidPasswordResetToken);
         }
@@ -137,13 +153,42 @@ where
             .await
     }
 
-    /// Validates and atomically consumes a reset ID with configured abuse protection.
+    /// Validates and atomically consumes a reset ID with configured abuse
+    /// protection, then invalidates the user's other outstanding reset tokens.
     ///
-    /// Requires an atomic [`PasswordResetTokenStore`] implementation. This does
-    /// not update a password or revoke other sessions/tokens. The host binds the
-    /// verified user, persists the new password and implements revocation and
-    /// recovery/fencing if any step fails after consumption.
+    /// Requires an atomic [`PasswordResetTokenStore`] implementation. If sibling
+    /// invalidation fails the token stays consumed and the error is returned;
+    /// the user needs a fresh reset. This does not update a password or revoke
+    /// sessions/API tokens. The host binds the verified user, persists the new
+    /// password and implements revocation and recovery/fencing if any step
+    /// fails after consumption.
     pub async fn consume_password_reset_token_with_metadata<S>(
+        &self,
+        store: &S,
+        token: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedPasswordResetToken>
+    where
+        S: PasswordResetTokenStore,
+    {
+        let verified = self
+            .consume_one_password_reset_token(store, token, metadata)
+            .await?;
+        store
+            .invalidate_password_reset_tokens_for_user(
+                &verified.user_id,
+                None,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+        // INTEGRATION: the `sessions` stream adds an `AuthService` method that
+        // revokes all of a user's refresh families. Call it here for
+        // `verified.user_id` so completing a reset ends every refresh session,
+        // and update this method's docs and docs/secure-primitive-flows.md.
+        Ok(verified)
+    }
+
+    async fn consume_one_password_reset_token<S>(
         &self,
         store: &S,
         token: &str,

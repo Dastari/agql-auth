@@ -168,7 +168,20 @@ let verified = auth
 ```
 
 `consume_password_reset_token` must be atomic. If two requests try to consume
-the same token ID, exactly one should return `true`.
+the same token ID, exactly one may return `true`. It must return `false` for a
+missing, consumed or invalidated record.
+
+Persist the `user_id` passed to `insert_password_reset_token`.
+`invalidate_password_reset_tokens_for_user` is required: the service calls it
+after issuing a token (keeping the new one) and after consuming one (keeping
+none). It must mark every other unconsumed token of that user invalidated, or
+return `Err`; it must never succeed without doing so.
+
+```sql
+UPDATE password_reset_tokens SET invalidated_at = ?
+WHERE user_id = ? AND (? IS NULL OR id <> ?)
+  AND consumed_at IS NULL AND invalidated_at IS NULL;
+```
 
 ## Login Challenges
 

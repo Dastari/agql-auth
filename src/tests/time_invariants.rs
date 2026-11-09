@@ -93,9 +93,11 @@ async fn impossible_expiries_fail_before_credential_storage() {
         )),
         Err(AuthError::InvalidConfiguration(_))
     ));
+    let reset_store = MemoryPasswordResetStore::default();
     for ttl in [Duration::ZERO, Duration::seconds(-1), Duration::MAX] {
         assert!(matches!(
-            auth.issue_password_reset_token_with_ttl("fixture", ttl),
+            auth.issue_password_reset_token_with_store(&reset_store, "fixture", ttl)
+                .await,
             Err(AuthError::InvalidConfiguration(_))
         ));
     }

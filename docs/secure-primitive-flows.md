@@ -12,7 +12,7 @@ in the snippets are explicitly application-owned interfaces, not `agql-auth` API
 | `verify_totp_code` | Code matches the supplied secret and trusted time window | Factor ownership, attempt limits, replay consumption, enrollment/session/MFA state |
 | `verify_totp_code_for_principal` | Matching code plus configured principal/client abuse controls | Replay consumption, factor ownership and resulting session/MFA state |
 | `verify_totp_code_with_replay_store_and_metadata` | Matching code, configured abuse controls, atomic first use of the stored step | Correct factor/secret/session binding, durable shared replay store, accepted MFA policy and state transition |
-| `authenticate_password_reset_token` | Valid signed claims, purpose and expiry at validation | Store lookup/one-time consumption, attempt admission, current account, password update and revocation |
+| `authenticate_password_reset_token` | Valid signed claims, reset type and purpose, and expiry at validation; repeatable | Store lookup/one-time consumption, attempt admission, current account, password update and revocation |
 | Optional `ApiTokenStore::revoke_api_tokens_for_*` | Adapter-specific bulk action; default returns `Ok(0)` without changes | Known supported override, authorized target, durable completion and online checks for already accepted principals |
 
 ## Bound challenge to current user session
@@ -82,8 +82,10 @@ and [step-up semantics](session-assurance.md#step-up).
 ## One-time reset through password update and revocation
 
 Request initiation first uses `should_process_password_reset_request`; preserve
-silent-success behavior and send nothing on `Ok(false)`. Persist issuance with
-`issue_password_reset_token_with_store`. At completion:
+silent-success behavior and send nothing on `Ok(false)`. Issue with
+`issue_password_reset_token_with_store`, which records the token and
+invalidates the user's earlier reset tokens; consumption invalidates the rest.
+At completion:
 
 ```rust
 host.enforce_new_password_policy(new_password)?;

@@ -196,8 +196,13 @@ pub use crate::memory_rate_limit::MemoryAuthRateLimitStore;
 
 #[async_trait]
 /// Persists one-time password-reset token IDs.
+///
+/// Every reset token the crate issues has a record here; a token without one
+/// can never be consumed.
 pub trait PasswordResetTokenStore: Send + Sync {
-    /// Inserts a password-reset token ID with its expiry.
+    /// Inserts a password-reset token ID with its owning user and expiry.
+    ///
+    /// Persist `user_id` with the record; sibling invalidation selects by it.
     async fn insert_password_reset_token(
         &self,
         token_id: Uuid,
@@ -207,12 +212,42 @@ pub trait PasswordResetTokenStore: Send + Sync {
 
     /// Consumes a password-reset token exactly once.
     ///
-    /// Return `true` only for the first successful consume operation.
+    /// Must atomically require an existing record that is neither consumed nor
+    /// invalidated, then mark it consumed. Return `true` only for the first
+    /// successful consume operation, and `false` for a missing, consumed or
+    /// invalidated record, for example:
+    ///
+    /// ```sql
+    /// UPDATE password_reset_tokens SET consumed_at = ?
+    /// WHERE id = ? AND consumed_at IS NULL AND invalidated_at IS NULL;
+    /// -- true exactly when one row changed
+    /// ```
     async fn consume_password_reset_token(
         &self,
         token_id: Uuid,
         consumed_at: OffsetDateTime,
     ) -> AuthResult<bool>;
+
+    /// Invalidates every unconsumed reset token of `user_id`, except
+    /// `keep_token_id` when given, and returns how many it changed.
+    ///
+    /// Called after issuing a new token (keeping that one) and after a token is
+    /// consumed (keeping none). Afterwards
+    /// [`Self::consume_password_reset_token`] must return `false` for every
+    /// invalidated token. Return `Err` if this cannot be done; never succeed
+    /// without invalidating. One statement is enough:
+    ///
+    /// ```sql
+    /// UPDATE password_reset_tokens SET invalidated_at = ?
+    /// WHERE user_id = ? AND (? IS NULL OR id <> ?) AND consumed_at IS NULL
+    ///   AND invalidated_at IS NULL;
+    /// ```
+    async fn invalidate_password_reset_tokens_for_user(
+        &self,
+        user_id: &str,
+        keep_token_id: Option<Uuid>,
+        invalidated_at: OffsetDateTime,
+    ) -> AuthResult<u64>;
 }
 
 #[async_trait]
