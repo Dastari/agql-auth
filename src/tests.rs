@@ -1,3 +1,4 @@
+mod api_token_binding;
 mod api_tokens;
 mod assurance;
 mod auth_lifecycle;

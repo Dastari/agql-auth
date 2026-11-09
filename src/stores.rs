@@ -401,6 +401,8 @@ pub trait OAuthTokenStore: Send + Sync {
 ///
 /// Implementations should store only token hashes. The raw token is returned
 /// once by [`crate::ApiTokenService`] and should not be persisted by hosts.
+/// Persist `audience`, `resource_type` and `resource_id` exactly: the service
+/// refuses tokens whose binding does not match its configuration.
 pub trait ApiTokenStore: Send + Sync {
     /// Stores a newly issued API token record.
     async fn insert_api_token(&self, token: StoredApiToken) -> AuthResult<()>;
@@ -412,6 +414,9 @@ pub trait ApiTokenStore: Send + Sync {
     async fn find_api_token_by_hash(&self, token_hash: &str) -> AuthResult<Option<StoredApiToken>>;
 
     /// Records metadata for a successful API-token use.
+    ///
+    /// Best effort: an error here does not fail authentication and is passed
+    /// to the service's [`crate::ApiTokenTouchObserver`], if any.
     async fn touch_api_token(
         &self,
         token_id: Uuid,
@@ -428,13 +433,15 @@ pub trait ApiTokenStore: Send + Sync {
         reason: ApiTokenRevocationReason,
     ) -> AuthResult<()>;
 
-    /// Optional bulk API-token revocation; the default is a no-op returning zero.
+    /// Optional bulk revocation of every active token of one principal.
     ///
-    /// `Ok(0)` alone does not prove the adapter supports bulk revocation or that
-    /// no active tokens remain. Hosts relying on this must require and test an
-    /// override, or use a known-supported per-token revocation workflow. It does
-    /// not revoke user sessions/JWTs or invalidate already accepted principals;
-    /// those require their own authoritative status/revalidation boundary.
+    /// The default returns [`AuthError::InvalidConfiguration`](crate::AuthError::InvalidConfiguration)
+    /// and changes nothing, so an adapter without it can never report a
+    /// revocation that did not happen. An override must revoke every matching
+    /// unrevoked token durably before returning `Ok(count)`; `Ok(0)` then means
+    /// no active token matched. It does not revoke user sessions/JWTs or
+    /// invalidate already accepted principals; those require their own
+    /// authoritative status/revalidation boundary.
     async fn revoke_api_tokens_for_principal(
         &self,
         _subject: &str,
@@ -442,15 +449,16 @@ pub trait ApiTokenStore: Send + Sync {
         _revoked_at: OffsetDateTime,
         _reason: ApiTokenRevocationReason,
     ) -> AuthResult<u64> {
-        Ok(0)
+        Err(crate::AuthError::InvalidConfiguration(
+            "api token store does not support bulk revocation by principal".to_string(),
+        ))
     }
 
-    /// Optional resource bulk revocation; the default is a no-op returning zero.
+    /// Optional bulk revocation of every active token bound to one resource.
     ///
-    /// Shares the capability/zero-result contract of
+    /// Shares the default-error and override contract of
     /// [`Self::revoke_api_tokens_for_principal`]. The host authorizes the exact
-    /// resource and must know the adapter implements this operation before
-    /// presenting it as a security guarantee.
+    /// resource.
     async fn revoke_api_tokens_for_resource(
         &self,
         _resource_type: &str,
@@ -458,6 +466,8 @@ pub trait ApiTokenStore: Send + Sync {
         _revoked_at: OffsetDateTime,
         _reason: ApiTokenRevocationReason,
     ) -> AuthResult<u64> {
-        Ok(0)
+        Err(crate::AuthError::InvalidConfiguration(
+            "api token store does not support bulk revocation by resource".to_string(),
+        ))
     }
 }

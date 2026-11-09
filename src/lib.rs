@@ -145,7 +145,7 @@ mod validator;
 #[cfg(test)]
 mod tests;
 
-pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use api_tokens::{ApiTokenService, ApiTokenTouchObserver, DEFAULT_API_TOKEN_PREFIX};
 pub use assurance::{
     AssuranceDenial, AssuranceDenialCode, AssuranceEvaluation, AssuranceEvaluationState,
     AssuranceInputError, AssuranceMatchMode, AssurancePolicyId, AssurancePolicyIdError,

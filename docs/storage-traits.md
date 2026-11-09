@@ -143,7 +143,13 @@ The store must support:
 - revoking a token
 
 Optional trait methods support revoking all tokens for a principal or all
-tokens bound to a generic resource.
+tokens bound to a generic resource. Their defaults return
+`AuthError::InvalidConfiguration` and change nothing; an override must revoke
+every matching active token durably before returning the count.
+
+Persist the audience and resource binding exactly: the service refuses tokens
+whose binding does not match its configuration. A `touch_api_token` error does
+not fail authentication.
 
 Store only `StoredApiToken.token_hash`, never the raw token returned in
 `IssuedApiToken`. Use a unique index on `token_hash`; revoked records should
