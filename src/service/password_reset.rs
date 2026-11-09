@@ -92,11 +92,11 @@ where
         &self,
         token: &str,
     ) -> AuthResult<VerifiedPasswordResetToken> {
-        self.validate_local_jwt_header(token)
+        let decoding_key = self
+            .local_jwt_decoding_key(token)
             .map_err(|_| AuthError::InvalidPasswordResetToken)?;
-        let token_data =
-            decode::<PasswordResetTokenClaims>(token, &self.decoding_key, &self.validation)
-                .map_err(map_password_reset_decode_error)?;
+        let token_data = decode::<PasswordResetTokenClaims>(token, decoding_key, &self.validation)
+            .map_err(map_password_reset_decode_error)?;
         let claims = token_data.claims;
         if !matches!(
             claims.typ.as_deref(),

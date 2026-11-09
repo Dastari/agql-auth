@@ -40,10 +40,19 @@ fn service_rejects_invalid_identity_and_lifetimes_at_construction() {
             );
         }
     }
-    // The existing custom-grant ceiling is deliberately not silently redefined
-    // as a limit on separately configured ordinary refreshable sessions.
+    // Since 0.27 the ordinary session lifetime is bounded by the access-token
+    // maximum too (this previously pinned that it was not).
     let mut config = AuthConfig::new(TEST_HS256_SECRET);
     config.access_token_ttl = Duration::days(2);
+    assert!(matches!(
+        AuthService::new(
+            config.clone(),
+            Arc::new(MemoryUserStore::default()),
+            Arc::new(MemoryRefreshTokenStore::default())
+        ),
+        Err(AuthError::InvalidConfiguration(_))
+    ));
+    config.max_access_token_ttl = Duration::days(2);
     assert!(
         AuthService::new(
             config,

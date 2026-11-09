@@ -511,8 +511,10 @@ fn purpose_tokens_reject_reserved_custom_claims() {
     assert!(matches!(err, AuthError::InvalidConfiguration(_)));
 }
 
+// Changed in 0.27: pre-0.6 tokens without `typ`/`purpose` were accepted; every
+// token the service has issued since 0.6 carries both, so they are now required.
 #[test]
-fn legacy_access_tokens_without_purpose_still_decode() {
+fn legacy_access_tokens_without_typ_and_purpose_are_rejected() {
     let auth = auth_service(AuthConfig::new(TEST_HS256_SECRET));
     let claims = access_token_claims_json(None);
     let token = encode(
@@ -522,8 +524,10 @@ fn legacy_access_tokens_without_purpose_still_decode() {
     )
     .unwrap();
 
-    let decoded = auth.authenticate_access_token(&token).unwrap();
-    assert_eq!(decoded.user_id, "user-1");
+    assert!(matches!(
+        auth.authenticate_access_token(&token),
+        Err(AuthError::InvalidAccessToken)
+    ));
 }
 
 #[test]

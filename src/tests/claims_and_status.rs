@@ -56,10 +56,31 @@ fn claim_requirements_require_tenant_jti_and_cnf() {
         }),
         ..AccessTokenMetadata::default()
     };
-    assert!(requirements.validate(&metadata).is_ok());
+    // Presence of `cnf` alone no longer satisfies the requirement (0.27).
+    assert_eq!(
+        requirements.validate(&metadata),
+        Err(crate::ClaimRequirementError::ConfirmationNotPresented)
+    );
+    let presented = PresentedConfirmation::certificate_thumbprint("thumb");
+    assert!(
+        requirements
+            .validate_with_confirmation(&metadata, Some(&presented))
+            .is_ok()
+    );
+    assert_eq!(
+        requirements.validate_with_confirmation(
+            &metadata,
+            Some(&PresentedConfirmation::certificate_thumbprint("other"))
+        ),
+        Err(crate::ClaimRequirementError::ConfirmationMismatch)
+    );
 
     metadata.cnf = None;
-    assert!(requirements.validate(&metadata).is_err());
+    assert!(
+        requirements
+            .validate_with_confirmation(&metadata, Some(&presented))
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -83,7 +104,6 @@ async fn validator_enforces_claim_requirements_and_nbf_with_test_clock() {
         "sub": "user-1",
         "sid": Uuid::new_v4().to_string(),
         "roles": [],
-        "scopes": [],
         "iss": "agql-auth",
         "aud": "agql-auth-clients",
         "exp": (now + Duration::minutes(15)).unix_timestamp(),
@@ -100,7 +120,6 @@ async fn validator_enforces_claim_requirements_and_nbf_with_test_clock() {
             "sub": "user-1",
             "sid": Uuid::new_v4().to_string(),
             "roles": [],
-            "scopes": [],
             "iss": "agql-auth",
             "aud": "agql-auth-clients",
             "exp": (now + Duration::minutes(15)).unix_timestamp(),
@@ -118,7 +137,6 @@ async fn validator_enforces_claim_requirements_and_nbf_with_test_clock() {
         "sub": "user-1",
         "sid": Uuid::new_v4().to_string(),
         "roles": [],
-        "scopes": [],
         "iss": "agql-auth",
         "aud": "agql-auth-clients",
         "exp": (now + Duration::minutes(15)).unix_timestamp(),
@@ -135,7 +153,6 @@ async fn validator_enforces_claim_requirements_and_nbf_with_test_clock() {
         "sub": "user-1",
         "sid": Uuid::new_v4().to_string(),
         "roles": [],
-        "scopes": [],
         "iss": "agql-auth",
         "aud": "agql-auth-clients",
         "exp": (now + Duration::minutes(15)).unix_timestamp(),
@@ -185,7 +202,6 @@ fn validator_accepts_multi_audience_tokens() {
         "sub": "user-1",
         "sid": Uuid::new_v4().to_string(),
         "roles": [],
-        "scopes": [],
         "iss": "agql-auth",
         "aud": ["svc-a", "svc-b"],
         "exp": (now + Duration::minutes(15)).unix_timestamp(),
@@ -227,7 +243,6 @@ fn purpose_policy_can_reject_legacy_tokens() {
         "sub": "user-1",
         "sid": Uuid::new_v4().to_string(),
         "roles": [],
-        "scopes": [],
         "iss": "agql-auth",
         "aud": "agql-auth-clients",
         "exp": (now + Duration::minutes(15)).unix_timestamp(),
@@ -267,6 +282,7 @@ fn rotating_jwks_supports_unknown_kid_cooldown_and_replace() {
             cache_ttl: std::time::Duration::from_secs(60),
             unknown_kid_cooldown: std::time::Duration::from_secs(30),
             stale_policy: StaleKeyPolicy::UseStale,
+            max_stale: std::time::Duration::from_secs(600),
         },
         clock.clone(),
     )

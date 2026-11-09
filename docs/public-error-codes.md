@@ -60,7 +60,9 @@ Their internal detail is a fixed diagnostic string; provider response bodies,
 `error_description` text and tokens are never copied into an `AuthError`.
 
 Additional codes remain available for specific flows (refresh, password reset,
-login challenges, TOTP). Prefer the table above for cross-service contracts.
+login challenges, TOTP, purpose tokens). Prefer the table above for
+cross-service contracts. `PURPOSE_TOKEN_REPLAYED` (`PurposeTokenReplayed`) is
+new in 0.27 and returned when a consumed purpose token is presented again.
 
 ## Assurance Decisions
 

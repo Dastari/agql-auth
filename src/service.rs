@@ -25,7 +25,10 @@ use crate::assurance::{
 };
 use crate::claims::{AccessTokenGrantKind, AccessTokenMetadata, ClaimRequirements};
 use crate::clock::{Clock, SystemClock};
-use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
+use crate::config::{
+    AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
+    MAX_PREVIOUS_VERIFICATION_KEYS,
+};
 use crate::errors::AuthError;
 use crate::grant::{
     AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
@@ -47,8 +50,8 @@ use crate::refresh_reuse_grace::{
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{
-    AdditionalTokenRolesProvider, AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore,
-    UserStore,
+    AdditionalTokenRolesProvider, AuthRateLimitStore, MemoryAuthRateLimitStore,
+    PurposeTokenReplayStore, RefreshTokenStore, UserStore,
 };
 use crate::token_decode::{
     ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
@@ -56,11 +59,10 @@ use crate::token_decode::{
     issued_scope_claims,
 };
 use crate::util::{
-    extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
+    dedupe_stable, extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
     hash_refresh_token, map_purpose_token_decode_error, strip_bearer_prefix,
 };
 
-const MIN_HS256_SECRET_BYTES: usize = 32;
 const PASSWORD_RESET_TOKEN_TYPE: &str = "password_reset";
 const PASSWORD_RESET_TOKEN_PURPOSE: &str = "password_reset";
 const PURPOSE_TOKEN_TYPE: &str = "purpose_token";
@@ -84,6 +86,10 @@ pub(super) struct PasswordResetTokenClaims {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PurposeTokenClaims {
     typ: String,
+    // Optional on decode so purpose tokens minted before 0.27 still pass
+    // plain validation; consumption requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
     sub: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sid: Option<String>,
@@ -119,6 +125,7 @@ pub struct AuthService<U, R> {
     pub(super) validation: Validation,
     signing_algorithm: Algorithm,
     signing_key_id: Option<String>,
+    previous_decoding_keys: Vec<(String, DecodingKey)>,
     jwks: Option<JsonValue>,
     scope_matcher: Arc<dyn ScopeMatch>,
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
@@ -199,6 +206,7 @@ where
             validation: jwt_keys.validation,
             signing_algorithm: jwt_keys.algorithm,
             signing_key_id: jwt_keys.key_id,
+            previous_decoding_keys: jwt_keys.previous_decoding_keys,
             jwks: jwt_keys.jwks,
             scope_matcher: Arc::new(ExactScopeMatch),
             active_user_session_resolver: None,
@@ -897,7 +905,7 @@ where
 
     /// Validates a local JWT access token and returns the authenticated user.
     pub fn authenticate_access_token(&self, token: &str) -> AuthResult<AuthUser> {
-        let claims = decode_access_token_claims(token, &self.access_token_decode_config())?;
+        let claims = decode_access_token_claims(token, &self.access_token_decode_config(token)?)?;
         access_token_claims_to_user(claims)
     }
 
@@ -906,7 +914,7 @@ where
         token: &str,
         audience: &str,
     ) -> AuthResult<AuthUser> {
-        let mut config = self.access_token_decode_config();
+        let mut config = self.access_token_decode_config(token)?;
         config.validation = self.validation_for_audience(audience);
         config.purpose_policy = PurposePolicy::RequireAccessToken;
         config.claim_requirements = ClaimRequirements {
@@ -942,7 +950,10 @@ where
 
     /// Returns the public JWKS document for asymmetric signing.
     ///
-    /// HS256 configurations return [`AuthError::JwksUnsupported`].
+    /// The current signing key comes first, followed by every
+    /// [`AuthConfig::previous_verification_keys`] entry, each with its own
+    /// `kid`. Previous keys verify but never sign. HS256 configurations return
+    /// [`AuthError::JwksUnsupported`].
     pub fn jwks(&self) -> AuthResult<JsonValue> {
         self.jwks.clone().ok_or(AuthError::JwksUnsupported)
     }
@@ -955,6 +966,11 @@ where
     /// [`AuthService::authenticate_purpose_token`], not
     /// [`AuthService::authenticate_access_token`]. An audience reserved by
     /// [`Self::into_shared_with_fixed_audience_delegation`] is refused.
+    ///
+    /// Every token carries a random `jti` ([`IssuedPurposeToken::token_id`]).
+    /// The token is a bearer credential: [`Self::authenticate_purpose_token`]
+    /// accepts it repeatedly until `exp`. Use
+    /// [`Self::consume_purpose_token`] where a grant must be single-use.
     pub fn issue_purpose_token(
         &self,
         request: PurposeTokenIssueRequest,
@@ -970,8 +986,10 @@ where
         let issued_at = OffsetDateTime::now_utc();
         let expires_at =
             crate::util::checked_jwt_expiry(issued_at, request.ttl, "purpose-token ttl")?;
+        let token_id = Uuid::new_v4();
         let claims = PurposeTokenClaims {
             typ: PURPOSE_TOKEN_TYPE.to_string(),
+            jti: Some(token_id.to_string()),
             sub: request.subject.clone(),
             sid: request.session_id.map(|session_id| session_id.to_string()),
             scopes: request.scopes.clone(),
@@ -986,6 +1004,7 @@ where
 
         Ok(IssuedPurposeToken {
             token,
+            token_id,
             subject: request.subject,
             purpose: request.purpose,
             audience: request.audience,
@@ -997,6 +1016,10 @@ where
     }
 
     /// Validates a short-lived purpose token with exact purpose and audience.
+    ///
+    /// Validation is stateless and repeatable: the same token passes again
+    /// until it expires. For a single-use grant call
+    /// [`Self::consume_purpose_token`] instead.
     pub fn authenticate_purpose_token(
         &self,
         token: &str,
@@ -1006,10 +1029,11 @@ where
             return Err(AuthError::InvalidPurposeToken);
         }
 
-        self.validate_local_jwt_header(token)
+        let decoding_key = self
+            .local_jwt_decoding_key(token)
             .map_err(|_| AuthError::InvalidPurposeToken)?;
         let validation = self.validation_for_audience(&expected.audience);
-        let token_data = decode::<PurposeTokenClaims>(token, &self.decoding_key, &validation)
+        let token_data = decode::<PurposeTokenClaims>(token, decoding_key, &validation)
             .map_err(map_purpose_token_decode_error)?;
         let claims = token_data.claims;
         if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
@@ -1028,12 +1052,19 @@ where
             .map(Uuid::parse_str)
             .transpose()
             .map_err(|_| AuthError::InvalidPurposeToken)?;
+        let token_id = claims
+            .jti
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| AuthError::InvalidPurposeToken)?;
         let issued_at = OffsetDateTime::from_unix_timestamp(claims.iat)
             .map_err(|_| AuthError::InvalidPurposeToken)?;
         let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
             .map_err(|_| AuthError::InvalidPurposeToken)?;
 
         Ok(VerifiedPurposeToken {
+            token_id,
             subject: claims.sub,
             purpose: claims.purpose,
             audience: claims.aud,
@@ -1043,6 +1074,35 @@ where
             issued_at,
             expires_at,
         })
+    }
+
+    /// Validates a purpose token like [`Self::authenticate_purpose_token`] and
+    /// consumes its `jti` in `store`, so the token succeeds at most once.
+    ///
+    /// The store must record the id atomically (insert-if-absent) and keep it
+    /// until the token's expiry. A replay returns
+    /// [`AuthError::PurposeTokenReplayed`]. Tokens without a `jti` (minted
+    /// before 0.27) cannot be consumed and return
+    /// [`AuthError::InvalidPurposeToken`]. A store failure fails closed.
+    pub async fn consume_purpose_token<S>(
+        &self,
+        token: &str,
+        expected: PurposeTokenValidation,
+        store: &S,
+    ) -> AuthResult<VerifiedPurposeToken>
+    where
+        S: PurposeTokenReplayStore + ?Sized,
+    {
+        let verified = self.authenticate_purpose_token(token, expected)?;
+        let token_id = verified.token_id.ok_or(AuthError::InvalidPurposeToken)?;
+        if store
+            .consume_purpose_token(token_id, verified.expires_at)
+            .await?
+        {
+            Ok(verified)
+        } else {
+            Err(AuthError::PurposeTokenReplayed)
+        }
     }
 
     /// Issues a local session for a user already verified by the trusted host.
@@ -1762,30 +1822,41 @@ where
             .map_err(|err| AuthError::TokenCreation(err.to_string()))
     }
 
-    pub(super) fn validate_local_jwt_header(&self, token: &str) -> AuthResult<()> {
+    /// Selects the verification key for a locally issued JWT by header `alg`
+    /// and `kid`: the current signing key or a verification-only previous key.
+    pub(super) fn local_jwt_decoding_key(&self, token: &str) -> AuthResult<&DecodingKey> {
         let header =
             jsonwebtoken::decode_header(token).map_err(|_| AuthError::InvalidAccessToken)?;
         if header.alg != self.signing_algorithm {
             return Err(AuthError::InvalidAccessToken);
         }
 
-        if let Some(expected_kid) = &self.signing_key_id {
-            match header.kid.as_deref() {
-                Some(actual_kid) if actual_kid == expected_kid => {}
-                _ => return Err(AuthError::InvalidAccessToken),
-            }
+        let Some(signing_kid) = &self.signing_key_id else {
+            return Ok(&self.decoding_key);
+        };
+        let kid = header.kid.as_deref().ok_or(AuthError::InvalidAccessToken)?;
+        if kid == signing_kid {
+            return Ok(&self.decoding_key);
         }
-
-        Ok(())
+        self.previous_decoding_keys
+            .iter()
+            .find(|(previous_kid, _)| previous_kid == kid)
+            .map(|(_, key)| key)
+            .ok_or(AuthError::InvalidAccessToken)
     }
 
-    pub(super) fn access_token_decode_config(&self) -> AccessTokenDecodeConfig {
-        AccessTokenDecodeConfig::for_service(
-            self.decoding_key.clone(),
+    pub(super) fn access_token_decode_config(
+        &self,
+        token: &str,
+    ) -> AuthResult<AccessTokenDecodeConfig> {
+        // The key was selected by kid above, so the decode core does not pin
+        // one kid again.
+        Ok(AccessTokenDecodeConfig::for_service(
+            self.local_jwt_decoding_key(token)?.clone(),
             self.validation.clone(),
-            self.signing_key_id.clone(),
+            None,
             self.config.legacy_scope_claims,
-        )
+        ))
     }
 
     fn validation_for_audience(&self, audience: &str) -> Validation {
@@ -2365,17 +2436,6 @@ fn is_reserved_access_token_claim(key: &str) -> bool {
         .any(|reserved| key.eq_ignore_ascii_case(reserved))
 }
 
-fn dedupe_stable(values: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        if seen.insert(value.clone()) {
-            out.push(value);
-        }
-    }
-    out
-}
-
 const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
     "typ",
     "token_type",
@@ -2432,7 +2492,7 @@ const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
 ];
 
 const RESERVED_PURPOSE_TOKEN_CLAIMS: &[&str] = &[
-    "typ", "sub", "sid", "scopes", "purpose", "iss", "aud", "exp", "iat",
+    "typ", "jti", "sub", "sid", "scopes", "purpose", "iss", "aud", "exp", "iat", "nbf",
 ];
 
 struct JwtKeyMaterial {
@@ -2441,6 +2501,7 @@ struct JwtKeyMaterial {
     validation: Validation,
     algorithm: Algorithm,
     key_id: Option<String>,
+    previous_decoding_keys: Vec<(String, DecodingKey)>,
     jwks: Option<JsonValue>,
 }
 
@@ -2448,11 +2509,13 @@ impl JwtKeyMaterial {
     fn from_config(config: &AuthConfig) -> AuthResult<Self> {
         let signing = effective_signing_config(config);
         let algorithm = signing.algorithm();
+        let mut previous_decoding_keys = Vec::new();
         let (encoding_key, decoding_key, key_id, jwks) = match signing {
             EffectiveJwtSigningConfig::Hs256 { secret } => {
-                if secret.len() < MIN_HS256_SECRET_BYTES {
+                crate::keys::validate_hs256_secret(secret)?;
+                if !config.previous_verification_keys.is_empty() {
                     return Err(AuthError::InvalidConfiguration(
-                        "HS256 secret must be at least 32 bytes".to_string(),
+                        "previous verification keys require RS256 signing".to_string(),
                     ));
                 }
 
@@ -2483,7 +2546,37 @@ impl JwtKeyMaterial {
                         AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string())
                     })?;
                 validate_rs256_key_pair(&encoding_key, &decoding_key)?;
-                let jwks = build_rs256_jwks(&decoding_key, key_id)?;
+                if config.previous_verification_keys.len() > MAX_PREVIOUS_VERIFICATION_KEYS {
+                    return Err(AuthError::InvalidConfiguration(format!(
+                        "at most {MAX_PREVIOUS_VERIFICATION_KEYS} previous verification keys are allowed"
+                    )));
+                }
+                let mut jwk_entries = vec![rs256_jwk(&decoding_key, key_id)?];
+                for previous in &config.previous_verification_keys {
+                    let previous_kid = previous.key_id();
+                    if previous_kid.trim().is_empty()
+                        || previous_kid == key_id
+                        || previous_decoding_keys
+                            .iter()
+                            .any(|(kid, _): &(String, DecodingKey)| kid == previous_kid)
+                    {
+                        return Err(AuthError::InvalidConfiguration(
+                            "previous verification key ids must be non-empty and unique"
+                                .to_string(),
+                        ));
+                    }
+                    let previous_key = DecodingKey::from_rsa_pem(
+                        previous.public_key_pem().as_bytes(),
+                    )
+                    .map_err(|_| {
+                        AuthError::InvalidConfiguration(
+                            "invalid previous verification key PEM".to_string(),
+                        )
+                    })?;
+                    jwk_entries.push(rs256_jwk(&previous_key, previous_kid)?);
+                    previous_decoding_keys.push((previous_kid.to_string(), previous_key));
+                }
+                let jwks = json!({ "keys": jwk_entries });
 
                 (
                     encoding_key,
@@ -2509,6 +2602,7 @@ impl JwtKeyMaterial {
             validation,
             algorithm,
             key_id,
+            previous_decoding_keys,
             jwks,
         })
     }
@@ -2572,7 +2666,7 @@ fn validate_rs256_key_pair(
     Ok(())
 }
 
-fn build_rs256_jwks(decoding_key: &DecodingKey, key_id: &str) -> AuthResult<JsonValue> {
+fn rs256_jwk(decoding_key: &DecodingKey, key_id: &str) -> AuthResult<JsonValue> {
     let invalid = || AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string());
     let jwk = jsonwebtoken::jwk::Jwk::from_decoding_key(decoding_key, Some(Algorithm::RS256))
         .map_err(|_| invalid())?;
@@ -2580,15 +2674,11 @@ fn build_rs256_jwks(decoding_key: &DecodingKey, key_id: &str) -> AuthResult<Json
         return Err(invalid());
     };
     Ok(json!({
-        "keys": [
-            {
-                "kty": "RSA",
-                "use": "sig",
-                "alg": "RS256",
-                "kid": key_id,
-                "n": rsa.n,
-                "e": rsa.e,
-            }
-        ]
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": key_id,
+        "n": rsa.n,
+        "e": rsa.e,
     }))
 }

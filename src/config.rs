@@ -29,7 +29,16 @@ pub struct AuthConfig {
     pub jwt_secret: String,
     /// Configured local JWT signing mode.
     pub jwt_signing: JwtSigningConfig,
+    /// Verification-only RS256 public keys from earlier signing keys.
+    ///
+    /// They are published by [`crate::AuthService::jwks`] and accepted by the
+    /// service's own validation when a token's `kid` names them, but are never
+    /// used to sign. Keep a key here until every token it signed has expired;
+    /// see `docs/key-rotation.md`. Requires RS256 signing.
+    pub previous_verification_keys: Vec<JwtVerificationKey>,
     /// Ordinary session access-token lifetime.
+    ///
+    /// Must not exceed [`Self::max_access_token_ttl`].
     pub access_token_ttl: Duration,
     /// Maximum allowed access-token lifetime for custom TTLs.
     ///
@@ -52,10 +61,11 @@ pub struct AuthConfig {
     pub access_token_scope_claim_format: AccessTokenScopeClaimFormat,
     /// Whether access-token validation accepts the pre-0.14 `scopes` array.
     ///
-    /// Keep this at [`LegacyScopeClaims::Accept`] until every access token
-    /// issued before the migration has expired, then switch to
-    /// [`LegacyScopeClaims::Reject`]. A token containing conflicting `scope`
-    /// and `scopes` values is rejected in either mode.
+    /// Defaults to [`LegacyScopeClaims::Reject`]. Select
+    /// [`LegacyScopeClaims::Accept`] only while tokens in the pre-0.14 format
+    /// are still in circulation, for example when issuing with
+    /// [`AccessTokenScopeClaimFormat::LegacyArray`]. A token containing
+    /// conflicting `scope` and `scopes` values is rejected in either mode.
     pub legacy_scope_claims: LegacyScopeClaims,
     /// Abuse-protection settings for credential and request flows.
     pub rate_limits: AuthRateLimitConfig,
@@ -68,6 +78,10 @@ impl fmt::Debug for AuthConfig {
             .field("audience", &self.audience)
             .field("jwt_secret", &"[redacted]")
             .field("jwt_signing", &self.jwt_signing)
+            .field(
+                "previous_verification_keys",
+                &self.previous_verification_keys,
+            )
             .field("access_token_ttl", &self.access_token_ttl)
             .field("max_access_token_ttl", &self.max_access_token_ttl)
             .field(
@@ -105,12 +119,13 @@ impl AuthConfig {
             audience: "agql-auth-clients".to_string(),
             jwt_secret: secret.clone(),
             jwt_signing: JwtSigningConfig::Hs256 { secret },
+            previous_verification_keys: Vec::new(),
             access_token_ttl: Duration::minutes(15),
             max_access_token_ttl: Duration::hours(24),
             max_session_bound_delegation_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
-            legacy_scope_claims: LegacyScopeClaims::Accept,
+            legacy_scope_claims: LegacyScopeClaims::Reject,
             rate_limits: AuthRateLimitConfig::default(),
         }
     }
@@ -133,12 +148,13 @@ impl AuthConfig {
                 public_key_pem: public_key_pem.into(),
                 key_id: key_id.into(),
             },
+            previous_verification_keys: Vec::new(),
             access_token_ttl: Duration::minutes(15),
             max_access_token_ttl: Duration::hours(24),
             max_session_bound_delegation_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
-            legacy_scope_claims: LegacyScopeClaims::Accept,
+            legacy_scope_claims: LegacyScopeClaims::Reject,
             rate_limits: AuthRateLimitConfig::default(),
         }
     }
@@ -152,6 +168,20 @@ impl AuthConfig {
             JwtSigningConfig::Rs256 { .. } => String::new(),
         };
         self.jwt_signing = signing;
+    }
+
+    /// Adds a verification-only public key from an earlier RS256 signing key.
+    ///
+    /// See [`Self::previous_verification_keys`].
+    #[must_use]
+    pub fn with_previous_verification_key(
+        mut self,
+        key_id: impl Into<String>,
+        public_key_pem: impl Into<String>,
+    ) -> Self {
+        self.previous_verification_keys
+            .push(JwtVerificationKey::rs256_pem(key_id, public_key_pem));
+        self
     }
 
     /// Selects the claim shape used for newly issued access-token scopes.
@@ -189,6 +219,11 @@ impl AuthConfig {
         crate::util::checked_expiry(now, self.access_token_ttl, "access-token ttl")?;
         crate::util::checked_expiry(now, self.max_access_token_ttl, "access-token maximum ttl")?;
         crate::util::checked_expiry(now, self.refresh_token_ttl, "refresh-token ttl")?;
+        if self.access_token_ttl > self.max_access_token_ttl {
+            return Err(AuthError::InvalidConfiguration(
+                "access-token ttl must not exceed the access-token maximum".to_string(),
+            ));
+        }
 
         if self.max_session_bound_delegation_ttl <= Duration::ZERO
             || self.max_session_bound_delegation_ttl > self.max_access_token_ttl
@@ -226,10 +261,12 @@ pub enum AccessTokenScopeClaimFormat {
 /// Policy for validating the pre-0.14 access-token `scopes` array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LegacyScopeClaims {
-    /// Accept a legacy array when no conflicting standard claim is present.
-    #[default]
+    /// Migration opt-in: accept a legacy array when no conflicting standard
+    /// claim is present.
     Accept,
     /// Reject every token containing the legacy array, including an empty one.
+    /// The default since 0.27.
+    #[default]
     Reject,
 }
 
@@ -393,6 +430,47 @@ impl fmt::Debug for JwtSigningConfig {
                 .field("key_id", key_id)
                 .finish(),
         }
+    }
+}
+
+/// Maximum number of verification-only previous signing keys.
+pub const MAX_PREVIOUS_VERIFICATION_KEYS: usize = 8;
+
+/// Verification-only public key of an earlier local signing key.
+///
+/// Configure it through [`AuthConfig::previous_verification_keys`]. Public key
+/// material is not secret, so `Debug` shows the key id only for brevity.
+#[derive(Clone, PartialEq, Eq)]
+pub struct JwtVerificationKey {
+    key_id: String,
+    public_key_pem: String,
+}
+
+impl JwtVerificationKey {
+    /// Creates an RS256 verification key from a PEM-encoded public key.
+    pub fn rs256_pem(key_id: impl Into<String>, public_key_pem: impl Into<String>) -> Self {
+        Self {
+            key_id: key_id.into(),
+            public_key_pem: public_key_pem.into(),
+        }
+    }
+
+    /// Key identifier the earlier key placed in JWT headers.
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// PEM-encoded RSA public key.
+    pub fn public_key_pem(&self) -> &str {
+        &self.public_key_pem
+    }
+}
+
+impl fmt::Debug for JwtVerificationKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JwtVerificationKey")
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
     }
 }
 

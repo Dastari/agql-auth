@@ -91,13 +91,15 @@ impl AuthUser {
     }
 
     /// Returns `true` when the configured matcher satisfies all required scopes.
+    /// An empty requirement list returns `false`.
     pub fn has_all_scopes_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
     where
         S: AsRef<str>,
     {
-        required
-            .iter()
-            .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
+        !required.is_empty()
+            && required
+                .iter()
+                .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
     }
 }
 
@@ -208,13 +210,15 @@ impl ApiTokenPrincipal {
     }
 
     /// Returns `true` when the configured matcher satisfies all required scopes.
+    /// An empty requirement list returns `false`.
     pub fn has_all_scopes_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
     where
         S: AsRef<str>,
     {
-        required
-            .iter()
-            .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
+        !required.is_empty()
+            && required
+                .iter()
+                .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
     }
 }
 
@@ -293,13 +297,15 @@ impl AuthPrincipal {
     }
 
     /// Returns `true` when the configured matcher satisfies all required scopes.
+    /// An empty requirement list returns `false`.
     pub fn has_all_scopes_with<S>(&self, matcher: &dyn ScopeMatch, required: &[S]) -> bool
     where
         S: AsRef<str>,
     {
-        required
-            .iter()
-            .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
+        !required.is_empty()
+            && required
+                .iter()
+                .all(|scope| self.has_scope_with(matcher, scope.as_ref()))
     }
 
     /// Returns the API-token audience, if this is an API-token principal.
@@ -334,10 +340,11 @@ impl AuthPrincipal {
         }
     }
 
-    /// Returns the API-token expiry, if this is an API-token principal.
+    /// Returns the credential expiry: the access-token `exp` for a user
+    /// principal (when known) or the API-token expiry.
     pub fn expires_at(&self) -> Option<OffsetDateTime> {
         match self {
-            Self::User(_) => None,
+            Self::User(user) => user.token_claims.expires_at,
             Self::ApiToken(token) => Some(token.expires_at),
         }
     }
@@ -921,6 +928,8 @@ impl PurposeTokenValidation {
 pub struct IssuedPurposeToken {
     /// Raw signed JWT.
     pub token: String,
+    /// Unique token id carried in the `jti` claim.
+    pub token_id: Uuid,
     /// Token subject.
     pub subject: String,
     /// Purpose claim.
@@ -941,6 +950,7 @@ impl fmt::Debug for IssuedPurposeToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IssuedPurposeToken")
             .field("token", &"[redacted]")
+            .field("token_id", &self.token_id)
             .field("subject", &self.subject)
             .field("purpose", &self.purpose)
             .field("audience", &self.audience)
@@ -955,6 +965,10 @@ impl fmt::Debug for IssuedPurposeToken {
 /// Validated short-lived purpose token.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VerifiedPurposeToken {
+    /// Token id from the `jti` claim; `None` only for tokens minted before
+    /// 0.27, which cannot be consumed.
+    #[serde(default)]
+    pub token_id: Option<Uuid>,
     /// Token subject.
     pub subject: String,
     /// Purpose claim.

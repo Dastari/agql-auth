@@ -12,6 +12,8 @@ use crate::prelude::*;
 
 #[derive(Serialize)]
 struct LegacyAccessTokenClaims {
+    typ: &'static str,
+    purpose: &'static str,
     sub: String,
     sid: String,
     roles: Vec<String>,
@@ -75,8 +77,11 @@ async fn empty_scopes_omit_both_claim_shapes() {
 
 #[tokio::test]
 async fn legacy_issuance_is_explicit_and_cannot_reject_its_own_shape() {
+    // Since 0.27 legacy issuance also needs the explicit legacy validation
+    // opt-in (the default rejects the legacy array).
     let config = AuthConfig::new(TEST_HS256_SECRET)
-        .with_access_token_scope_claim_format(AccessTokenScopeClaimFormat::LegacyArray);
+        .with_access_token_scope_claim_format(AccessTokenScopeClaimFormat::LegacyArray)
+        .with_legacy_scope_claims(LegacyScopeClaims::Accept);
     let auth = test_auth_service_with_config(config);
     let payload = auth
         .issue_verified_user_session_with_scopes(
@@ -114,10 +119,11 @@ async fn legacy_issuance_is_explicit_and_cannot_reject_its_own_shape() {
 
 #[test]
 fn standard_and_legacy_validation_is_bounded_and_conflicts_fail_closed() {
-    let accepting = test_auth_service(Default::default(), Default::default());
-    let rejecting = test_auth_service_with_config(
-        AuthConfig::new(TEST_HS256_SECRET).with_legacy_scope_claims(LegacyScopeClaims::Reject),
+    // Legacy acceptance is an explicit migration opt-in since 0.27.
+    let accepting = test_auth_service_with_config(
+        AuthConfig::new(TEST_HS256_SECRET).with_legacy_scope_claims(LegacyScopeClaims::Accept),
     );
+    let rejecting = test_auth_service(Default::default(), Default::default());
 
     let standard = signed_access_token(json!({"scope": "records.read records.write"}));
     assert_eq!(
@@ -239,6 +245,8 @@ fn legacy_access_tokens_without_scopes_decode_to_empty_scopes() {
     let token = encode(
         &Header::new(Algorithm::HS256),
         &LegacyAccessTokenClaims {
+            typ: "access",
+            purpose: "access_token",
             sub: "legacy-user".to_string(),
             sid: session_id.to_string(),
             roles: vec!["CatalogEditor".to_string()],
@@ -306,6 +314,8 @@ fn test_auth_service_with_config(
 fn signed_access_token(extra: JsonValue) -> String {
     let issued_at = OffsetDateTime::now_utc();
     let mut claims = json!({
+        "typ": "access",
+        "purpose": "access_token",
         "sub": "scope-user",
         "sid": uuid::Uuid::new_v4().to_string(),
         "roles": [],

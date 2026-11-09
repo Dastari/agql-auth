@@ -146,11 +146,22 @@ async fn rs256_validator_rejects_expired_and_wrong_purpose_tokens() {
     ));
 }
 
+// Changed in 0.27: tokens without `purpose` need the explicit legacy policy.
 #[test]
-fn validator_accepts_legacy_access_tokens_without_purpose() {
-    let validator = rs256_validator().build().unwrap();
+fn validator_accepts_legacy_access_tokens_without_purpose_only_when_opted_in() {
     let legacy = encode_rs256(access_claims_json(None));
+    assert!(matches!(
+        rs256_validator()
+            .build()
+            .unwrap()
+            .authenticate_access_token(&legacy),
+        Err(AuthError::InvalidAccessToken)
+    ));
 
+    let validator = rs256_validator()
+        .purpose_policy(PurposePolicy::AccessTokenOrLegacy)
+        .build()
+        .unwrap();
     let decoded = validator.authenticate_access_token(&legacy).unwrap();
 
     assert_eq!(decoded.user_id, "user-1");
@@ -218,9 +229,16 @@ async fn validator_injects_auth_runtime_and_rejects_bad_tokens() {
         "none"
     );
 
+    // Raw values need the explicit BearerOrRaw opt-in since 0.27.
     assert!(matches!(
         validator
             .inject_http_auth(Request::new("{ authSubject }"), Some("not-a-jwt"))
+            .unwrap_err(),
+        AuthError::InvalidBearerToken
+    ));
+    assert!(matches!(
+        validator
+            .inject_http_auth(Request::new("{ authSubject }"), Some("Bearer not-a-jwt"))
             .unwrap_err(),
         AuthError::InvalidAccessToken
     ));
@@ -318,7 +336,7 @@ fn access_claims_json(purpose: Option<&str>) -> JsonValue {
         "sub": "user-1",
         "sid": Uuid::new_v4().to_string(),
         "roles": ["Operator"],
-        "scopes": ["orders.read"],
+        "scope": "orders.read",
         "ctx": SessionContext::for_auth_method(AuthMethod::Password),
         "iss": "agql-auth",
         "aud": "agql-auth-clients",

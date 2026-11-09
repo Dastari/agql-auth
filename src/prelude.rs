@@ -15,7 +15,7 @@ pub use crate::assurance::{
 pub use crate::channel::ChannelIdentity;
 pub use crate::claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirements,
-    ConfirmationClaims, ExactOperationBinding,
+    ConfirmationClaims, ExactOperationBinding, PresentedConfirmation,
 };
 pub use crate::client_auth::{
     ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner, TokenEndpointAuthMethod,
@@ -24,7 +24,7 @@ pub use crate::clock::{Clock, FixedClock, SystemClock};
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
-    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
+    ClientMetadata, JwtSigningConfig, JwtVerificationKey, LegacyScopeClaims, MicrosoftEntraConfig,
     MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
 };
 pub use crate::decision::{
@@ -101,7 +101,8 @@ pub use crate::session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionCo
 pub use crate::stores::{
     AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,
     LoginChallengeStore, MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
+    PasswordResetTokenStore, PurposeTokenReplayStore, RefreshTokenStore, TotpReplayStore,
+    UserStore,
 };
 pub use crate::token_decode::{
     BearerParseMode, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH, MAX_ACCESS_TOKEN_SCOPE_LENGTH,

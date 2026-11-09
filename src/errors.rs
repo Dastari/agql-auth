@@ -31,6 +31,8 @@ pub enum AuthError {
     InvalidPurposeToken,
     /// Purpose token is expired.
     PurposeTokenExpired,
+    /// A single-use purpose token was consumed more than once.
+    PurposeTokenReplayed,
     /// API token failed validation.
     InvalidApiToken,
     /// API token is expired.
@@ -154,6 +156,7 @@ impl AuthError {
             AuthError::TokenRevoked => "TOKEN_REVOKED",
             AuthError::InvalidPurposeToken => "INVALID_PURPOSE_TOKEN",
             AuthError::PurposeTokenExpired => "PURPOSE_TOKEN_EXPIRED",
+            AuthError::PurposeTokenReplayed => "PURPOSE_TOKEN_REPLAYED",
             AuthError::InvalidApiToken => "INVALID_API_TOKEN",
             AuthError::ApiTokenExpired => "API_TOKEN_EXPIRED",
             AuthError::ApiTokenRevoked => "TOKEN_REVOKED",
@@ -218,6 +221,7 @@ impl AuthError {
             AuthError::TokenRevoked => "token revoked",
             AuthError::InvalidPurposeToken => "invalid purpose token",
             AuthError::PurposeTokenExpired => "purpose token expired",
+            AuthError::PurposeTokenReplayed => "purpose token replay detected",
             AuthError::InvalidApiToken => "invalid api token",
             AuthError::ApiTokenExpired => "api token expired",
             AuthError::ApiTokenRevoked => "token revoked",
@@ -326,6 +330,7 @@ impl fmt::Display for AuthErrorDiagnostic<'_> {
             AuthError::TokenRevoked => f.write_str("token revoked"),
             AuthError::InvalidPurposeToken => f.write_str("invalid purpose token"),
             AuthError::PurposeTokenExpired => f.write_str("purpose token expired"),
+            AuthError::PurposeTokenReplayed => f.write_str("purpose token replay detected"),
             AuthError::InvalidApiToken => f.write_str("invalid api token"),
             AuthError::ApiTokenExpired => f.write_str("api token expired"),
             AuthError::ApiTokenRevoked => f.write_str("api token revoked"),

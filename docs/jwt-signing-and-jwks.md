@@ -62,7 +62,8 @@ RS256 behavior:
 - issuer, audience, expiry, roles, scope values, and session claims are
   independent of the signing algorithm
 - incoming token headers must match the configured algorithm
-- incoming RS256 tokens must contain the expected `kid`
+- incoming RS256 tokens must contain the signing `kid` or the `kid` of a
+  configured previous verification key
 
 The service parses and validates key material during `AuthService::new`, so
 invalid PEM, empty key IDs, and mismatched keys fail fast.
@@ -96,7 +97,10 @@ For RS256, `auth.jwks()` returns:
 }
 ```
 
-No private key fields are included.
+No private key fields are included. With
+`AuthConfig::previous_verification_keys` configured, the document lists the
+current signing key first and then each previous key, each with its own `kid`;
+see [Key rotation](key-rotation.md#rotating-the-issuers-signing-key).
 
 For HS256, JWKS export returns `AuthError::JwksUnsupported`. A symmetric secret
 is not public key material and should not be exposed as JWKS.
@@ -151,11 +155,10 @@ For router or external-service validation:
 - keep the private key only in the auth service
 - expose only the public JWKS document
 - configure routers with issuer, audience, algorithm, and JWKS URL
-- rotate keys by changing `kid`
+- rotate keys by changing `kid`, keeping the old public key as a
+  verification-only previous key until its tokens expire
 
-This version exposes one active RS256 public key. During future multi-key
-rotation support, publish both old and new public keys while old tokens can
-still be valid.
+See [Key rotation](key-rotation.md) for the overlap procedure.
 
 ## Claims Shape
 
@@ -180,9 +183,11 @@ after every old access token has expired. See
 separate and continue using their `scopes` array.
 
 `0.6.0` added `typ = "access"` and `purpose = "access_token"` to newly issued
-access tokens. Validation accepts legacy `0.5.x` access tokens that do not
-contain those claims, but rejects any token whose `typ` or `purpose` is present
-and not the access-token value.
+access tokens, and every access token issued since carries both. Since 0.27
+`AuthService` and the default `AccessTokenValidator` require both claims. A
+resource server that must still accept `0.5.x` tokens opts in with
+`PurposePolicy::AccessTokenOrLegacy`, which accepts a missing `typ` or
+`purpose` but still rejects any other value.
 
 Access tokens are stateless and remain valid until `exp`, even after logout or
 refresh-token-family revocation. Keep access-token TTLs short, and use the
@@ -197,6 +202,7 @@ configured HS256 or RS256 key material but are structurally separated from
 access tokens:
 
 - `typ = "purpose_token"`
+- a random `jti`, returned as `IssuedPurposeToken::token_id`
 - exact `purpose` validation
 - exact `aud` validation chosen by the caller
 - optional `sid`, `scopes`, and custom flattened claims
@@ -226,7 +232,29 @@ let verified = auth.authenticate_purpose_token(
 
 Do not validate purpose tokens with `authenticate_access_token`; access-token
 validation rejects `typ = "purpose_token"`. Custom claims may not use reserved
-claim names such as `sub`, `aud`, `exp`, `typ`, or `purpose`.
+claim names such as `sub`, `aud`, `exp`, `typ`, `jti`, or `purpose`.
+
+### Replay
+
+A purpose token is a bearer credential. `authenticate_purpose_token` is
+stateless: anyone holding the token can present it again until `exp`. Where a
+grant must be used once, consume it through a `PurposeTokenReplayStore`:
+
+```rust
+let verified = auth
+    .consume_purpose_token(
+        &token,
+        PurposeTokenValidation::new("capture_upload", "capture-upload-clients"),
+        &replay_store,
+    )
+    .await?;
+```
+
+The store must insert the `jti` atomically (insert-if-absent) and keep it until
+the token's expiry; a second consume returns `PurposeTokenReplayed`
+(`PURPOSE_TOKEN_REPLAYED`), and a store error fails closed. Purpose tokens
+minted before 0.27 have no `jti`; they still pass `authenticate_purpose_token`
+(with `token_id = None`) but cannot be consumed. Keep TTLs short either way.
 
 ## Access-Token-Only Grants
 
@@ -253,12 +281,6 @@ access token. It cannot be refreshed.
 
 ## RSA Advisory Note
 
-This crate currently depends on `rsa` to parse RSA public keys for JWKS
-modulus/exponent extraction. The known Marvin advisory for `rsa 0.9` is about
-private-key timing side channels; `agql-auth` directly uses it for public-key
-parsing/JWKS export, while signing and verification are handled by
-`jsonwebtoken`.
-
-Downstream `cargo audit` may still flag the dependency. Future work is to
-evaluate replacing the direct `rsa` usage with lower-level DER/SPKI parsing or
-a patched alternative.
+JWKS export uses `jsonwebtoken`'s own JWK conversion; the crate has no direct
+`rsa` dependency. Advisories that remain through `jsonwebtoken`'s backend are
+recorded in [Dependency advisories](dependency-advisories.md).

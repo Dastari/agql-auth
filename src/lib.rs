@@ -157,7 +157,7 @@ pub use assurance::{
 pub use channel::ChannelIdentity;
 pub use claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirementError,
-    ClaimRequirements, ConfirmationClaims, ExactOperationBinding,
+    ClaimRequirements, ConfirmationClaims, ExactOperationBinding, PresentedConfirmation,
 };
 pub use client_auth::{
     CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner,
@@ -168,8 +168,9 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
-    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    ClientMetadata, JwtSigningConfig, JwtVerificationKey, LegacyScopeClaims,
+    MAX_PREVIOUS_VERIFICATION_KEYS, MicrosoftEntraConfig, MicrosoftEntraTenant, OAuthResponseMode,
+    OidcProviderConfig, OidcProviderKind,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -250,7 +251,8 @@ pub use session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use stores::{
     AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,
     LoginChallengeStore, MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
+    PasswordResetTokenStore, PurposeTokenReplayStore, RefreshTokenStore, TotpReplayStore,
+    UserStore,
 };
 pub use token_decode::{
     BearerParseMode, MAX_ACCESS_TOKEN_AUTHORIZATION_ROLE_LENGTH,
