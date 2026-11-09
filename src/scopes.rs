@@ -14,11 +14,14 @@ where
 }
 
 /// Returns `true` when all required scopes are present.
+///
+/// An empty requirement list is a configuration mistake and returns `false`.
 pub fn has_all_scopes<S>(scopes: &[String], required: &[S]) -> bool
 where
     S: AsRef<str>,
 {
-    required
-        .iter()
-        .all(|scope| has_scope(scopes, scope.as_ref()))
+    !required.is_empty()
+        && required
+            .iter()
+            .all(|scope| has_scope(scopes, scope.as_ref()))
 }

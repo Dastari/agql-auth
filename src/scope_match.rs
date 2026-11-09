@@ -19,8 +19,11 @@ pub trait ScopeMatch: Send + Sync + std::fmt::Debug {
     }
 
     /// Returns `true` when every required scope is satisfied.
+    ///
+    /// An empty requirement list is a configuration mistake and returns
+    /// `false`.
     fn has_all_scopes(&self, granted: &[String], required: &[&str]) -> bool {
-        required.iter().all(|scope| self.has_scope(granted, scope))
+        !required.is_empty() && required.iter().all(|scope| self.has_scope(granted, scope))
     }
 }
 
@@ -42,8 +45,8 @@ pub struct HierarchicalScopeOptions {
     pub separator: char,
     /// Wildcard segment/string. Defaults to `"*"`.
     pub wildcard: String,
-    /// When `true`, a trailing wildcard uses the multi-segment prefix behavior.
-    /// When `false`, a trailing wildcard consumes one remaining segment.
+    /// When `true`, a trailing wildcard segment consumes one or more remaining
+    /// segments. When `false`, it consumes exactly one remaining segment.
     pub wildcard_matches_multi_segment: bool,
     /// When `true`, a granted scope equal to the bare wildcard satisfies every
     /// requirement. Defaults to `false` so bare `*` has no implicit meaning.
@@ -212,10 +215,14 @@ impl std::fmt::Display for HierarchicalScopeValidationWarning {
 
 /// Hierarchical/wildcard scope matcher.
 ///
-/// With default options this preserves the legacy raw trailing-wildcard
-/// behavior captured by the crate's golden vectors: wildcards live only in the
-/// granted scope, a trailing wildcard is a raw prefix match, and interior
-/// wildcard segments match exactly one segment with equal segment counts.
+/// Wildcards live only in the granted scope and only as whole segments. A
+/// trailing wildcard segment (`orders.*`) matches one or more further
+/// non-empty segments (exactly one when
+/// [`HierarchicalScopeOptions::wildcard_matches_multi_segment`] is `false`)
+/// after literally equal prefix segments, so `tenant.1.*` never covers
+/// `tenant.10.read`. Interior wildcard segments match exactly one segment with
+/// equal segment counts. A wildcard inside a segment (`tenant.1*`) has no
+/// wildcard meaning. The crate's golden vectors pin these rules.
 #[derive(Debug, Clone)]
 pub struct HierarchicalScopeMatch {
     options: HierarchicalScopeOptions,
@@ -318,25 +325,30 @@ impl HierarchicalScopeMatch {
             return self.options.allow_universal_wildcard;
         }
 
-        if granted.ends_with(&self.options.wildcard) {
-            let prefix = &granted[..granted.len() - self.options.wildcard.len()];
-            // Bare multi-segment trailing wildcard: "orders.*"
-            // Reject empty prefix (already handled as universal above).
-            if prefix.is_empty() {
-                return self.options.allow_universal_wildcard;
-            }
-            if self.options.wildcard_matches_multi_segment {
-                return required.starts_with(prefix);
-            }
-
-            let Some(rest) = required.strip_prefix(prefix) else {
-                return false;
-            };
-            return !rest.is_empty() && !rest.contains(self.options.separator);
-        }
-
         let granted_segments: Vec<&str> = granted.split(self.options.separator).collect();
         let required_segments: Vec<&str> = required.split(self.options.separator).collect();
+
+        // A trailing wildcard is a whole final segment ("orders.*"). Its
+        // prefix segments match literally, so "tenant.1.*" never covers
+        // "tenant.10.read". A wildcard inside a segment ("tenant.1*") has no
+        // wildcard meaning and matches only itself (handled above).
+        if let Some((last, prefix)) = granted_segments.split_last()
+            && *last == self.options.wildcard
+            && !prefix.is_empty()
+        {
+            let consumed = required_segments.get(prefix.len()..).unwrap_or_default();
+            let width_ok = if self.options.wildcard_matches_multi_segment {
+                !consumed.is_empty()
+            } else {
+                consumed.len() == 1
+            };
+            return width_ok
+                && consumed.iter().all(|segment| !segment.is_empty())
+                && prefix.iter().zip(required_segments.iter()).all(
+                    |(granted_segment, required_segment)| granted_segment == required_segment,
+                );
+        }
+
         // Middle wildcards are supported only as whole segments with equal counts.
         granted_segments.len() == required_segments.len()
             && granted_segments.iter().zip(required_segments.iter()).all(
