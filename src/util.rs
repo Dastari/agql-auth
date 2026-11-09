@@ -13,6 +13,21 @@ use crate::{AuthError, AuthResult, LoginChallengeOptions, TotpOptions};
 
 type HmacSha1 = Hmac<Sha1>;
 
+/// Login-code length bounds: at least one million codes, at most twelve digits.
+pub(crate) const LOGIN_CHALLENGE_CODE_LENGTH: std::ops::RangeInclusive<usize> = 6..=12;
+/// Upper bound for admitted guesses against one login challenge.
+pub(crate) const MAX_LOGIN_CHALLENGE_ATTEMPTS: u32 = 10;
+/// TOTP period bounds in seconds.
+pub(crate) const TOTP_PERIOD_SECONDS: std::ops::RangeInclusive<u64> = 15..=300;
+/// Largest accepted number of TOTP steps before and after the current one.
+pub(crate) const MAX_TOTP_ALLOWED_SKEW: u64 = 2;
+/// Shortest TOTP secret accepted anywhere: the 128-bit minimum of RFC 4226.
+pub(crate) const MIN_TOTP_SECRET_BYTES: usize = 16;
+/// Shortest generated TOTP secret: the 160-bit length RFC 4226 recommends.
+pub(crate) const MIN_GENERATED_TOTP_SECRET_BYTES: usize = 20;
+/// Longest generated TOTP secret: the HMAC-SHA1 block size.
+pub(crate) const MAX_GENERATED_TOTP_SECRET_BYTES: usize = 64;
+
 /// Validates a trusted duration before constructing an expiry. All callers fail
 /// before signing or persisting a credential if the result is unrepresentable.
 pub(crate) fn checked_expiry(
@@ -123,16 +138,18 @@ pub(crate) fn map_purpose_token_decode_error(err: jsonwebtoken::errors::Error) -
 }
 
 pub(crate) fn validate_login_challenge_options(options: &LoginChallengeOptions) -> AuthResult<()> {
-    if options.code_length == 0 {
-        return Err(AuthError::InvalidConfiguration(
-            "login challenge code length must be greater than zero".to_string(),
-        ));
+    if !LOGIN_CHALLENGE_CODE_LENGTH.contains(&options.code_length) {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "login challenge code length must be between {} and {}",
+            LOGIN_CHALLENGE_CODE_LENGTH.start(),
+            LOGIN_CHALLENGE_CODE_LENGTH.end()
+        )));
     }
 
-    if options.max_attempts == 0 {
-        return Err(AuthError::InvalidConfiguration(
-            "login challenge max_attempts must be greater than zero".to_string(),
-        ));
+    if !(1..=MAX_LOGIN_CHALLENGE_ATTEMPTS).contains(&options.max_attempts) {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "login challenge max_attempts must be between 1 and {MAX_LOGIN_CHALLENGE_ATTEMPTS}"
+        )));
     }
 
     if options.ttl <= Duration::ZERO {
@@ -151,10 +168,18 @@ pub(crate) fn validate_totp_options(options: &TotpOptions) -> AuthResult<()> {
         ));
     }
 
-    if options.period_seconds == 0 {
-        return Err(AuthError::InvalidConfiguration(
-            "totp period must be greater than zero".to_string(),
-        ));
+    if !TOTP_PERIOD_SECONDS.contains(&options.period_seconds) {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "totp period must be between {} and {} seconds",
+            TOTP_PERIOD_SECONDS.start(),
+            TOTP_PERIOD_SECONDS.end()
+        )));
+    }
+
+    if options.allowed_skew > MAX_TOTP_ALLOWED_SKEW {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "totp allowed_skew must not exceed {MAX_TOTP_ALLOWED_SKEW}"
+        )));
     }
 
     Ok(())
@@ -241,8 +266,11 @@ pub(crate) fn generate_totp_code_for_step(
     ))
 }
 
+/// Decodes a stored TOTP secret, rejecting secrets shorter than 128 bits.
 pub(crate) fn decode_base32_secret(secret_base32: &str) -> AuthResult<Vec<u8>> {
     BASE32_NOPAD
         .decode(secret_base32.as_bytes())
-        .map_err(|_| AuthError::InvalidTotpSecret)
+        .ok()
+        .filter(|secret| secret.len() >= MIN_TOTP_SECRET_BYTES)
+        .ok_or(AuthError::InvalidTotpSecret)
 }

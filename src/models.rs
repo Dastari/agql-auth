@@ -1054,11 +1054,12 @@ impl StoredLoginChallenge {
 /// Options for a one-time login challenge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginChallengeOptions {
-    /// Numeric code length.
+    /// Numeric code length, 6 to 12 digits.
     pub code_length: usize,
     /// Challenge lifetime.
     pub ttl: Duration,
-    /// Maximum admitted verification attempts before rejecting further work.
+    /// Maximum admitted verification attempts before rejecting further work,
+    /// 1 to 10.
     pub max_attempts: u32,
     /// Optional delivery channel label.
     pub channel: Option<String>,
@@ -1150,11 +1151,11 @@ impl fmt::Debug for TotpProvisioning {
 /// TOTP generation and validation options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpOptions {
-    /// Number of digits in generated codes.
+    /// Number of digits in generated codes, 6 to 8.
     pub digits: u32,
-    /// TOTP period length in seconds.
+    /// TOTP period length, 15 to 300 seconds.
     pub period_seconds: u64,
-    /// Allowed number of time steps before and after the current step.
+    /// Allowed number of time steps before and after the current step, 0 to 2.
     pub allowed_skew: u64,
 }
 

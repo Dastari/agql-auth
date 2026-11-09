@@ -420,68 +420,71 @@ where
     }
 
     /// Performs password login and issues a local session.
-    /// Password work awaits the process-wide bounded pool; saturation returns
-    /// `AuthServiceUnavailable` without recording a bad credential.
     ///
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
-    /// Disabled accounts perform dummy password work and record a credential
-    /// failure before returning [`AuthError::UserDisabled`]. Active abuse
-    /// controls and store errors take precedence; disabled attempts never
-    /// clear counters or issue a session.
+    ///
+    /// Every admitted attempt is counted as a credential failure before any
+    /// password work. The principal bucket is the resolved local user ID when
+    /// the store finds an account, otherwise the normalized submitted
+    /// principal; the client bucket is the IP address. A store that cannot
+    /// record the attempt fails closed with `AuthServiceUnavailable` before
+    /// verification, so no outcome depends on the password. Success clears the
+    /// principal bucket and refunds only this attempt from the client bucket.
+    ///
+    /// Unknown principals and stored hashes this crate cannot verify perform
+    /// one dummy Argon2 verification and return
+    /// [`AuthError::InvalidCredentials`]. Disabled accounts verify their stored
+    /// hash and return [`AuthError::UserDisabled`] only for the correct
+    /// password; that attempt stays counted, never clears counters and never
+    /// issues a session. Password work awaits the process-wide bounded pool;
+    /// saturation returns `AuthServiceUnavailable` and refunds the attempt,
+    /// because no password was checked.
     pub async fn login(
         &self,
         principal: &str,
         password: &str,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
-        let rate_limit_keys =
-            self.rate_limit_keys(AuthRateLimitFlow::PasswordLogin, Some(principal), &metadata);
-        let rate_limit_permit = self
-            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let policy = &self.config.rate_limits.credential;
+        let user = self.user_store.find_user_by_principal(principal).await?;
+        let rate_limit_keys = self.password_login_rate_limit_keys(
+            principal,
+            user.as_ref().map(|user| user.id.as_str()),
+            &metadata,
+        );
+        let reservation = self
+            .reserve_rate_limit_attempt(policy, &rate_limit_keys)
             .await?;
 
-        let Some(user) = self.user_store.find_user_by_principal(principal).await? else {
-            match self
-                .verify_password_async(password, DUMMY_PASSWORD_HASH)
-                .await
-            {
-                Ok(()) | Err(AuthError::InvalidCredentials) => {}
-                Err(error) => return Err(error),
+        // Unknown accounts and unverifiable stored hashes use the same fixed
+        // dummy work as a real verification, independent of the password.
+        let user = user.filter(|user| is_verifiable_password_hash(&user.password_hash));
+        let verified = self
+            .verify_password_async(
+                password,
+                user.as_ref()
+                    .map_or(DUMMY_PASSWORD_HASH, |user| user.password_hash.as_str()),
+            )
+            .await;
+        match verified {
+            Ok(()) => {}
+            Err(AuthError::AuthServiceUnavailable) => {
+                self.refund_rate_limit_reservation(policy, reservation)
+                    .await?;
+                return Err(AuthError::AuthServiceUnavailable);
             }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            // The reservation already counts this failure.
+            Err(_) => return Err(AuthError::InvalidCredentials),
+        }
+        let Some(user) = user else {
             return Err(AuthError::InvalidCredentials);
         };
-
         if user.disabled {
-            // Disabled accounts cannot authenticate. Use the same fixed work as
-            // unknown accounts, independent of their stored hash or password.
-            match self
-                .verify_password_async(password, DUMMY_PASSWORD_HASH)
-                .await
-            {
-                Ok(()) | Err(AuthError::InvalidCredentials) => {}
-                Err(error) => return Err(error),
-            }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            // Proven password, still a counted failure: never clear or issue.
             return Err(AuthError::UserDisabled);
         }
-
-        if let Err(err) = self
-            .verify_password_async(password, &user.password_hash)
-            .await
-        {
-            if matches!(err, AuthError::AuthServiceUnavailable) {
-                return Err(err);
-            }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
-            return Err(err);
-        }
-        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
-            .await?;
+        self.settle_rate_limit_success(policy, reservation).await?;
 
         // Queueing and counter-store awaits can outlive the original user
         // snapshot. Observe current authority immediately before session creation.
@@ -1804,7 +1807,9 @@ where
     /// process it.
     ///
     /// `Ok(false)` means the request was throttled or locked and the host
-    /// should preserve silent-success semantics without sending email.
+    /// should preserve silent-success semantics without sending email. The
+    /// request is recorded only when the principal and client buckets both
+    /// admit it, so a throttled client leaves the principal untouched.
     pub async fn should_process_password_reset_request(
         &self,
         principal: &str,
@@ -1817,7 +1822,9 @@ where
     /// Records a login-code request and returns whether the host should process it.
     ///
     /// `Ok(false)` means the request was throttled or locked and the host
-    /// should preserve silent-success semantics without sending email.
+    /// should preserve silent-success semantics without sending email. The
+    /// request is recorded only when the principal and client buckets both
+    /// admit it, so a throttled client leaves the principal untouched.
     pub async fn should_process_login_code_request(
         &self,
         principal: &str,
@@ -1862,6 +1869,24 @@ where
         {
             keys.push(rate_limit_key(flow, AuthRateLimitBucket::Client, &client));
         }
+        keys
+    }
+
+    /// Password-login keys. A resolved account is counted by its stable local
+    /// user ID, so every spelling or alias the user store accepts shares one
+    /// budget; an unknown principal is counted by its normalized input.
+    pub(super) fn password_login_rate_limit_keys(
+        &self,
+        principal: &str,
+        user_id: Option<&str>,
+        metadata: &ClientMetadata,
+    ) -> Vec<AuthRateLimitKey> {
+        let flow = AuthRateLimitFlow::PasswordLogin;
+        let Some(user_id) = user_id else {
+            return self.rate_limit_keys(flow, Some(principal), metadata);
+        };
+        let mut keys = self.rate_limit_keys(flow.clone(), None, metadata);
+        keys.insert(0, account_rate_limit_key(flow, user_id));
         keys
     }
 
@@ -1922,6 +1947,10 @@ where
         Ok(RateLimitPermit { observations })
     }
 
+    /// Records one credential failure for every key after verification.
+    ///
+    /// Only flows without a guessable secret use this; credential checks
+    /// reserve their attempt with [`Self::reserve_rate_limit_attempt`] first.
     pub(super) async fn record_rate_limit_attempt(
         &self,
         policy: &AuthRateLimitPolicy,
@@ -1937,8 +1966,8 @@ where
                 .record_rate_limit_attempt_for_key(policy, key, now, false)
                 .await?
             {
-                RateLimitRecordOutcome::Recorded => {}
-                RateLimitRecordOutcome::Denied => {
+                RateLimitRecordOutcome::Recorded(_) => {}
+                RateLimitRecordOutcome::Denied(_) => {
                     return Err(AuthError::Store(
                         "credential failure recording was unexpectedly denied".to_string(),
                     ));
@@ -1949,26 +1978,158 @@ where
         Ok(())
     }
 
+    /// Counts one attempt against every key before the caller verifies anything.
+    ///
+    /// Every key is evaluated before any is recorded. Each record is an atomic
+    /// compare-and-swap that rechecks backoff and lockout against the state it
+    /// replaces, so concurrent callers cannot share the last admitted attempt.
+    /// If a key denies or cannot be recorded, keys this call already recorded
+    /// are refunded and the denial or store error is returned. The reservation
+    /// stays counted as a failure unless the caller settles or refunds it.
+    pub(super) async fn reserve_rate_limit_attempt(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<RateLimitReservation> {
+        let mut reservation = RateLimitReservation::default();
+        if !policy.enabled || keys.is_empty() {
+            return Ok(reservation);
+        }
+        self.reject_if_rate_limited(policy, keys).await?;
+
+        let now = self.rate_limit_clock.now();
+        for key in keys {
+            let denial = match self
+                .record_rate_limit_attempt_for_key(policy, key, now, true)
+                .await
+            {
+                Ok(RateLimitRecordOutcome::Recorded(record)) => {
+                    reservation.records.push(*record);
+                    continue;
+                }
+                Ok(RateLimitRecordOutcome::Denied(denial)) => denial,
+                Err(error) => error,
+            };
+            // The denial or store error is the outcome; a failed refund only
+            // leaves a safe over-count.
+            let _ = self
+                .refund_rate_limit_reservation(policy, reservation)
+                .await;
+            return Err(denial);
+        }
+        Ok(reservation)
+    }
+
+    /// Completes a successful reserved attempt.
+    ///
+    /// Principal buckets are cleared when nothing else was recorded since the
+    /// reservation, otherwise only this attempt is refunded. Client buckets
+    /// are shared by every principal behind one address, so a success only
+    /// refunds its own attempt and leaves other failures counted.
+    pub(super) async fn settle_rate_limit_success(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        reservation: RateLimitReservation,
+    ) -> AuthResult<()> {
+        for record in &reservation.records {
+            if record.key.bucket == AuthRateLimitBucket::Principal
+                && self
+                    .rate_limit_store
+                    .clear_auth_rate_limit_state(&record.key, Some(record.written.revision))
+                    .await?
+            {
+                continue;
+            }
+            self.refund_rate_limit_record(policy, record).await?;
+        }
+        Ok(())
+    }
+
+    /// Removes a reserved attempt that verified nothing, such as when password
+    /// work could not be admitted or host input was invalid.
+    pub(super) async fn refund_rate_limit_reservation(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        reservation: RateLimitReservation,
+    ) -> AuthResult<()> {
+        let mut result = Ok(());
+        for record in reservation.records.iter().rev() {
+            if let Err(error) = self.refund_rate_limit_record(policy, record).await {
+                result = result.and(Err(error));
+            }
+        }
+        result
+    }
+
+    async fn refund_rate_limit_record(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        record: &RateLimitRecord,
+    ) -> AuthResult<()> {
+        for _ in 0..MAX_RATE_LIMIT_CAS_RETRIES {
+            let Some(current) = self
+                .rate_limit_store
+                .find_auth_rate_limit_state(&record.key)
+                .await?
+            else {
+                return Ok(());
+            };
+            let now = self.rate_limit_clock.now();
+            let replacement = if current.revision == record.written.revision {
+                // Nothing was recorded since this attempt: restore what it replaced.
+                record
+                    .previous
+                    .clone()
+                    .filter(|previous| previous.expires_at > now)
+            } else if current.state.expires_at <= now
+                || current.state.first_attempt_at != record.written.state.first_attempt_at
+            {
+                // The window this attempt was counted in has ended.
+                return Ok(());
+            } else {
+                refunded_rate_limit_state(&current.state, policy)
+            };
+            let applied = match replacement {
+                Some(state) => {
+                    self.rate_limit_store
+                        .compare_exchange_auth_rate_limit_state(
+                            &record.key,
+                            Some(current.revision),
+                            AuthRateLimitSnapshot {
+                                state,
+                                revision: Uuid::new_v4(),
+                            },
+                        )
+                        .await?
+                }
+                None => {
+                    self.rate_limit_store
+                        .clear_auth_rate_limit_state(&record.key, Some(current.revision))
+                        .await?
+                }
+            };
+            if applied {
+                return Ok(());
+            }
+        }
+
+        Err(AuthError::Store(
+            "rate-limit refund compare-and-swap retry limit exceeded".to_string(),
+        ))
+    }
+
+    /// Admits a request only when every key allows it, then records it
+    /// against every key.
     async fn record_rate_limit_request_if_allowed(
         &self,
         policy: &AuthRateLimitPolicy,
         keys: &[AuthRateLimitKey],
     ) -> AuthResult<bool> {
-        if !policy.enabled || keys.is_empty() {
-            return Ok(true);
+        match self.reserve_rate_limit_attempt(policy, keys).await {
+            Ok(_) => Ok(true),
+            Err(AuthError::AuthLocked { .. } | AuthError::AuthThrottled { .. }) => Ok(false),
+            Err(error) => Err(error),
         }
-
-        let now = self.rate_limit_clock.now();
-        for key in keys {
-            if matches!(
-                self.record_rate_limit_attempt_for_key(policy, key, now, true)
-                    .await?,
-                RateLimitRecordOutcome::Denied
-            ) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     async fn record_rate_limit_attempt_for_key(
@@ -1985,15 +2146,16 @@ where
                 .await?;
 
             if enforce_before_record
-                && current
+                && let Some(denial) = current
                     .as_ref()
-                    .is_some_and(|snapshot| active_rate_limit_error(&snapshot.state, now).is_some())
+                    .and_then(|snapshot| active_rate_limit_error(&snapshot.state, now))
             {
-                return Ok(RateLimitRecordOutcome::Denied);
+                return Ok(RateLimitRecordOutcome::Denied(denial));
             }
 
             let expected_revision = current.as_ref().map(|snapshot| snapshot.revision);
             let current_state = current.map(|snapshot| snapshot.state);
+            let previous = current_state.clone().filter(|state| state.expires_at > now);
             let next = next_rate_limit_state(key.clone(), current_state, policy, now)?;
             let replacement = AuthRateLimitSnapshot {
                 state: next,
@@ -2001,10 +2163,16 @@ where
             };
             if self
                 .rate_limit_store
-                .compare_exchange_auth_rate_limit_state(key, expected_revision, replacement)
+                .compare_exchange_auth_rate_limit_state(key, expected_revision, replacement.clone())
                 .await?
             {
-                return Ok(RateLimitRecordOutcome::Recorded);
+                return Ok(RateLimitRecordOutcome::Recorded(Box::new(
+                    RateLimitRecord {
+                        key: key.clone(),
+                        previous,
+                        written: replacement,
+                    },
+                )));
             }
         }
 
@@ -2013,6 +2181,10 @@ where
         ))
     }
 
+    /// Clears the principal buckets observed by `permit` after a success.
+    ///
+    /// Client buckets are left untouched: one principal's success must not
+    /// erase failures other principals recorded from the same address.
     pub(super) async fn clear_rate_limit_attempts(
         &self,
         policy: &AuthRateLimitPolicy,
@@ -2022,7 +2194,11 @@ where
             return Ok(());
         }
 
-        for observation in &permit.observations {
+        for observation in permit
+            .observations
+            .iter()
+            .filter(|observation| observation.key.bucket == AuthRateLimitBucket::Principal)
+        {
             let _cleared = self
                 .rate_limit_store
                 .clear_auth_rate_limit_state(&observation.key, observation.revision)
@@ -2043,9 +2219,66 @@ struct RateLimitObservation {
     revision: Option<Uuid>,
 }
 
+/// Attempts counted before verification. Dropping it keeps them counted as
+/// failures; settle it on success or refund it when nothing was verified.
+#[derive(Default)]
+#[must_use = "a reservation is settled on success or refunded when nothing was verified"]
+pub(super) struct RateLimitReservation {
+    records: Vec<RateLimitRecord>,
+}
+
+struct RateLimitRecord {
+    key: AuthRateLimitKey,
+    /// Unexpired state this attempt replaced.
+    previous: Option<AuthRateLimitState>,
+    written: AuthRateLimitSnapshot,
+}
+
 enum RateLimitRecordOutcome {
-    Recorded,
-    Denied,
+    Recorded(Box<RateLimitRecord>),
+    Denied(AuthError),
+}
+
+/// One attempt fewer in the same window, with thresholds recomputed downward.
+/// Backoff or lockout set by a later attempt stays while its count holds.
+fn refunded_rate_limit_state(
+    state: &AuthRateLimitState,
+    policy: &AuthRateLimitPolicy,
+) -> Option<AuthRateLimitState> {
+    let attempts = state.attempts.saturating_sub(1);
+    if attempts == 0 {
+        return None;
+    }
+    let mut state = state.clone();
+    state.attempts = attempts;
+    if attempts < policy.max_attempts_before_lockout {
+        state.locked_until = None;
+    }
+    if attempts < policy.backoff_after_attempts {
+        state.backoff_until = None;
+    }
+    Some(state)
+}
+
+/// Whether Argon2 verification of `hash` performs real work. Anything else
+/// (unparsable, another algorithm, invalid parameters or salt) would fail
+/// fast and reveal the stored state, so login verifies the dummy hash instead.
+fn is_verifiable_password_hash(hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    let mut salt = [0u8; 64];
+    argon2::Algorithm::try_from(parsed.algorithm).is_ok()
+        && parsed
+            .version
+            .is_none_or(|version| argon2::Version::try_from(version).is_ok())
+        && argon2::Params::try_from(&parsed).is_ok()
+        && parsed.hash.is_some()
+        && parsed.salt.is_some_and(|value| {
+            value
+                .decode_b64(&mut salt)
+                .is_ok_and(|bytes| bytes.len() >= argon2::MIN_SALT_LEN)
+        })
 }
 
 fn active_rate_limit_error(state: &AuthRateLimitState, now: OffsetDateTime) -> Option<AuthError> {
@@ -2073,6 +2306,16 @@ fn normalize_principal_bucket(value: &str) -> Option<String> {
 fn normalize_client_bucket(value: &str) -> Option<String> {
     let normalized = value.trim().to_string();
     (!normalized.is_empty()).then_some(normalized)
+}
+
+/// Account keys hash an `account` segment that the `principal` form never
+/// produces, so no submitted principal collides with a user ID.
+fn account_rate_limit_key(flow: AuthRateLimitFlow, user_id: &str) -> AuthRateLimitKey {
+    AuthRateLimitKey {
+        value_hash: hash_rate_limit_value(&format!("{}:account:{user_id}", flow.as_str())),
+        flow,
+        bucket: AuthRateLimitBucket::Principal,
+    }
 }
 
 fn rate_limit_key(

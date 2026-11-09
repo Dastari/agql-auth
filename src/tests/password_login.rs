@@ -52,12 +52,9 @@ fn metadata() -> ClientMetadata {
     }
 }
 
-fn keys(auth: &Service, principal: &str) -> Vec<AuthRateLimitKey> {
-    let keys = auth.rate_limit_keys(
-        AuthRateLimitFlow::PasswordLogin,
-        Some(principal),
-        &metadata(),
-    );
+/// Principal and client keys; a known principal counts against its user ID.
+fn keys(auth: &Service, principal: &str, user_id: Option<&str>) -> Vec<AuthRateLimitKey> {
+    let keys = auth.password_login_rate_limit_keys(principal, user_id, &metadata());
     assert_eq!(keys.len(), 2);
     keys
 }
@@ -93,9 +90,15 @@ pub(super) async fn rejection_contract<S: AuthRateLimitStore + 'static>(store: A
     for (case, disabled, password, code) in [
         ("unknown", false, "wrong", "INVALID_CREDENTIALS"),
         ("enabled", false, "wrong", "INVALID_CREDENTIALS"),
-        ("disabled-wrong", true, "wrong", "USER_DISABLED"),
+        // Disabled state is revealed only with proof of the stored password.
+        ("disabled-wrong", true, "wrong", "INVALID_CREDENTIALS"),
         ("disabled-correct", true, "correct", "USER_DISABLED"),
-        ("disabled-corrupt-hash", true, "correct", "USER_DISABLED"),
+        (
+            "disabled-corrupt-hash",
+            true,
+            "correct",
+            "INVALID_CREDENTIALS",
+        ),
     ] {
         let users = MemoryUserStore::default();
         let refresh = MemoryRefreshTokenStore::default();
@@ -118,7 +121,7 @@ pub(super) async fn rejection_contract<S: AuthRateLimitStore + 'static>(store: A
             }
             users.insert(user);
         }
-        let keys = keys(&auth, &principal);
+        let keys = keys(&auth, &principal, (case != "unknown").then_some(case));
         // Separate client keys between cases without changing configured controls.
         for key in &keys {
             let current = store.find_auth_rate_limit_state(key).await.unwrap();
@@ -227,7 +230,7 @@ pub(super) async fn success_contract<S: AuthRateLimitStore + 'static>(store: Arc
             .public_code(),
         "USER_DISABLED"
     );
-    let keys = keys(&auth, &user.principal);
+    let keys = keys(&auth, &user.principal, Some(&user.id));
     assert_attempts(&*store, &keys, 1).await;
     assert_no_authority(&auth, &refresh);
     user.disabled = false;
@@ -236,15 +239,16 @@ pub(super) async fn success_contract<S: AuthRateLimitStore + 'static>(store: Arc
         .login(&user.principal, "correct", metadata())
         .await
         .unwrap();
-    for key in keys {
-        assert!(
-            store
-                .find_auth_rate_limit_state(&key)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
+    // Success clears the principal and refunds only its own client attempt:
+    // the earlier disabled failure from this client stays counted.
+    assert!(
+        store
+            .find_auth_rate_limit_state(&keys[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_attempts(&*store, &keys[1..], 1).await;
     assert_eq!(
         auth.authenticate_access_token(&payload.access_token)
             .unwrap()
@@ -338,7 +342,7 @@ pub(super) async fn concurrent_contract<S: AuthRateLimitStore + 'static>(store: 
             user.disabled = case == "disabled";
             users.insert(user);
         }
-        let keys = keys(&first, &principal);
+        let keys = keys(&first, &principal, (case != "unknown").then_some(case));
         // Shared client counts are reset between independent scenarios.
         for key in &keys {
             if let Some(snapshot) = store.find_auth_rate_limit_state(key).await.unwrap() {
@@ -364,14 +368,7 @@ pub(super) async fn concurrent_contract<S: AuthRateLimitStore + 'static>(store: 
         }
         for task in tasks {
             let error = task.await.unwrap().unwrap_err();
-            assert_eq!(
-                error.public_code(),
-                if case == "disabled" {
-                    "USER_DISABLED"
-                } else {
-                    "INVALID_CREDENTIALS"
-                }
-            );
+            assert_eq!(error.public_code(), "INVALID_CREDENTIALS");
         }
         assert_attempts(&*store, &keys, ATTEMPTS as u32).await;
         assert!(store.conflicts.load(Ordering::SeqCst) >= ATTEMPTS - 1);
@@ -480,7 +477,7 @@ pub(super) async fn clear_order_contract<S: AuthRateLimitStore + 'static>(inner:
     store.resume.notify_one();
     success.await.unwrap().unwrap();
     // The later disabled failure survives the stale shared-client clear.
-    let enabled_keys = keys(&first, &user.principal);
+    let enabled_keys = keys(&first, &user.principal, Some(&user.id));
     assert!(
         store
             .find_auth_rate_limit_state(&enabled_keys[0])
@@ -500,7 +497,7 @@ pub(super) async fn clear_order_contract<S: AuthRateLimitStore + 'static>(inner:
     );
     assert_eq!(
         store
-            .find_auth_rate_limit_state(&keys(&second, &disabled.principal)[0])
+            .find_auth_rate_limit_state(&keys(&second, &disabled.principal, Some(&disabled.id))[0])
             .await
             .unwrap()
             .unwrap()
@@ -529,7 +526,7 @@ pub(super) async fn store_contract<S: AuthRateLimitStore + 'static>(store: Arc<S
         Arc::new(FixedClock::new(now)),
         policy(),
     );
-    let keys = keys(&auth, "expired@example.com");
+    let keys = keys(&auth, "expired@example.com", None);
     for key in &keys {
         let snapshot = AuthRateLimitSnapshot {
             revision: Uuid::new_v4(),
@@ -725,7 +722,8 @@ async fn rejection_store_errors_are_safe_and_issue_no_authority() {
                 .unwrap()
                 .contains("private backend failure")
         );
-        assert_eq!(auth.password_work.lock().unwrap().len(), 1);
+        // The attempt is recorded before verification, so nothing was verified.
+        assert!(auth.password_work.lock().unwrap().is_empty());
         assert_no_authority(&auth, &refresh);
     }
 }
@@ -744,17 +742,21 @@ async fn disabled_work_and_public_error_are_preserved_without_rate_limits() {
     let mut user = stored_user(&auth, "disabled", "disabled@example.com", "correct");
     user.disabled = true;
     users.insert(user.clone());
-    for password in ["correct", "wrong"] {
+    // Disabled state needs proof of the password; a wrong one is ordinary.
+    for (password, code, message) in [
+        ("correct", "USER_DISABLED", "user is disabled"),
+        ("wrong", "INVALID_CREDENTIALS", "invalid credentials"),
+    ] {
         let error = auth
             .login(&user.principal, password, metadata())
             .await
             .unwrap_err();
-        assert_eq!(error.public_code(), "USER_DISABLED");
+        assert_eq!(error.public_code(), code);
         let graphql = error.extend();
-        assert_eq!(graphql.message, "user is disabled");
+        assert_eq!(graphql.message, message);
         assert_eq!(
             graphql.extensions.unwrap().get("code"),
-            Some(&async_graphql::Value::from("USER_DISABLED"))
+            Some(&async_graphql::Value::from(code))
         );
     }
     assert_eq!(auth.password_work.lock().unwrap().len(), 2);
@@ -810,7 +812,7 @@ pub(super) async fn independent_buckets_contract<S: AuthRateLimitStore + 'static
         AuthError::AuthThrottled { .. }
     ));
     assert_eq!(auth.password_work.lock().unwrap().len(), 2);
-    let disabled_keys = keys(&auth, &disabled.principal);
+    let disabled_keys = keys(&auth, &disabled.principal, Some(&disabled.id));
     assert_eq!(
         store
             .find_auth_rate_limit_state(&disabled_keys[0])
@@ -841,7 +843,7 @@ pub(super) async fn independent_buckets_contract<S: AuthRateLimitStore + 'static
             .await
             .unwrap_err()
             .public_code(),
-        "USER_DISABLED"
+        "INVALID_CREDENTIALS"
     );
     let third_client = ClientMetadata {
         ip_address: Some("192.0.2.9".into()),

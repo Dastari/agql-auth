@@ -1,3 +1,4 @@
+mod abuse_controls;
 mod api_tokens;
 mod assurance;
 mod auth_lifecycle;

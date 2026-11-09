@@ -303,7 +303,8 @@ async fn concurrent_insertions_share_one_capacity_boundary() {
 
 #[tokio::test]
 async fn capacity_failure_denies_request_admission_without_issuing_authority() {
-    let (store, clock) = store(1);
+    // Request flows may hold one of two entries: the client key cannot be added.
+    let (store, clock) = store(2);
     let refresh = MemoryRefreshTokenStore::default();
     let auth = AuthService::new_with_rate_limit_store_and_clock(
         AuthConfig::new(TEST_HS256_SECRET),
@@ -327,7 +328,7 @@ async fn capacity_failure_denies_request_admission_without_issuing_authority() {
     clock.advance_seconds(24 * 3600);
     assert_eq!(
         store.purge_expired().unwrap(),
-        1,
-        "the safe over-count from the first bucket remains until expiry"
+        0,
+        "the partially recorded principal bucket is refunded"
     );
 }

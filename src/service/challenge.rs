@@ -96,8 +96,8 @@ where
             Some(&challenge.principal),
             &metadata,
         );
-        let rate_limit_permit = self
-            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let policy = &self.config.rate_limits.credential;
+        self.reject_if_rate_limited(policy, &rate_limit_keys)
             .await?;
 
         let now = self.login_challenge_clock.now();
@@ -128,6 +128,10 @@ where
         if reserved.is_expired(self.login_challenge_clock.now()) {
             return Err(AuthError::LoginChallengeExpired);
         }
+        // Count the guess against principal and client before any code work.
+        let reservation = self
+            .reserve_rate_limit_attempt(policy, &rate_limit_keys)
+            .await?;
         let verified = self
             .verify_password_async_before(
                 code,
@@ -138,6 +142,9 @@ where
         // Password work and storage awaits can outlive the admission timestamp.
         let verified_at = self.login_challenge_clock.now();
         if reserved.is_expired(verified_at) {
+            // Expiry is the outcome whatever the code was.
+            self.refund_rate_limit_reservation(policy, reservation)
+                .await?;
             return Err(AuthError::LoginChallengeExpired);
         }
         if let Err(error) = verified {
@@ -145,10 +152,11 @@ where
                 error,
                 AuthError::AuthServiceUnavailable | AuthError::LoginChallengeExpired
             ) {
+                self.refund_rate_limit_reservation(policy, reservation)
+                    .await?;
                 return Err(error);
             }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            // The reservation already counts this failure.
             if reserved.attempts >= reserved.max_attempts {
                 return Err(AuthError::LoginChallengeAttemptsExhausted);
             }
@@ -159,15 +167,14 @@ where
             .consume_login_challenge(challenge_id, verified_at)
             .await?;
         if reserved.is_expired(self.login_challenge_clock.now()) {
+            self.refund_rate_limit_reservation(policy, reservation)
+                .await?;
             return Err(AuthError::LoginChallengeExpired);
         }
         if !consumed {
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
             return Err(AuthError::LoginChallengeReplayed);
         }
-        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
-            .await?;
+        self.settle_rate_limit_success(policy, reservation).await?;
 
         let verified_at = self.login_challenge_clock.now();
         if reserved.is_expired(verified_at) {
