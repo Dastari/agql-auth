@@ -177,6 +177,10 @@ pub enum AuthError {
     /// Password hashing or verification failed unexpectedly.
     #[error("password hashing failed: {0}")]
     PasswordHashing(String),
+    /// A password to hash is longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`].
+    #[error("password is too long")]
+    PasswordTooLong,
     /// Host store operation failed.
     #[error("storage error: {0}")]
     Store(String),
@@ -241,6 +245,7 @@ impl AuthError {
             AuthError::MissingConnectionInitAuth => "UNAUTHENTICATED",
             AuthError::TokenCreation(_) => "AUTH_SERVICE_UNAVAILABLE",
             AuthError::PasswordHashing(_) => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::PasswordTooLong => "PASSWORD_TOO_LONG",
             AuthError::Store(_) | AuthError::AuthServiceUnavailable => "AUTH_SERVICE_UNAVAILABLE",
             AuthError::Config(_) => "INVALID_CONFIGURATION",
         }
@@ -250,6 +255,7 @@ impl AuthError {
     pub fn public_message(&self) -> &'static str {
         match self {
             AuthError::InvalidCredentials => "invalid credentials",
+            AuthError::PasswordTooLong => "password is too long",
             AuthError::Unauthenticated
             | AuthError::MissingAuthorizationData
             | AuthError::MissingConnectionInitAuth

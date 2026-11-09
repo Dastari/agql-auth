@@ -113,6 +113,9 @@ pub struct AuthService<U, R> {
     pub(super) rate_limit_clock: Arc<dyn Clock>,
     pub(super) login_challenge_clock: Arc<dyn Clock>,
     pub(super) argon2: Argon2<'static>,
+    /// Hash verified for unknown and disabled users: same parameters as new
+    /// hashes, so its cost matches a current user's.
+    dummy_password_hash: Arc<str>,
     pub(super) password_executor: Arc<crate::password_work::PasswordWorkPool>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
@@ -191,6 +194,8 @@ where
     {
         config.validate()?;
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
+        let argon2 = config.password_hashing.argon2()?;
+        let dummy_password_hash = dummy_password_hash(&config.password_hashing, &argon2)?;
         let rate_limit_store: Arc<dyn AuthRateLimitStore> = rate_limit_store;
 
         Ok(Self {
@@ -214,8 +219,9 @@ where
             rate_limit_store,
             rate_limit_clock,
             login_challenge_clock: Arc::new(SystemClock),
-            argon2: Argon2::default(),
-            password_executor: crate::password_work::PasswordWorkPool::shared()?,
+            argon2,
+            dummy_password_hash,
+            password_executor: crate::password_work::PasswordWorkPool::shared(),
             #[cfg(test)]
             password_work: Arc::default(),
             #[cfg(test)]
@@ -302,9 +308,52 @@ where
         self
     }
 
+    /// Runs this service's password work on `pool` instead of
+    /// [`PasswordWorkPool::shared`](crate::PasswordWorkPool::shared).
+    ///
+    /// Pass the same pool to several services to share one budget, or a
+    /// separate pool to isolate them.
+    pub fn with_password_work_pool(mut self, pool: Arc<crate::PasswordWorkPool>) -> Self {
+        self.password_executor = pool;
+        self
+    }
+
+    /// Whether a stored hash should be replaced with one made under the
+    /// current [`crate::PasswordHashingConfig`].
+    ///
+    /// True for a hash that is not Argon2id version 19 with exactly the
+    /// configured memory, iterations and lanes, or that cannot be parsed. Call
+    /// it after a successful login, while the password is at hand, and store
+    /// `hash_password(password)` in place of the old hash. It reads only the
+    /// hash's parameters and never verifies a password.
+    pub fn password_hash_needs_rehash(&self, password_hash: &str) -> bool {
+        let Ok(parsed) = PasswordHash::new(password_hash) else {
+            return true;
+        };
+        let Ok(params) = argon2::Params::try_from(&parsed) else {
+            return true;
+        };
+        let current = self.argon2.params();
+        parsed.algorithm != argon2::Algorithm::Argon2id.ident()
+            || parsed.version != Some(argon2::Version::V0x13.into())
+            || params.m_cost() != current.m_cost()
+            || params.t_cost() != current.t_cost()
+            || params.p_cost() != current.p_cost()
+    }
+
+    fn password_too_long(&self, password: &str) -> bool {
+        password.len() > self.config.password_hashing.max_password_bytes
+    }
+
     /// Hashes a password synchronously with Argon2. This blocks the caller;
-    /// async service entry points use the shared bounded worker pool.
+    /// async service entry points use the bounded worker pool.
+    ///
+    /// Returns [`AuthError::PasswordTooLong`] for a password longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`].
     pub fn hash_password(&self, password: &str) -> AuthResult<String> {
+        if self.password_too_long(password) {
+            return Err(AuthError::PasswordTooLong);
+        }
         let salt = SaltString::generate(&mut OsRng);
         self.argon2
             .hash_password(password.as_bytes(), &salt)
@@ -352,8 +401,15 @@ where
     }
 
     /// Verifies a password synchronously against an Argon2 hash. This blocks
-    /// the caller; async service entry points use the shared bounded worker pool.
+    /// the caller; async service entry points use the bounded worker pool.
+    ///
+    /// A password longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`] is
+    /// [`AuthError::InvalidCredentials`] without Argon2 work.
     pub fn verify_password(&self, password: &str, password_hash: &str) -> AuthResult<()> {
+        if self.password_too_long(password) {
+            return Err(AuthError::InvalidCredentials);
+        }
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
         let result = self
@@ -369,6 +425,9 @@ where
     }
 
     pub(super) async fn hash_password_async(&self, password: &str) -> AuthResult<String> {
+        if self.password_too_long(password) {
+            return Err(AuthError::PasswordTooLong);
+        }
         let password = password.to_owned();
         let argon2 = self.argon2.clone();
         self.password_executor
@@ -397,8 +456,18 @@ where
         password_hash: &str,
         deadline: Option<(Arc<dyn Clock>, OffsetDateTime)>,
     ) -> AuthResult<()> {
+        // An over-long password can never match: a wrong password, without
+        // queueing or Argon2 work. The check does not depend on the account.
+        if self.password_too_long(password) {
+            return Err(AuthError::InvalidCredentials);
+        }
         let password = password.to_owned();
-        let password_hash = password_hash.to_owned();
+        // The fixed dummy hash stands for the configured parameters.
+        let password_hash = if password_hash == DUMMY_PASSWORD_HASH {
+            self.dummy_password_hash.to_string()
+        } else {
+            password_hash.to_owned()
+        };
         let argon2 = self.argon2.clone();
         #[cfg(test)]
         let password_work = self.password_work.clone();
@@ -420,8 +489,10 @@ where
     }
 
     /// Performs password login and issues a local session.
-    /// Password work awaits the process-wide bounded pool; saturation returns
-    /// `AuthServiceUnavailable` without recording a bad credential.
+    /// Password work awaits the bounded pool; saturation returns
+    /// `AuthServiceUnavailable` without recording a bad credential, so
+    /// throttle the login route at the edge as well (see
+    /// [`PasswordWorkPool`](crate::PasswordWorkPool)).
     ///
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
@@ -2451,6 +2522,30 @@ fn is_reserved_access_token_claim(key: &str) -> bool {
     RESERVED_ACCESS_TOKEN_CLAIMS
         .iter()
         .any(|reserved| key.eq_ignore_ascii_case(reserved))
+}
+
+/// The dummy hash under `config`'s parameters. The defaults reuse the fixed
+/// constant; other parameters hash a fixed input once, at construction.
+fn dummy_password_hash(
+    config: &crate::PasswordHashingConfig,
+    argon2: &Argon2<'static>,
+) -> AuthResult<Arc<str>> {
+    let defaults = crate::PasswordHashingConfig::default();
+    if (config.memory_kib, config.iterations, config.parallelism)
+        == (
+            defaults.memory_kib,
+            defaults.iterations,
+            defaults.parallelism,
+        )
+    {
+        return Ok(DUMMY_PASSWORD_HASH.into());
+    }
+    let salt = SaltString::encode_b64(b"agql-auth-dummy-salt")
+        .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
+    argon2
+        .hash_password(b"agql-auth-dummy-password", &salt)
+        .map(|hash| hash.to_string().into())
+        .map_err(|err| AuthError::PasswordHashing(err.to_string()))
 }
 
 fn dedupe_stable(values: Vec<String>) -> Vec<String> {

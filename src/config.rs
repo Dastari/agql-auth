@@ -71,6 +71,8 @@ pub struct AuthConfig {
     pub legacy_scope_claims: LegacyScopeClaims,
     /// Abuse-protection settings for credential and request flows.
     pub rate_limits: AuthRateLimitConfig,
+    /// Argon2id parameters and the password length cap.
+    pub password_hashing: PasswordHashingConfig,
 }
 
 impl fmt::Debug for AuthConfig {
@@ -94,6 +96,7 @@ impl fmt::Debug for AuthConfig {
             )
             .field("legacy_scope_claims", &self.legacy_scope_claims)
             .field("rate_limits", &self.rate_limits)
+            .field("password_hashing", &self.password_hashing)
             .finish()
     }
 }
@@ -126,6 +129,7 @@ impl AuthConfig {
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
             legacy_scope_claims: LegacyScopeClaims::Accept,
             rate_limits: AuthRateLimitConfig::default(),
+            password_hashing: PasswordHashingConfig::default(),
         }
     }
 
@@ -155,6 +159,7 @@ impl AuthConfig {
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
             legacy_scope_claims: LegacyScopeClaims::Accept,
             rate_limits: AuthRateLimitConfig::default(),
+            password_hashing: PasswordHashingConfig::default(),
         }
     }
 
@@ -195,6 +200,7 @@ impl AuthConfig {
 
     pub(crate) fn validate(&self) -> crate::AuthResult<()> {
         self.rate_limits.validate()?;
+        self.password_hashing.argon2()?;
         if self.issuer.trim().is_empty() || self.audience.trim().is_empty() {
             return Err(AuthError::InvalidConfiguration(
                 "issuer and audience must not be empty".to_string(),
@@ -225,6 +231,66 @@ impl AuthConfig {
             ));
         }
         Ok(())
+    }
+}
+
+/// Default for [`PasswordHashingConfig::max_password_bytes`].
+pub const DEFAULT_MAX_PASSWORD_BYTES: usize = 1024;
+/// Upper bound for [`PasswordHashingConfig::max_password_bytes`].
+pub const MAX_PASSWORD_BYTES_LIMIT: usize = 4096;
+
+/// Argon2id parameters for new password hashes, and the password length cap.
+///
+/// Verification reads the parameters stored in each hash, so changing these
+/// affects new hashes only. After a successful login, use
+/// [`crate::AuthService::password_hash_needs_rehash`] to find hashes made with
+/// other parameters and replace them. The defaults match the `argon2` crate's
+/// defaults (19 MiB, 2 iterations, 1 lane), the OWASP minimum for Argon2id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasswordHashingConfig {
+    /// Longest password accepted, in UTF-8 bytes. Defaults to
+    /// [`DEFAULT_MAX_PASSWORD_BYTES`]; at most [`MAX_PASSWORD_BYTES_LIMIT`].
+    ///
+    /// A longer password is never hashed. Hashing returns
+    /// [`AuthError::PasswordTooLong`]; verification treats it as a wrong
+    /// password, `InvalidCredentials`, so login counts it as a credential
+    /// failure without queueing Argon2 work.
+    pub max_password_bytes: usize,
+    /// Argon2 memory cost in KiB.
+    pub memory_kib: u32,
+    /// Argon2 iterations (time cost).
+    pub iterations: u32,
+    /// Argon2 lanes (parallelism).
+    pub parallelism: u32,
+}
+
+impl Default for PasswordHashingConfig {
+    fn default() -> Self {
+        Self {
+            max_password_bytes: DEFAULT_MAX_PASSWORD_BYTES,
+            memory_kib: argon2::Params::DEFAULT_M_COST,
+            iterations: argon2::Params::DEFAULT_T_COST,
+            parallelism: argon2::Params::DEFAULT_P_COST,
+        }
+    }
+}
+
+impl PasswordHashingConfig {
+    pub(crate) fn argon2(&self) -> crate::AuthResult<argon2::Argon2<'static>> {
+        if !(1..=MAX_PASSWORD_BYTES_LIMIT).contains(&self.max_password_bytes) {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "maximum password length must be 1..={MAX_PASSWORD_BYTES_LIMIT} bytes"
+            )));
+        }
+        let params = argon2::Params::new(self.memory_kib, self.iterations, self.parallelism, None)
+            .map_err(|error| {
+                AuthError::InvalidConfiguration(format!("invalid argon2 parameters: {error}"))
+            })?;
+        Ok(argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            params,
+        ))
     }
 }
 

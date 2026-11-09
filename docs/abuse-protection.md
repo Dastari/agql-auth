@@ -144,13 +144,33 @@ idle periods; no background task is spawned. See [the migration guide](../MIGRAT
 ## Async password work admission
 
 Async password login and challenge hashing/verification leave runtime threads using
-one process-wide pool of two workers and 32 queued jobs. Admission uses a nonblocking
-bounded queue; saturation and worker faults fail closed as `AuthServiceUnavailable`
-before credential-failure counters change. No store lock is held during CPU work.
-Cancellation does not free actual running/queued capacity early. Atomic challenge
-attempts already reserved remain charged even when the executor cannot admit work.
+a `PasswordWorkPool`. By default every `AuthService` shares `PasswordWorkPool::shared()`,
+one process-wide budget with one worker per available core (at most 8) and 16 queued
+jobs per worker. Build a pool with `PasswordWorkPool::new(PasswordWorkPoolConfig { .. })`
+and pass it to `AuthService::with_password_work_pool` to size it, or to share or
+isolate it between services. Workers start on first use; a thread that cannot be
+started fails that call as `AuthServiceUnavailable` and is retried on the next one,
+so a startup failure is never cached.
 
-Hosts separately bound incoming requests, password/code sizes and accepted Argon2
-costs. These controls must cover explicit synchronous hash/verify helpers too; those
-helpers remain blocking by design. This pool does not add a password-size or Argon2
-parameter compatibility cutoff and never logs sensitive inputs.
+Admission uses a nonblocking bounded queue; saturation and worker faults fail closed
+as `AuthServiceUnavailable` before credential-failure counters change. No store lock
+is held during CPU work. Cancellation does not free actual running/queued capacity
+early. Atomic challenge attempts already reserved remain charged even when the
+executor cannot admit work.
+
+**Throttle the login route at the edge.** Every admitted login runs one Argon2
+verification, unknown and disabled users included, and a full queue is deliberately
+not counted as a credential failure. Without a per-client and global request limit in
+front of the service, a modest request rate keeps the queue full and legitimate
+logins fail with `AuthServiceUnavailable`.
+
+`AuthConfig::password_hashing` sets the Argon2id parameters of new hashes and a
+password length cap, `max_password_bytes` (1024 bytes by default). A longer password
+is never hashed: `hash_password` returns `PasswordTooLong`, and verification treats
+it as a wrong password, so login records a credential failure without queueing
+work. Unknown and disabled users verify a dummy hash made with the configured
+parameters. Verification reads each stored hash's own parameters; after a successful
+login, `password_hash_needs_rehash` tells the host to replace a hash made with other
+parameters. Hosts still bound request bodies and the explicit synchronous
+hash/verify helpers, which remain blocking by design. The pool never logs sensitive
+inputs.

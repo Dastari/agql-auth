@@ -17,6 +17,7 @@ mod jwt_signing;
 mod oauth2;
 mod oidc;
 mod oidc_client_credentials;
+mod password_hashing;
 mod password_login;
 mod principal_reference;
 mod provider_http;
