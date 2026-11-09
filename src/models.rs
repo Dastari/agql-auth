@@ -1331,6 +1331,8 @@ impl Default for TotpOptions {
 }
 
 /// Authorization redirect information returned by [`crate::OidcProvider`].
+///
+/// The PKCE verifier stays in the stored [`OAuthLoginState`] only.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcAuthorizationRequest {
     /// Fully built provider authorization URL.
@@ -1341,10 +1343,14 @@ pub struct OidcAuthorizationRequest {
     pub state: String,
     /// Raw OIDC nonce.
     pub nonce: String,
-    /// PKCE code verifier stored in state.
-    pub code_verifier: String,
     /// PKCE S256 challenge sent to the provider.
     pub code_challenge: String,
+    /// Raw browser-binding secret. Store it in a cookie on the initiating
+    /// browser (`HttpOnly`, `Secure`, expiring with the state) and pass it back
+    /// as [`OidcCallbackInput::browser_binding`]. `None` only when the provider
+    /// is configured with [`crate::OAuthBrowserBinding::NotRequiredHostBindsState`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_binding: Option<String>,
     /// Normalized options bound to the stored one-time state. `None` identifies
     /// the compatibility/default authorization flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1360,21 +1366,37 @@ impl fmt::Debug for OidcAuthorizationRequest {
             .field("provider_name", &self.provider_name)
             .field("state", &"[redacted]")
             .field("nonce", &"[redacted]")
-            .field("code_verifier", &"[redacted]")
             .field("code_challenge", &"[redacted]")
+            .field(
+                "browser_binding",
+                &self.browser_binding.as_ref().map(|_| "[redacted]"),
+            )
             .field("authorization_policy", &self.authorization_policy)
             .field("expires_at", &self.expires_at)
             .finish()
     }
 }
 
-/// Host-provided OIDC callback data.
+/// Host-provided OIDC or OAuth 2.0 callback data.
+///
+/// `code`, `state`, `iss`, `error` and `error_description` come from the
+/// provider callback (the query string, or the `POST` body for `form_post`).
+/// `browser_binding` comes from the host's own cookie, never from the callback
+/// parameters.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcCallbackInput {
     /// Authorization code from the provider callback.
     pub code: Option<String>,
     /// Raw state from the provider callback.
     pub state: Option<String>,
+    /// RFC 9207 `iss` authorization-response parameter, when the provider
+    /// returned one. It must equal the provider's issuer identifier.
+    #[serde(default)]
+    pub iss: Option<String>,
+    /// Browser-binding secret read from the host cookie set when the
+    /// authorization request was created.
+    #[serde(default)]
+    pub browser_binding: Option<String>,
     /// Provider error code.
     pub error: Option<String>,
     /// Provider error description.
@@ -1386,6 +1408,11 @@ impl fmt::Debug for OidcCallbackInput {
         f.debug_struct("OidcCallbackInput")
             .field("code", &self.code.as_ref().map(|_| "[redacted]"))
             .field("state", &self.state.as_ref().map(|_| "[redacted]"))
+            .field("iss", &self.iss.as_ref().map(|_| "[redacted]"))
+            .field(
+                "browser_binding",
+                &self.browser_binding.as_ref().map(|_| "[redacted]"),
+            )
             .field("error", &self.error.as_ref().map(|_| "[redacted]"))
             .field(
                 "error_description",
@@ -1401,13 +1428,30 @@ impl OidcCallbackInput {
         Self {
             code: Some(code.into()),
             state: Some(state.into()),
+            iss: None,
+            browser_binding: None,
             error: None,
             error_description: None,
         }
     }
+
+    /// Sets the browser-binding secret read from the host cookie.
+    pub fn with_browser_binding(mut self, browser_binding: impl Into<String>) -> Self {
+        self.browser_binding = Some(browser_binding.into());
+        self
+    }
+
+    /// Sets the RFC 9207 `iss` authorization-response parameter.
+    pub fn with_issuer(mut self, iss: impl Into<String>) -> Self {
+        self.iss = Some(iss.into());
+        self
+    }
 }
 
 /// OIDC token endpoint response.
+///
+/// `Debug` redacts every token and the raw body, and dropping the response
+/// overwrites the tokens and the raw body.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OidcTokenResponse {
     /// Provider access token, if returned.
@@ -1418,7 +1462,7 @@ pub struct OidcTokenResponse {
     pub id_token: String,
     /// Token type.
     pub token_type: Option<String>,
-    /// Access-token lifetime in seconds.
+    /// Access-token lifetime in seconds. Never negative.
     pub expires_in: Option<i64>,
     /// Provider-returned scope string.
     pub scope: Option<String>,
@@ -1444,6 +1488,19 @@ impl fmt::Debug for OidcTokenResponse {
             .field("scope", &self.scope)
             .field("raw", &"[redacted]")
             .finish()
+    }
+}
+
+impl Drop for OidcTokenResponse {
+    fn drop(&mut self) {
+        crate::oidc::zeroize_provider_tokens(
+            [
+                self.access_token.as_mut(),
+                self.refresh_token.as_mut(),
+                Some(&mut self.id_token),
+            ],
+            &mut self.raw,
+        );
     }
 }
 
@@ -1485,7 +1542,8 @@ pub struct ValidatedOidcClaims {
     pub tenant_id: Option<String>,
     /// Provider object ID, when present.
     pub object_id: Option<String>,
-    /// Email claim, when present.
+    /// Email claim, when present and at most [`crate::MAX_OAUTH2_EMAIL_LENGTH`]
+    /// bytes.
     pub email: Option<String>,
     /// `email_verified` claim: a JSON boolean or the exact strings `"true"` /
     /// `"false"` (as Sign in with Apple sends). Any other type or value is
@@ -1493,9 +1551,11 @@ pub struct ValidatedOidcClaims {
     /// it remains host policy.
     #[serde(default)]
     pub email_verified: Option<bool>,
-    /// Display name, when present.
+    /// Display name, when present and at most [`crate::MAX_OAUTH2_NAME_LENGTH`]
+    /// bytes.
     pub name: Option<String>,
-    /// Preferred username, when present.
+    /// Preferred username, when present and at most
+    /// [`crate::MAX_OAUTH2_NAME_LENGTH`] bytes.
     pub preferred_username: Option<String>,
     /// Provider roles claim.
     pub roles: Vec<String>,
@@ -1602,6 +1662,11 @@ pub struct OAuthLoginState {
     /// callback.
     #[serde(default, skip_serializing_if = "crate::OAuthResponseMode::is_query")]
     pub response_mode: crate::OAuthResponseMode,
+    /// Hex SHA-256 of the browser-binding secret returned with the
+    /// authorization request. Stores must persist it: a state reloaded
+    /// without it is refused unless the provider opted out of browser binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_binding_hash: Option<String>,
     /// Creation time.
     pub created_at: OffsetDateTime,
     /// Expiry time.
@@ -1621,6 +1686,10 @@ impl fmt::Debug for OAuthLoginState {
             .field("scope_count", &self.scopes.len())
             .field("authorization_policy", &self.authorization_policy)
             .field("response_mode", &self.response_mode)
+            .field(
+                "browser_binding_hash",
+                &self.browser_binding_hash.as_ref().map(|_| "[redacted]"),
+            )
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
             .field("consumed_at", &self.consumed_at)

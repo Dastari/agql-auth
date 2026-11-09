@@ -3,31 +3,49 @@
 //! [`OAuth2Provider`] serves providers that issue no ID token and publish no
 //! JWKS (for example GitHub). Identity comes from an authenticated userinfo
 //! request, so it is only as trustworthy as the TLS connection to the
-//! configured endpoints. Account linking, user creation and email-trust policy
-//! remain host decisions.
+//! configured endpoints. User creation and email-trust policy remain host
+//! decisions, made in an [`OAuth2UserProvisioner`].
 
 use std::fmt;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use time::{Duration, OffsetDateTime};
 
 use crate::client_auth::{
-    ClientJwtSigner, TokenEndpointAuthMethod, client_authentication, validate_client_authentication,
+    ClientJwtAudiences, ClientJwtSigner, TokenEndpointAuthMethod, client_authentication,
+    validate_client_authentication, zeroize_pairs,
 };
 use crate::clock::{Clock, SystemClock};
-use crate::config::OAuthResponseMode;
-use crate::models::{OAuthLoginState, OidcCallbackInput};
+use crate::config::{ClientMetadata, OAuthBrowserBinding, OAuthResponseMode, zeroize_secret};
+use crate::models::{AuthPayload, ExternalIdentity, OAuthLoginState, OidcCallbackInput};
 use crate::oidc::{
-    ACCEPT_JSON, OidcHttpClient, append_query, ensure_no_reserved_authorization_parameters,
-    generate_oauth_state, generate_pkce_pair, hash_oauth_state, parse_email_verified,
+    ACCEPT_JSON, OidcHttpClient, ProvisionedExternalUser, append_query,
+    ensure_no_reserved_authorization_parameters, generate_oauth_state, generate_pkce_pair,
+    hash_oauth_state, is_secure_endpoint_url, is_valid_redirect_uri, new_browser_binding,
+    parse_email_verified, verify_browser_binding, zeroize_json, zeroize_provider_tokens,
 };
-use crate::stores::OAuthStateStore;
+use crate::service::AuthService;
+use crate::session::{AuthMethod, SessionContext};
+use crate::stores::{ExternalIdentityStore, OAuthStateStore, RefreshTokenStore, UserStore};
 use crate::{AuthError, AuthResult};
 
 /// Longest accepted provider subject, in bytes.
 pub const MAX_OAUTH2_SUBJECT_LENGTH: usize = 255;
+
+/// Longest kept profile email, in bytes. Longer values are treated as absent
+/// (also for OIDC `email`).
+pub const MAX_OAUTH2_EMAIL_LENGTH: usize = 320;
+
+/// Longest kept profile display name, in bytes. Longer values are treated as
+/// absent (also for OIDC `name` and `preferred_username`).
+pub const MAX_OAUTH2_NAME_LENGTH: usize = 512;
+
+/// Longest kept profile picture URL, in bytes. Longer values are treated as
+/// absent.
+pub const MAX_OAUTH2_PICTURE_LENGTH: usize = 2_048;
 
 /// Most entries inspected in a verified-email list response.
 pub const MAX_OAUTH2_VERIFIED_EMAIL_ENTRIES: usize = 100;
@@ -162,16 +180,40 @@ pub struct OAuth2ProviderConfig {
     /// Token-endpoint client authentication.
     #[serde(default)]
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    /// Redirect URI registered with the provider.
+    /// Redirect URI registered with the provider: an absolute `https://` URL
+    /// (`http://` only for loopback hosts) without a fragment. Give every
+    /// provider its own redirect URI.
     pub redirect_uri: String,
+    /// Authorization server issuer identifier, when the provider has one.
+    /// It is the default `private_key_jwt` audience, and a callback `iss`
+    /// parameter (RFC 9207) must equal it. Without it a callback carrying
+    /// `iss` is refused.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// Require the RFC 9207 `iss` authorization-response parameter. Set it
+    /// when the provider advertises `authorization_response_iss_parameter_supported`.
+    /// Requires `issuer`.
+    #[serde(default)]
+    pub require_authorization_response_iss: bool,
     /// Requested scopes, sent space-delimited. May be empty.
     pub scopes: Vec<String>,
-    /// Lifetime for OAuth state records.
+    /// Lifetime for OAuth state records, at most
+    /// [`crate::MAX_OAUTH_STATE_TTL_SECONDS`].
     pub state_ttl: Duration,
+    /// Browser binding of the one-time state. Defaults to
+    /// [`OAuthBrowserBinding::Required`].
+    #[serde(default)]
+    pub browser_binding: OAuthBrowserBinding,
     /// Userinfo profile mapping.
     pub profile: OAuth2ProfileMapping,
     /// Optional verified-email list request.
     pub verified_email_list: Option<OAuth2VerifiedEmailList>,
+}
+
+impl Drop for OAuth2ProviderConfig {
+    fn drop(&mut self) {
+        zeroize_secret(&mut self.client_secret);
+    }
 }
 
 impl fmt::Debug for OAuth2ProviderConfig {
@@ -192,8 +234,14 @@ impl fmt::Debug for OAuth2ProviderConfig {
                 &self.token_endpoint_auth_method,
             )
             .field("redirect_uri", &self.redirect_uri)
+            .field("issuer", &self.issuer)
+            .field(
+                "require_authorization_response_iss",
+                &self.require_authorization_response_iss,
+            )
             .field("scopes", &self.scopes)
             .field("state_ttl", &self.state_ttl)
+            .field("browser_binding", &self.browser_binding)
             .field("profile", &self.profile)
             .field("verified_email_list", &self.verified_email_list)
             .finish()
@@ -221,8 +269,11 @@ impl OAuth2ProviderConfig {
             client_jwt: None,
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretPost,
             redirect_uri: redirect_uri.into(),
+            issuer: None,
+            require_authorization_response_iss: false,
             scopes: Vec::new(),
             state_ttl: Duration::minutes(10),
+            browser_binding: OAuthBrowserBinding::Required,
             profile: OAuth2ProfileMapping::default(),
             verified_email_list: None,
         }
@@ -268,13 +319,25 @@ impl OAuth2ProviderConfig {
         for (name, value) in [
             ("provider_name", &self.provider_name),
             ("client_id", &self.client_id),
-            ("redirect_uri", &self.redirect_uri),
         ] {
             if value.trim().is_empty() {
                 return Err(AuthError::InvalidConfiguration(format!(
                     "OAuth 2.0 {name} must not be empty"
                 )));
             }
+        }
+        if !is_valid_redirect_uri(&self.redirect_uri) {
+            return Err(AuthError::InvalidConfiguration(
+                "OAuth 2.0 redirect_uri must be an absolute https URL without a fragment (http only for loopback hosts)"
+                    .to_string(),
+            ));
+        }
+        if let Some(issuer) = &self.issuer {
+            validate_endpoint("issuer", issuer)?;
+        } else if self.require_authorization_response_iss {
+            return Err(AuthError::InvalidConfiguration(
+                "OAuth 2.0 require_authorization_response_iss requires issuer".to_string(),
+            ));
         }
         for (name, value) in [
             ("authorization_endpoint", &self.authorization_endpoint),
@@ -299,6 +362,7 @@ impl OAuth2ProviderConfig {
         validate_client_authentication(
             "OAuth 2.0",
             self.token_endpoint_auth_method,
+            &self.client_id,
             self.client_secret.as_deref(),
             self.client_jwt.as_ref(),
         )?;
@@ -312,9 +376,12 @@ impl OAuth2ProviderConfig {
                 "OAuth 2.0 scopes must be non-empty tokens without whitespace".to_string(),
             ));
         }
-        if self.state_ttl <= Duration::ZERO {
+        if self.state_ttl <= Duration::ZERO
+            || self.state_ttl > Duration::seconds(crate::MAX_OAUTH_STATE_TTL_SECONDS)
+        {
             return Err(AuthError::InvalidConfiguration(
-                "OAuth 2.0 state_ttl must be greater than zero".to_string(),
+                "OAuth 2.0 state_ttl must be greater than zero and at most the supported maximum"
+                    .to_string(),
             ));
         }
         validate_pointer("subject_pointer", &self.profile.subject_pointer)?;
@@ -358,40 +425,13 @@ impl OAuth2ProviderConfig {
 }
 
 fn validate_endpoint(name: &str, value: &str) -> AuthResult<()> {
-    let invalid = || {
-        AuthError::InvalidConfiguration(format!(
-            "OAuth 2.0 {name} must be an https URL (http only for loopback hosts)"
-        ))
-    };
-    if value
-        .chars()
-        .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return Err(invalid());
-    }
-    let (scheme, remainder) = value.split_once("://").ok_or_else(invalid)?;
-    let authority = remainder
-        .split(['/', '?', '#'])
-        .next()
-        .filter(|authority| !authority.is_empty() && !authority.contains('@'))
-        .ok_or_else(invalid)?;
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or_default()
+    if is_secure_endpoint_url(value) {
+        Ok(())
     } else {
-        authority.split(':').next().unwrap_or_default()
-    };
-    if host.is_empty() {
-        return Err(invalid());
+        Err(AuthError::InvalidConfiguration(format!(
+            "OAuth 2.0 {name} must be an https URL (http only for loopback hosts)"
+        )))
     }
-    if scheme.eq_ignore_ascii_case("https") {
-        return Ok(());
-    }
-    if scheme.eq_ignore_ascii_case("http")
-        && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1")
-    {
-        return Ok(());
-    }
-    Err(invalid())
 }
 
 fn validate_pointer(name: &str, pointer: &str) -> AuthResult<()> {
@@ -404,6 +444,8 @@ fn validate_pointer(name: &str, pointer: &str) -> AuthResult<()> {
 }
 
 /// Authorization request created by [`OAuth2Provider`].
+///
+/// The PKCE verifier stays in the stored [`OAuthLoginState`] only.
 #[derive(Clone)]
 pub struct OAuth2AuthorizationRequest {
     /// Fully built provider authorization URL.
@@ -412,10 +454,12 @@ pub struct OAuth2AuthorizationRequest {
     pub provider_name: String,
     /// Raw OAuth state sent to the browser.
     pub state: String,
-    /// PKCE code verifier stored in state.
-    pub code_verifier: String,
     /// PKCE S256 challenge sent to the provider.
     pub code_challenge: String,
+    /// Raw browser-binding secret to store in a cookie on the initiating
+    /// browser and pass back as [`OidcCallbackInput::browser_binding`]. `None`
+    /// only with [`OAuthBrowserBinding::NotRequiredHostBindsState`].
+    pub browser_binding: Option<String>,
     /// State expiry time.
     pub expires_at: OffsetDateTime,
 }
@@ -426,8 +470,11 @@ impl fmt::Debug for OAuth2AuthorizationRequest {
             .field("authorization_url", &"[redacted]")
             .field("provider_name", &self.provider_name)
             .field("state", &"[redacted]")
-            .field("code_verifier", &"[redacted]")
             .field("code_challenge", &"[redacted]")
+            .field(
+                "browser_binding",
+                &self.browser_binding.as_ref().map(|_| "[redacted]"),
+            )
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -436,7 +483,8 @@ impl fmt::Debug for OAuth2AuthorizationRequest {
 /// OAuth 2.0 token endpoint response.
 ///
 /// The access token is returned only in memory for the host's optional use;
-/// `agql-auth` never stores it. `Debug` redacts every token and the raw body.
+/// `agql-auth` never stores it. `Debug` redacts every token and the raw body,
+/// and dropping the response overwrites the tokens and the raw body.
 #[derive(Clone)]
 pub struct OAuth2TokenResponse {
     /// Provider access token.
@@ -445,7 +493,7 @@ pub struct OAuth2TokenResponse {
     pub token_type: String,
     /// Provider refresh token, if returned.
     pub refresh_token: Option<String>,
-    /// Access-token lifetime in seconds, if returned.
+    /// Access-token lifetime in seconds, if returned. Never negative.
     pub expires_in: Option<i64>,
     /// Provider-returned scope string, if returned.
     pub scope: Option<String>,
@@ -469,6 +517,15 @@ impl fmt::Debug for OAuth2TokenResponse {
     }
 }
 
+impl Drop for OAuth2TokenResponse {
+    fn drop(&mut self) {
+        zeroize_provider_tokens(
+            [Some(&mut self.access_token), self.refresh_token.as_mut()],
+            &mut self.raw,
+        );
+    }
+}
+
 /// Profile resolved from the userinfo response.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OAuth2UserProfile {
@@ -476,14 +533,14 @@ pub struct OAuth2UserProfile {
     pub provider_name: String,
     /// Stable provider subject (integers normalized to decimal strings).
     pub subject: String,
-    /// Email, when present.
+    /// Email, when present and at most [`MAX_OAUTH2_EMAIL_LENGTH`] bytes.
     pub email: Option<String>,
     /// Email verification. Only `Some(true)` asserts a verified address;
     /// whether to trust it remains host policy.
     pub email_verified: Option<bool>,
-    /// Display name, when present.
+    /// Display name, when present and at most [`MAX_OAUTH2_NAME_LENGTH`] bytes.
     pub name: Option<String>,
-    /// Picture URL, when present.
+    /// Picture URL, when present and at most [`MAX_OAUTH2_PICTURE_LENGTH`] bytes.
     pub picture: Option<String>,
     /// Raw userinfo JSON object.
     pub raw: JsonValue,
@@ -512,6 +569,48 @@ pub struct OAuth2CallbackOutcome {
     pub token_response: OAuth2TokenResponse,
     /// Resolved provider profile.
     pub profile: OAuth2UserProfile,
+}
+
+#[async_trait]
+/// Host extension point resolving an OAuth 2.0 profile to a local user.
+///
+/// Implementations may create a user, link to an existing user, or reject the
+/// login by returning an error. [`OAuth2Provider::login_with_callback`]
+/// re-reads the returned user afterwards and refuses a missing or disabled
+/// user, so implementations need not check `disabled` themselves.
+pub trait OAuth2UserProvisioner: Send + Sync {
+    /// Resolves a provider profile to a local user. `existing_identity` is the
+    /// identity linked to `(provider_name, subject)`, if any; returning a
+    /// different user for it is refused.
+    async fn resolve_oauth2_user(
+        &self,
+        profile: &OAuth2UserProfile,
+        existing_identity: Option<&ExternalIdentity>,
+    ) -> AuthResult<ProvisionedExternalUser>;
+}
+
+/// Result of a completed OAuth 2.0 login and local session issuance.
+#[derive(Clone)]
+pub struct OAuth2LoginResult {
+    /// Local `agql-auth` session payload.
+    pub auth: AuthPayload,
+    /// Resolved provider profile.
+    pub profile: OAuth2UserProfile,
+    /// External identity that was linked or updated.
+    pub external_identity: ExternalIdentity,
+    /// Token endpoint response.
+    pub token_response: OAuth2TokenResponse,
+}
+
+impl fmt::Debug for OAuth2LoginResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuth2LoginResult")
+            .field("auth", &self.auth)
+            .field("profile", &self.profile)
+            .field("external_identity", &self.external_identity)
+            .field("token_response", &self.token_response)
+            .finish()
+    }
 }
 
 /// OAuth 2.0 authorization-code + PKCE provider resolving identity through a
@@ -573,6 +672,10 @@ impl OAuth2Provider {
     }
 
     /// Creates an authorization URL with PKCE S256 and stores one-time state.
+    ///
+    /// With the default [`OAuthBrowserBinding::Required`], set
+    /// [`OAuth2AuthorizationRequest::browser_binding`] as a cookie on the
+    /// browser before redirecting it.
     pub async fn create_authorization_request<S>(
         &self,
         state_store: &S,
@@ -586,6 +689,8 @@ impl OAuth2Provider {
         let expires_at = now.checked_add(self.config.state_ttl).ok_or_else(|| {
             AuthError::InvalidConfiguration("OAuth 2.0 state expiry overflowed".to_string())
         })?;
+        let (browser_binding, browser_binding_hash) =
+            new_browser_binding(self.config.browser_binding);
         state_store
             .insert_oauth_state(OAuthLoginState {
                 provider_name: self.config.provider_name.clone(),
@@ -596,6 +701,7 @@ impl OAuth2Provider {
                 scopes: self.config.scopes.clone(),
                 authorization_policy: None,
                 response_mode: OAuthResponseMode::Query,
+                browser_binding_hash,
                 created_at: now,
                 expires_at,
                 consumed_at: None,
@@ -620,8 +726,8 @@ impl OAuth2Provider {
             authorization_url: append_query(&self.config.authorization_endpoint, &params),
             provider_name: self.config.provider_name.clone(),
             state,
-            code_verifier: pkce.code_verifier,
-            code_challenge: pkce.code_challenge,
+            code_challenge: pkce.code_challenge.clone(),
+            browser_binding,
             expires_at,
         })
     }
@@ -630,7 +736,13 @@ impl OAuth2Provider {
     /// with the stored verifier and resolves the profile.
     ///
     /// An error callback returns [`AuthError::OAuthProviderError`] without
-    /// consuming state, matching [`crate::OidcProvider`].
+    /// consuming state, matching [`crate::OidcProvider`]. After consumption
+    /// the browser binding must match ([`AuthError::InvalidOAuthState`]), and
+    /// an `iss` parameter must equal [`OAuth2ProviderConfig::issuer`]
+    /// ([`AuthError::OAuthCallback`]).
+    ///
+    /// This resolves a profile only. Use [`Self::login_with_callback`] to
+    /// enforce the local account state and issue a session.
     pub async fn handle_callback<S>(
         &self,
         state_store: &S,
@@ -670,6 +782,20 @@ impl OAuth2Provider {
         {
             return Err(AuthError::InvalidOAuthState);
         }
+        verify_browser_binding(
+            self.config.browser_binding,
+            state.browser_binding_hash.as_deref(),
+            input.browser_binding.as_deref(),
+        )?;
+        match (input.iss.as_deref(), self.config.issuer.as_deref()) {
+            (Some(iss), Some(issuer)) if iss == issuer => {}
+            (None, _) if !self.config.require_authorization_response_iss => {}
+            _ => {
+                return Err(AuthError::OAuthCallback(
+                    "authorization response iss does not match the provider".to_string(),
+                ));
+            }
+        }
 
         let token_response = self.exchange_code(&code, &state).await?;
         let profile = self.fetch_profile(&token_response.access_token).await?;
@@ -680,8 +806,116 @@ impl OAuth2Provider {
         })
     }
 
+    /// Completes an OAuth 2.0 login and issues a local `agql-auth` session.
+    ///
+    /// Runs [`Self::handle_callback`], looks up the identity linked to
+    /// `(provider_name, subject)`, and asks `provisioner` for the local user.
+    /// The user is then re-read from the [`AuthService`]'s [`UserStore`]: a
+    /// disabled user is refused with [`AuthError::UserDisabled`] and a missing
+    /// user with [`AuthError::ExternalLoginRejected`], before any identity is
+    /// linked or updated and before a session is issued. The session uses
+    /// [`AuthMethod::OAuth2`] and the provisioner's roles and scopes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn login_with_callback<U, R, S, E, P>(
+        &self,
+        auth_service: &AuthService<U, R>,
+        state_store: &S,
+        external_identity_store: &E,
+        provisioner: &P,
+        input: OidcCallbackInput,
+        metadata: ClientMetadata,
+    ) -> AuthResult<OAuth2LoginResult>
+    where
+        U: UserStore + 'static,
+        R: RefreshTokenStore + 'static,
+        S: OAuthStateStore,
+        E: ExternalIdentityStore,
+        P: OAuth2UserProvisioner,
+    {
+        let OAuth2CallbackOutcome {
+            token_response,
+            profile,
+            ..
+        } = self.handle_callback(state_store, input).await?;
+        let existing_identity = external_identity_store
+            .find_external_identity(&profile.provider_name, &profile.subject)
+            .await?;
+        let provisioned_user = provisioner
+            .resolve_oauth2_user(&profile, existing_identity.as_ref())
+            .await?;
+        if let Some(existing) = existing_identity.as_ref()
+            && existing.user_id != provisioned_user.user_id
+        {
+            return Err(AuthError::ExternalLoginRejected(
+                "provisioner returned a different user for an existing external identity"
+                    .to_string(),
+            ));
+        }
+        auth_service
+            .require_enabled_external_user(&provisioned_user.user_id)
+            .await?;
+
+        let now = self.clock.now();
+        let claims_snapshot = profile.raw.clone();
+        let external_identity = if let Some(mut identity) = existing_identity {
+            identity.claims_snapshot = claims_snapshot.clone();
+            identity.updated_at = now;
+            external_identity_store
+                .update_external_identity_claims_snapshot(
+                    &identity.provider_name,
+                    &identity.external_subject,
+                    claims_snapshot,
+                    now,
+                )
+                .await?;
+            identity
+        } else {
+            let identity = ExternalIdentity {
+                provider_name: profile.provider_name.clone(),
+                external_subject: profile.subject.clone(),
+                user_id: provisioned_user.user_id.clone(),
+                issuer: self
+                    .config
+                    .issuer
+                    .clone()
+                    .unwrap_or_else(|| self.config.authorization_endpoint.clone()),
+                tenant_id: None,
+                provider_user_id: Some(profile.subject.clone()),
+                claims_snapshot,
+                created_at: now,
+                updated_at: now,
+            };
+            if provisioned_user.link_external_identity {
+                external_identity_store
+                    .link_external_identity(identity.clone())
+                    .await?;
+            }
+            identity
+        };
+
+        let auth = auth_service
+            .issue_session_for_user_with_metadata(
+                provisioned_user.user_id,
+                provisioned_user.roles,
+                provisioned_user.scopes,
+                SessionContext::for_auth_method(AuthMethod::OAuth2),
+                crate::RefreshableTokenMetadata::default(),
+                metadata,
+            )
+            .await?;
+
+        Ok(OAuth2LoginResult {
+            auth,
+            profile,
+            external_identity,
+            token_response,
+        })
+    }
+
     /// Exchanges an authorization code using the stored PKCE verifier.
-    pub async fn exchange_code(
+    ///
+    /// Only the callback path calls this, after it consumed the state.
+    pub(crate) async fn exchange_code(
         &self,
         code: &str,
         state: &OAuthLoginState,
@@ -691,7 +925,14 @@ impl OAuth2Provider {
             &self.config.client_id,
             self.config.client_secret.as_deref(),
             self.config.client_jwt.as_ref(),
-            &self.config.token_endpoint,
+            ClientJwtAudiences {
+                assertion: self
+                    .config
+                    .issuer
+                    .as_deref()
+                    .unwrap_or(&self.config.token_endpoint),
+                signed_secret: &self.config.token_endpoint,
+            },
             self.clock.now(),
         )
         .map_err(|_| {
@@ -707,13 +948,35 @@ impl OAuth2Provider {
         let mut headers = authentication.headers;
         headers.push((ACCEPT_JSON.0.to_string(), ACCEPT_JSON.1.to_string()));
 
-        let raw = self
+        let response = self
             .http_client
             .post_form_json_with_headers(&self.config.token_endpoint, &headers, &form)
-            .await
-            .map_err(|_| {
-                AuthError::OAuthTokenExchange("provider token endpoint request failed".to_string())
-            })?;
+            .await;
+        zeroize_pairs(&mut headers);
+        zeroize_pairs(&mut form);
+        let mut raw = response.map_err(|_| {
+            AuthError::OAuthTokenExchange("provider token endpoint request failed".to_string())
+        })?;
+        let parsed = Self::parse_token_response(&raw);
+        if parsed.is_err() {
+            zeroize_json(&mut raw);
+        }
+        let (access_token, token_type, refresh_token, expires_in, scope) = parsed?;
+
+        Ok(OAuth2TokenResponse {
+            access_token,
+            token_type,
+            refresh_token,
+            expires_in,
+            scope,
+            raw,
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn parse_token_response(
+        raw: &JsonValue,
+    ) -> AuthResult<(String, String, Option<String>, Option<i64>, Option<String>)> {
         let object = raw.as_object().ok_or_else(|| {
             AuthError::OAuthTokenExchange("provider token response was not an object".to_string())
         })?;
@@ -755,26 +1018,28 @@ impl OAuth2Provider {
         let scope = optional_string("scope")?;
         let expires_in = match object.get("expires_in") {
             None | Some(JsonValue::Null) => None,
-            Some(value) => Some(value.as_i64().ok_or_else(|| {
-                AuthError::OAuthTokenExchange(
-                    "provider token response expires_in has an invalid type".to_string(),
-                )
-            })?),
+            Some(value) => Some(
+                value
+                    .as_i64()
+                    .filter(|expires_in| *expires_in >= 0)
+                    .ok_or_else(|| {
+                        AuthError::OAuthTokenExchange(
+                            "provider token response expires_in is invalid".to_string(),
+                        )
+                    })?,
+            ),
         };
 
-        Ok(OAuth2TokenResponse {
-            access_token,
-            token_type,
-            refresh_token,
-            expires_in,
-            scope,
-            raw,
-        })
+        Ok((access_token, token_type, refresh_token, expires_in, scope))
     }
 
     /// Requests the userinfo profile (and the verified-email list when
     /// configured) with `access_token` as a bearer credential.
-    pub async fn fetch_profile(&self, access_token: &str) -> AuthResult<OAuth2UserProfile> {
+    ///
+    /// The access token must come from this provider's own code exchange: a
+    /// userinfo response proves nothing about which client a token was issued
+    /// to, so a client-supplied token would yield another application's user.
+    pub(crate) async fn fetch_profile(&self, access_token: &str) -> AuthResult<OAuth2UserProfile> {
         let raw = self
             .bearer_get(&self.config.userinfo_endpoint, access_token)
             .await?;
@@ -788,7 +1053,7 @@ impl OAuth2Provider {
         let mut email = mapping
             .email_pointer
             .as_deref()
-            .and_then(|pointer| pointer_string(&raw, pointer));
+            .and_then(|pointer| pointer_string(&raw, pointer, MAX_OAUTH2_EMAIL_LENGTH));
         let mut email_verified = match &mapping.email_verification {
             OAuth2EmailVerification::Unknown => None,
             OAuth2EmailVerification::Pointer(pointer) => {
@@ -815,11 +1080,11 @@ impl OAuth2Provider {
             name: mapping
                 .name_pointer
                 .as_deref()
-                .and_then(|pointer| pointer_string(&raw, pointer)),
+                .and_then(|pointer| pointer_string(&raw, pointer, MAX_OAUTH2_NAME_LENGTH)),
             picture: mapping
                 .picture_pointer
                 .as_deref()
-                .and_then(|pointer| pointer_string(&raw, pointer)),
+                .and_then(|pointer| pointer_string(&raw, pointer, MAX_OAUTH2_PICTURE_LENGTH)),
             raw,
         })
     }
@@ -856,20 +1121,20 @@ impl OAuth2Provider {
                     .is_some_and(|pointer| is_true(entry, pointer)),
                 OAuth2VerifiedEmailSelection::FirstVerified => true,
             })
-            .find_map(|entry| pointer_string(entry, &list.email_pointer)))
+            .find_map(|entry| pointer_string(entry, &list.email_pointer, MAX_OAUTH2_EMAIL_LENGTH)))
     }
 
     async fn bearer_get(&self, url: &str, access_token: &str) -> AuthResult<JsonValue> {
-        let headers = [
+        let mut headers = [
             (
                 "Authorization".to_string(),
                 format!("Bearer {access_token}"),
             ),
             (ACCEPT_JSON.0.to_string(), ACCEPT_JSON.1.to_string()),
         ];
-        self.http_client
-            .get_json_with_headers(url, &headers)
-            .await
+        let response = self.http_client.get_json_with_headers(url, &headers).await;
+        zeroize_pairs(&mut headers);
+        response
             .map_err(|_| AuthError::OAuthUserInfo("provider profile request failed".to_string()))
     }
 }
@@ -889,9 +1154,9 @@ fn profile_subject(raw: &JsonValue, pointer: &str) -> AuthResult<String> {
     Ok(subject)
 }
 
-fn pointer_string(raw: &JsonValue, pointer: &str) -> Option<String> {
+fn pointer_string(raw: &JsonValue, pointer: &str, max_length: usize) -> Option<String> {
     raw.pointer(pointer)
         .and_then(JsonValue::as_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty() && value.len() <= max_length)
         .map(str::to_string)
 }

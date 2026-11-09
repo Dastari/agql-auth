@@ -177,9 +177,16 @@ SameSite, Secure, and Max-Age formatting to the host.
 
 ## Issuing Sessions For Verified Users
 
+For OIDC and OAuth 2.0 logins prefer `OidcProvider::login_with_callback` and
+`OAuth2Provider::login_with_callback`: they bind the callback to the initiating
+browser, re-read the provisioned user and refuse a missing or disabled account
+before issuing a session. See [Microsoft Entra OIDC](microsoft-entra-oidc.md)
+and [OAuth 2.0 userinfo providers](oauth2-userinfo-providers.md).
+
 When the host has already verified the user through another trusted flow, such
-as an OIDC callback or a one-time login code, it can issue a normal local
-session directly:
+as a one-time login code, it can issue a normal local session directly. These
+methods do not load the user: the host must check that the account exists and
+is enabled first.
 
 ```rust
 use agql_auth::AuthMethod;

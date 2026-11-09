@@ -7,12 +7,12 @@ use percent_encoding::percent_decode_str;
 use serde_json::{Value as JsonValue, json};
 use time::{Duration, OffsetDateTime};
 
-use super::{MemoryRefreshTokenStore, MemoryUserStore, metadata, test_auth_service};
+use super::{MemoryRefreshTokenStore, MemoryUserStore, metadata, stored_user, test_auth_service};
 use crate::prelude::*;
 
 type RecordedPost = (String, Vec<(String, String)>);
 
-const TENANT_ID: &str = "11111111-1111-1111-1111-111111111111";
+pub(super) const TENANT_ID: &str = "11111111-1111-1111-1111-111111111111";
 const OBJECT_ID: &str = "22222222-2222-2222-2222-222222222222";
 pub(super) const SUBJECT: &str = "subject-value";
 pub(super) const CLIENT_ID: &str = "client-id";
@@ -124,7 +124,7 @@ impl OidcHttpClient for MockOidcHttpClient {
 
 #[derive(Clone, Default)]
 pub(super) struct MemoryOAuthStateStore {
-    states: Arc<Mutex<HashMap<(String, String), OAuthLoginState>>>,
+    pub(super) states: Arc<Mutex<HashMap<(String, String), OAuthLoginState>>>,
 }
 
 #[async_trait]
@@ -175,8 +175,8 @@ impl OAuthStateStore for MemoryOAuthStateStore {
 }
 
 #[derive(Clone, Default)]
-struct MemoryExternalIdentityStore {
-    identities: Arc<Mutex<HashMap<(String, String), ExternalIdentity>>>,
+pub(super) struct MemoryExternalIdentityStore {
+    pub(super) identities: Arc<Mutex<HashMap<(String, String), ExternalIdentity>>>,
 }
 
 #[async_trait]
@@ -225,8 +225,8 @@ impl ExternalIdentityStore for MemoryExternalIdentityStore {
     }
 }
 
-struct StaticProvisioner {
-    user_id: String,
+pub(super) struct StaticProvisioner {
+    pub(super) user_id: String,
 }
 
 struct AcceptingAssuranceMapper;
@@ -319,18 +319,12 @@ async fn state_nonce_and_authorization_url_are_generated_and_consumed_once() {
     let token = signed_id_token(valid_claims(&request.nonce), "rsa01");
     client.set_token_response(token);
     provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state.clone()),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap();
 
     let replay = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap_err();
     assert!(matches!(replay, AuthError::InvalidOAuthState));
@@ -348,6 +342,7 @@ async fn oauth_state_store_contract_returns_pre_consumption_snapshot() {
         scopes: vec!["openid".to_string()],
         authorization_policy: None,
         response_mode: OAuthResponseMode::Query,
+        browser_binding_hash: None,
         created_at: OffsetDateTime::now_utc(),
         expires_at: OffsetDateTime::now_utc() + Duration::minutes(10),
         consumed_at: None,
@@ -476,10 +471,7 @@ async fn mocked_callback_validates_id_token_and_issues_local_session() {
     let (provider, client) = provider_and_client();
     let state_store = MemoryOAuthStateStore::default();
     let identity_store = MemoryExternalIdentityStore::default();
-    let auth = test_auth_service(
-        MemoryUserStore::default(),
-        MemoryRefreshTokenStore::default(),
-    );
+    let auth = test_auth_service_with_user("local-user");
     let request = provider
         .create_authorization_request(&state_store)
         .await
@@ -502,7 +494,7 @@ async fn mocked_callback_validates_id_token_and_issues_local_session() {
                 user_id: "local-user".to_string(),
             },
             &mapper,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
+            callback_with_code(&request, "auth-code"),
             metadata(),
         )
         .await
@@ -551,10 +543,7 @@ async fn oidc_assurance_requires_explicit_host_mapping_before_mfa_is_satisfied()
     claims["acr"] = json!("urn:example:loa:2");
     client.set_token_response(signed_id_token(claims, "rsa01"));
 
-    let auth = test_auth_service(
-        MemoryUserStore::default(),
-        MemoryRefreshTokenStore::default(),
-    );
+    let auth = test_auth_service_with_user("local-user");
     let result = provider
         .login_with_callback(
             &auth,
@@ -564,7 +553,7 @@ async fn oidc_assurance_requires_explicit_host_mapping_before_mfa_is_satisfied()
                 user_id: "local-user".to_string(),
             },
             &AcceptingAssuranceMapper,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
+            callback_with_code(&request, "auth-code"),
             metadata(),
         )
         .await
@@ -654,10 +643,7 @@ async fn generic_oidc_accepts_id_token_without_nbf() {
     client.set_token_response(signed_id_token(claims, "rsa01"));
 
     let outcome = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap();
     assert!(outcome.claims.not_before.is_none());
@@ -700,10 +686,7 @@ async fn oidc_accepts_multi_audience_with_trusted_extra_audience_and_azp() {
     client.set_token_response(signed_id_token(claims, "rsa01"));
 
     let outcome = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap();
     assert_eq!(
@@ -777,10 +760,7 @@ async fn callback_rejects_unknown_key_id() {
     client.set_token_response(signed_id_token(valid_claims(&request.nonce), "missing"));
 
     let err = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::OidcTokenValidation(_)));
@@ -798,10 +778,7 @@ async fn unknown_kid_uses_forced_refresh_cooldown() {
             .unwrap();
         client.set_token_response(signed_id_token(valid_claims(&request.nonce), "missing"));
         let err = provider
-            .handle_callback(
-                &state_store,
-                OidcCallbackInput::code_and_state("auth-code", request.state),
-            )
+            .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
             .await
             .unwrap_err();
         assert!(matches!(err, AuthError::OidcTokenValidation(_)));
@@ -863,10 +840,7 @@ async fn callback_rejects_microsoft_consumers_unless_enabled() {
     client.set_token_response(signed_id_token(claims, "rsa01"));
 
     let err = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::OidcTokenValidation(_)));
@@ -885,10 +859,7 @@ async fn callback_rejects_invalid_signature() {
     client.set_token_response(token);
 
     let err = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::OidcTokenValidation(_)));
@@ -905,18 +876,12 @@ async fn callback_rejects_replayed_state() {
     client.set_token_response(signed_id_token(valid_claims(&request.nonce), "rsa01"));
 
     provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state.clone()),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap();
 
     let err = provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::InvalidOAuthState));
@@ -1063,7 +1028,9 @@ async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
     let debug = format!("{request:?} {stored:?}");
     assert!(!debug.contains(&request.state));
     assert!(!debug.contains(&request.nonce));
-    assert!(!debug.contains(&request.code_verifier));
+    assert!(!debug.contains(&stored.code_verifier));
+    assert!(!debug.contains(request.browser_binding.as_deref().unwrap()));
+    assert!(!debug.contains(stored.browser_binding_hash.as_deref().unwrap()));
     assert!(!debug.contains(&request.authorization_url));
     assert!(!debug.contains("urn:example:loa:2&next=evil"));
 
@@ -1073,10 +1040,7 @@ async fn typed_authorization_options_are_encoded_once_and_bound_to_state() {
     provider_claims["acrs"] = json!(["other", "c1"]);
     client.set_token_response(signed_id_token(provider_claims, "rsa01"));
     let outcome = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap();
     assert_eq!(outcome.state.authorization_policy.as_ref(), Some(&expected));
@@ -1115,10 +1079,7 @@ async fn default_authorization_request_keeps_standard_semantics_and_no_bound_pol
 
     client.set_token_response(signed_id_token(valid_claims(&request.nonce), "rsa01"));
     let outcome = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap();
     assert!(!outcome.authorization.is_bound_authorization());
@@ -1312,10 +1273,7 @@ async fn unknown_stored_policy_version_fails_closed_before_token_exchange() {
     }
 
     let error = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state("secret-code", request.state),
-        )
+        .handle_callback(&store, callback_with_code(&request, "secret-code"))
         .await
         .unwrap_err();
     assert!(matches!(error, AuthError::OidcTokenValidation(_)));
@@ -1346,7 +1304,7 @@ async fn acrs_policy_version_and_state_boundaries_fail_closed() {
     let legacy_outcome = legacy_provider
         .handle_callback(
             &legacy_store,
-            OidcCallbackInput::code_and_state("auth-code", legacy_request.state),
+            callback_with_code(&legacy_request, "auth-code"),
         )
         .await
         .unwrap();
@@ -1381,10 +1339,7 @@ async fn acrs_policy_version_and_state_boundaries_fail_closed() {
         state.authorization_policy = Some(serde_json::from_value(policy).unwrap());
     }
     let error = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&store, callback_with_code(&request, "auth-code"))
         .await
         .unwrap_err();
     assert!(matches!(error, AuthError::OidcTokenValidation(_)));
@@ -1418,7 +1373,7 @@ async fn acrs_policy_version_and_state_boundaries_fail_closed() {
     let expired = expired_provider
         .handle_callback(
             &expired_store,
-            OidcCallbackInput::code_and_state("auth-code", expired_request.state),
+            callback_with_code(&expired_request, "auth-code"),
         )
         .await
         .unwrap_err();
@@ -1730,10 +1685,11 @@ async fn bound_callback_is_single_use_under_concurrency_and_debug_is_redacted() 
     claims["auth_time"] = json!(OffsetDateTime::now_utc().unix_timestamp());
     claims["debug_secret"] = json!("raw-claim-secret");
     client.set_token_response(signed_id_token(claims, "rsa01"));
-    let input = OidcCallbackInput::code_and_state("secret-code", request.state.clone());
+    let input = callback_with_code(&request, "secret-code");
     let debug = format!("{input:?}");
     assert!(!debug.contains("secret-code"));
     assert!(!debug.contains(&request.state));
+    assert!(!debug.contains(request.browser_binding.as_deref().unwrap()));
 
     let first = tokio::spawn({
         let provider = provider.clone();
@@ -1753,7 +1709,7 @@ async fn bound_callback_is_single_use_under_concurrency_and_debug_is_redacted() 
     let debug = format!("{outcome:?}");
     assert!(!debug.contains("opaque-provider-access-token"));
     assert!(!debug.contains(&request.nonce));
-    assert!(!debug.contains(&request.code_verifier));
+    assert!(!debug.contains(&outcome.state.code_verifier));
     assert!(!debug.contains("raw-claim-secret"));
 }
 
@@ -1787,7 +1743,7 @@ async fn acrs_context_and_callback_secrets_are_redacted_from_debug_and_errors() 
         assert!(!debug.contains(REQUESTED_CONTEXT));
         assert!(!debug.contains(&request.state));
         assert!(!debug.contains(&request.nonce));
-        assert!(!debug.contains(&request.code_verifier));
+        assert!(!debug.contains(request.browser_binding.as_deref().unwrap()));
         assert!(!debug.contains(&request.authorization_url));
     }
 
@@ -1795,10 +1751,7 @@ async fn acrs_context_and_callback_secrets_are_redacted_from_debug_and_errors() 
     claims["acrs"] = json!(RETURNED_CONTEXT);
     client.set_token_response(signed_id_token(claims, "rsa01"));
     let error = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state(CODE, request.state.clone()),
-        )
+        .handle_callback(&store, callback_with_code(&request, CODE))
         .await
         .unwrap_err();
     let displayed = format!("{error:?} {error}");
@@ -1821,10 +1774,7 @@ async fn acrs_context_and_callback_secrets_are_redacted_from_debug_and_errors() 
     successful_claims["acrs"] = json!([REQUESTED_CONTEXT]);
     client.set_token_response(signed_id_token(successful_claims, "rsa01"));
     let outcome = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state(CODE, successful_request.state.clone()),
-        )
+        .handle_callback(&store, callback_with_code(&successful_request, CODE))
         .await
         .unwrap();
     assert_eq!(
@@ -1862,10 +1812,7 @@ async fn successful_recent_reauthentication_does_not_imply_local_mfa() {
     let (provider, client) = provider_and_client();
     let state_store = MemoryOAuthStateStore::default();
     let identity_store = MemoryExternalIdentityStore::default();
-    let auth = test_auth_service(
-        MemoryUserStore::default(),
-        MemoryRefreshTokenStore::default(),
-    );
+    let auth = test_auth_service_with_user("recent-user");
     let options = OidcAuthorizationOptions {
         prompt: vec![OidcPrompt::Login],
         max_age: Some(60),
@@ -1889,7 +1836,7 @@ async fn successful_recent_reauthentication_does_not_imply_local_mfa() {
                 user_id: "recent-user".to_string(),
             },
             &NoopClaimsMapper,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
+            callback_with_code(&request, "auth-code"),
             metadata(),
         )
         .await
@@ -1911,6 +1858,8 @@ async fn callback_and_token_endpoint_errors_do_not_echo_provider_input() {
             OidcCallbackInput {
                 code: None,
                 state: None,
+                iss: None,
+                browser_binding: None,
                 error: Some("secret-state-value".to_string()),
                 error_description: Some("secret-code-and-token".to_string()),
             },
@@ -1928,10 +1877,7 @@ async fn callback_and_token_endpoint_errors_do_not_echo_provider_input() {
         "error_description": "secret-token-value"
     });
     let token_error = provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state("secret-code", request.state),
-        )
+        .handle_callback(&store, callback_with_code(&request, "secret-code"))
         .await
         .unwrap_err();
     let displayed = token_error.to_string();
@@ -1953,10 +1899,7 @@ async fn run_validation_case(
     mutate_claims(&mut claims, &request.nonce);
     client.set_token_response(signed_id_token(claims, "rsa01"));
     provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
 }
 
@@ -1987,11 +1930,28 @@ async fn run_bound_case(
     mutate_claims(&mut claims);
     client.set_token_response(signed_id_token(claims, "rsa01"));
     provider
-        .handle_callback(
-            &store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&store, callback_with_code(&request, "auth-code"))
         .await
+}
+
+/// Auth service whose user store holds one enabled user. External logins
+/// re-read the provisioned user, so a session needs a stored, enabled user.
+fn test_auth_service_with_user(
+    user_id: &str,
+) -> AuthService<MemoryUserStore, MemoryRefreshTokenStore> {
+    let users = MemoryUserStore::default();
+    let auth = test_auth_service(users.clone(), MemoryRefreshTokenStore::default());
+    users.insert(stored_user(&auth, user_id, user_id, "password"));
+    auth
+}
+
+/// Callback input from the browser that started `request`.
+pub(super) fn callback_with_code(
+    request: &OidcAuthorizationRequest,
+    code: &str,
+) -> OidcCallbackInput {
+    OidcCallbackInput::code_and_state(code, request.state.clone())
+        .with_browser_binding(request.browser_binding.clone().expect("browser binding"))
 }
 
 pub(super) fn query_pairs(url: &str) -> Vec<(String, String)> {
@@ -2051,10 +2011,7 @@ async fn run_generic_validation_case(
     mutate_claims(&mut claims, &request.nonce);
     client.set_token_response(signed_id_token(claims, "rsa01"));
     provider
-        .handle_callback(
-            &state_store,
-            OidcCallbackInput::code_and_state("auth-code", request.state),
-        )
+        .handle_callback(&state_store, callback_with_code(&request, "auth-code"))
         .await
 }
 

@@ -241,8 +241,9 @@ flows.
 
 `create_authorization_request` stores an `OAuthLoginState` containing the hashed
 state, nonce, PKCE verifier, redirect URI, requested scopes, expiry, an
-optional versioned `authorization_policy`, and the `response_mode` the
-callback must arrive in. The typed-options API binds that policy to the exact
+optional versioned `authorization_policy`, the `response_mode` the
+callback must arrive in, and `browser_binding_hash` (hex SHA-256 of the
+browser-binding secret returned to the host for its cookie). The typed-options API binds that policy to the exact
 state; legacy/default requests store `None`. The raw state is returned only to
 the browser redirect flow. `OAuth2Provider` states carry an empty nonce;
 `OidcProvider` refuses such a state and `OAuth2Provider` refuses a state with a
@@ -267,8 +268,8 @@ WHERE provider_name = ?
   AND state_hash = ?
   AND consumed_at IS NULL
 RETURNING provider_name, state_hash, nonce, code_verifier, redirect_uri,
-          scopes, authorization_policy, response_mode, created_at, expires_at,
-          NULL AS consumed_at;
+          scopes, authorization_policy, response_mode, browser_binding_hash,
+          created_at, expires_at, NULL AS consumed_at;
 ```
 
 Recommended database constraints:
@@ -279,6 +280,9 @@ Recommended database constraints:
   request, never satisfied step-up
 - `response_mode` (`query` or `form_post`); a missing legacy value means
   `query`. A store that drops it makes `form_post` callbacks fail closed
+- nullable `browser_binding_hash` (64 hex characters). It is `NULL` only for
+  providers configured with `OAuthBrowserBinding::NotRequiredHostBindsState`;
+  a store that drops it makes every callback fail with `INVALID_OAUTH_STATE`
 - `nonce` may be empty (plain OAuth 2.0 states)
 - compare expiry before accepting the callback
 - update `consumed_at` in the same statement that verifies it is currently null

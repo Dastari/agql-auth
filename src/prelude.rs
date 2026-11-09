@@ -25,7 +25,8 @@ pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
     ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    MicrosoftEntraTenant, OAuthBrowserBinding, OAuthResponseMode, OidcProviderConfig,
+    OidcProviderKind,
 };
 pub use crate::decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -63,15 +64,17 @@ pub use crate::models::{
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use crate::oauth2::{
-    OAuth2AuthorizationRequest, OAuth2CallbackOutcome, OAuth2EmailVerification,
+    OAuth2AuthorizationRequest, OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2LoginResult,
     OAuth2ProfileMapping, OAuth2Provider, OAuth2ProviderConfig, OAuth2TokenResponse,
-    OAuth2UserProfile, OAuth2VerifiedEmailList, OAuth2VerifiedEmailSelection,
+    OAuth2UserProfile, OAuth2UserProvisioner, OAuth2VerifiedEmailList,
+    OAuth2VerifiedEmailSelection,
 };
 pub use crate::oidc::{
-    ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,
-    OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
-    ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
-    hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+    ClaimsMapper, ExternalUserProvisioner, MAX_OAUTH_STATE_TTL_SECONDS, MappedClaims,
+    MicrosoftClaimsMapper, NoopClaimsMapper, OidcCallbackOutcome, OidcDiscoveryDocument,
+    OidcHttpClient, OidcProvider, PkcePair, ProvisionedExternalUser, generate_oauth_state,
+    generate_oidc_nonce, generate_pkce_pair, hash_oauth_state, pkce_s256_challenge,
+    stable_external_subject,
 };
 pub use crate::oidc_authorization::{
     MAX_OIDC_AUTHORIZATION_TOTAL_VALUE_LENGTH, MAX_OIDC_AUTHORIZATION_VALUE_LENGTH,
