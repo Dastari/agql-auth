@@ -1,6 +1,7 @@
 mod api_token_binding;
 mod api_tokens;
 mod assurance;
+mod assurance_policy_edges;
 mod auth_lifecycle;
 mod bounded_memory;
 mod challenge_admission;

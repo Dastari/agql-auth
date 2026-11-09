@@ -304,6 +304,8 @@ async fn session_bound_grant_preserves_active_session_and_current_assurance_with
         allowed_amr: vec!["otp".to_string()],
         allowed_acr: vec!["urn:example:loa:2".to_string()],
         match_mode: AssuranceMatchMode::All,
+        required_amr: vec![],
+        required_context: None,
     };
     mfa_policy
         .evaluate(&decoded, &FixedClock::new(now))

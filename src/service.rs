@@ -545,7 +545,9 @@ where
     /// The injected clock supplies the genuine step-up time. Only the session
     /// identified by `refresh_token` is changed; unrelated sessions and token
     /// families are untouched. Calling this method is the host's assertion that
-    /// the supplied methods/ACR satisfy its MFA policy.
+    /// the supplied methods/ACR satisfy its MFA policy. A step-up without at
+    /// least one method is refused with [`AuthError::InvalidConfiguration`] and
+    /// rotates nothing.
     pub async fn step_up_session(
         &self,
         refresh_token: &str,
@@ -553,6 +555,11 @@ where
         metadata: ClientMetadata,
         clock: &dyn Clock,
     ) -> AuthResult<AuthPayload> {
+        if step_up.methods.is_empty() {
+            return Err(AuthError::InvalidConfiguration(
+                "step-up requires at least one authentication method".to_string(),
+            ));
+        }
         let assurance = SessionAssurance::new(
             clock.now(),
             step_up.methods,

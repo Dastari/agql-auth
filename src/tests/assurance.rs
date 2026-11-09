@@ -22,6 +22,8 @@ fn policy(maximum_age: Duration) -> RecentMfaPolicy {
         allowed_amr: vec!["otp".to_string()],
         allowed_acr: vec!["urn:example:loa:2".to_string()],
         match_mode: AssuranceMatchMode::All,
+        required_amr: vec![],
+        required_context: None,
     }
 }
 
