@@ -45,13 +45,25 @@ jobs:
           cargo test --locked password_login_consumer_conformance -- --ignored
           cargo test --locked refresh_reuse_grace_consumer_conformance -- --ignored
 
+  dependency-advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4aab473fa1157d90c6dc14f879ca54797e16fea0 # 1.90.0
+      - name: Audit Cargo.lock against the RustSec advisory database
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          # Ignored advisories and their dispositions: .cargo/audit.toml and
+          # docs/dependency-advisories.md.
+          cargo audit --deny warnings
+
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [default, no-default-features]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -62,24 +74,19 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          key: ${{ matrix.lane }}
       - name: Validate release metadata and formatting
         run: |
           scripts/check-release-state.sh
           scripts/check-package-release-policy.sh
           python3 -m unittest discover -s scripts -p 'test_*.py'
           cargo fmt --all -- --check
-      - name: Validate crate lane
+      - name: Validate crate
         env:
-          LANE: ${{ matrix.lane }}
           RUSTDOCFLAGS: -D warnings
         run: |
           set -euo pipefail
-          features=()
-          if [[ "$LANE" == no-default-features ]]; then
-            features=(--no-default-features)
-          fi
-          cargo clippy --locked --all-targets "${features[@]}" -- -D warnings
-          cargo test --locked "${features[@]}"
-          cargo doc --locked --no-deps "${features[@]}"
+          # The crate has no Cargo features (scripts/release.py enforces it), so a
+          # --no-default-features lane would repeat this one.
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo doc --locked --no-deps

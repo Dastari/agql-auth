@@ -13,13 +13,7 @@ use argon2::password_hash::{
     PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
 use async_graphql::Data;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rsa::RsaPublicKey;
-use rsa::pkcs1::DecodeRsaPublicKey;
-use rsa::pkcs8::DecodePublicKey;
-use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use time::{Duration, OffsetDateTime};
@@ -2489,7 +2483,7 @@ impl JwtKeyMaterial {
                         AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string())
                     })?;
                 validate_rs256_key_pair(&encoding_key, &decoding_key)?;
-                let jwks = build_rs256_jwks(public_key_pem, key_id)?;
+                let jwks = build_rs256_jwks(&decoding_key, key_id)?;
 
                 (
                     encoding_key,
@@ -2578,8 +2572,13 @@ fn validate_rs256_key_pair(
     Ok(())
 }
 
-fn build_rs256_jwks(public_key_pem: &str, key_id: &str) -> AuthResult<JsonValue> {
-    let public_key = parse_rsa_public_key(public_key_pem)?;
+fn build_rs256_jwks(decoding_key: &DecodingKey, key_id: &str) -> AuthResult<JsonValue> {
+    let invalid = || AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string());
+    let jwk = jsonwebtoken::jwk::Jwk::from_decoding_key(decoding_key, Some(Algorithm::RS256))
+        .map_err(|_| invalid())?;
+    let jsonwebtoken::jwk::AlgorithmParameters::RSA(rsa) = jwk.algorithm else {
+        return Err(invalid());
+    };
     Ok(json!({
         "keys": [
             {
@@ -2587,15 +2586,9 @@ fn build_rs256_jwks(public_key_pem: &str, key_id: &str) -> AuthResult<JsonValue>
                 "use": "sig",
                 "alg": "RS256",
                 "kid": key_id,
-                "n": URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
-                "e": URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+                "n": rsa.n,
+                "e": rsa.e,
             }
         ]
     }))
-}
-
-fn parse_rsa_public_key(public_key_pem: &str) -> AuthResult<RsaPublicKey> {
-    RsaPublicKey::from_public_key_pem(public_key_pem)
-        .or_else(|_| RsaPublicKey::from_pkcs1_pem(public_key_pem))
-        .map_err(|_| AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string()))
 }

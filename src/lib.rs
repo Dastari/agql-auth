@@ -104,6 +104,8 @@
 //! JWT signing and JWKS, Microsoft Entra OIDC, recovery flows, and MFA
 //! primitives.
 
+#![forbid(unsafe_code)]
+
 mod api_tokens;
 mod assurance;
 mod channel;

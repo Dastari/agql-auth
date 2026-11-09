@@ -44,11 +44,14 @@ lanes and the protected release gate when maintaining workflows, following
    `scripts/check-package-release-policy.sh`,
    `python3 -m unittest discover -s scripts -p 'test_*.py'`, and
    `cargo fmt --all -- --check`.
-4. For both defaults and `--no-default-features`, run
-   `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`,
-   and `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps`.
-   There are currently no Cargo features; adding one requires extending the
-   explicit validation matrix. Never substitute `--all-features`.
+4. Run `cargo clippy --locked --all-targets -- -D warnings`,
+   `cargo test --locked`, and `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps`.
+   The crate has no Cargo features and `scripts/release.py` refuses to release
+   one, so a separate `--no-default-features` lane would repeat the default
+   lane. Adding a feature requires restoring an explicit validation matrix.
+   Never substitute `--all-features`. Run `cargo audit` (cargo-audit 0.22.2);
+   any ignored advisory needs a disposition in
+   [dependency advisories](dependency-advisories.md).
 5. Run `cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)"
    --default-features --release-type minor` with pinned cargo-semver-checks 0.46.0.
    Without `--release-type minor`, a pre-1.0 minor bump counts as major and every

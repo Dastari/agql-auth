@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.27.0
+
+### Dependencies and repository
+
+- Upgrade `jsonwebtoken` to 11.1 (matching graphql-orm-router, removing a
+  duplicate) and the `tokio` dev-dependency to 1.54.1 (RUSTSEC-2026-0386).
+- Remove the direct `rsa` dependency; RS256 JWKS `n`/`e` are derived through
+  `jsonwebtoken`. RUSTSEC-2023-0071 (rsa 0.9) and RUSTSEC-2026-0387
+  (crypto-bigint 0.5) remain reachable only through `jsonwebtoken`'s
+  `rust_crypto` backend; dispositions are in `docs/dependency-advisories.md`.
+- Declare `rust-version = "1.90"` and `#![forbid(unsafe_code)]`.
+- CI runs `cargo audit`; add Dependabot, `CODEOWNERS` and `SECURITY.md`
+  (private vulnerability reporting). Drop the redundant `--no-default-features`
+  lane: the crate has no features and the release script refuses to add one.
+
 ## 0.26.0
 
 - Add an opt-in grace window for reuse of a just-rotated refresh token, off by
