@@ -37,10 +37,29 @@ pub trait UserStore: Send + Sync {
 /// Persists rotated opaque refresh tokens.
 ///
 /// Implementations should store only token hashes and should make revocation
-/// operations durable before returning. Refresh-token rotation must be atomic:
-/// [`AuthService::refresh`](crate::AuthService::refresh) relies on
-/// [`RefreshTokenStore::rotate_refresh_token`] to ensure only one concurrent
-/// refresh can replace a token.
+/// operations durable before returning. A session family has at most one
+/// unrevoked token, and only [`Self::rotate_refresh_token`] moves it to a new
+/// record. Every implementation must keep these rules under concurrency, with
+/// or without refresh reuse grace:
+///
+/// - [`Self::rotate_refresh_token`] is a compare-and-swap. Update the current
+///   record first, `... WHERE id = ? AND revoked_at IS NULL`, and insert the
+///   replacement in the same transaction only when exactly one row changed.
+///   Two rotations of one token must not both succeed.
+/// - [`Self::revoke_refresh_token`] leaves an already revoked record unchanged,
+///   checked in the same statement.
+/// - [`Self::revoke_refresh_token_family`] must not miss a replacement that a
+///   rotation commits while it runs, or that token stays live after sign-out
+///   or replay detection. At `READ COMMITTED` in PostgreSQL, SQL Server and
+///   MySQL a single `UPDATE ... WHERE session_family_id = ? AND revoked_at IS
+///   NULL` can miss one. Serialize the two per family, for example with a
+///   transaction-scoped lock taken in its own statement.
+///
+/// A unique index on `session_family_id` over unrevoked rows turns a broken
+/// rotation into an error instead of a second live token. See
+/// `docs/storage-traits.md` for the SQL shape and per-backend notes, and
+/// `testdata/consumer_refresh_token_store.py` for an example that passes the
+/// crate's conformance races.
 pub trait RefreshTokenStore: Send + Sync {
     /// Stores a newly issued refresh token record.
     async fn insert_refresh_token(&self, token: StoredRefreshToken) -> AuthResult<()>;
@@ -55,12 +74,12 @@ pub trait RefreshTokenStore: Send + Sync {
 
     /// Revokes a single refresh token.
     ///
-    /// A store that overrides [`Self::find_live_refresh_tokens_in_family`] must
-    /// leave an already revoked record unchanged, checked in the same atomic
+    /// Leave an already revoked record unchanged, checked in the same atomic
     /// statement, for example `UPDATE ... WHERE id = ? AND revoked_at IS NULL`.
     /// Otherwise a sign-out that read the token before a concurrent rotation
-    /// overwrites that rotation's `revoked_at` and `replaced_by_token_id`, which
-    /// ends the token's reuse grace early.
+    /// overwrites that rotation's `revoked_at` and `replaced_by_token_id`. The
+    /// service then cannot see that the token was rotated, and the replacement
+    /// outlives the sign-out.
     async fn revoke_refresh_token(
         &self,
         token_id: Uuid,
@@ -70,12 +89,38 @@ pub trait RefreshTokenStore: Send + Sync {
     ) -> AuthResult<()>;
 
     /// Revokes all refresh tokens in a session family.
+    ///
+    /// Must not miss a replacement committed by a concurrent
+    /// [`Self::rotate_refresh_token`]; see the trait documentation.
     async fn revoke_refresh_token_family(
         &self,
         session_family_id: Uuid,
         revoked_at: OffsetDateTime,
         reason: RefreshTokenRevocationReason,
     ) -> AuthResult<()>;
+
+    /// Revokes every unrevoked refresh token of a user, in all session
+    /// families, and returns how many were revoked.
+    ///
+    /// [`AuthService::revoke_user_sessions`](crate::AuthService::revoke_user_sessions)
+    /// calls this when a host disables a user, changes or resets a password,
+    /// or ends every session. Leave already revoked records unchanged.
+    ///
+    /// Like family revocation, it must not miss a replacement that a
+    /// concurrent [`Self::rotate_refresh_token`] commits while it runs. At
+    /// `READ COMMITTED` either serialize it with rotation, for example with a
+    /// per-user lock that rotation also takes, or repeat the update in the same
+    /// transaction until a fresh statement finds no unrevoked token of the
+    /// user. SQLite's `BEGIN IMMEDIATE` serializes writers on its own.
+    ///
+    /// This method has no default: a store that cannot do it must not appear
+    /// to succeed. Index `user_id` to keep it efficient.
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64>;
 
     /// Records metadata for a refresh-token use outside the rotation path.
     ///
@@ -99,6 +144,10 @@ pub trait RefreshTokenStore: Send + Sync {
     /// inserted durably. Return `Ok(false)` when the current token is missing or
     /// already revoked. If the replacement cannot be inserted, return `Err`
     /// and leave the current token unmodified.
+    ///
+    /// Decide the outcome from the row count of the conditional update, not
+    /// from an earlier read: a read without a lock can see a token that a
+    /// concurrent family revocation is revoking.
     async fn rotate_refresh_token(
         &self,
         current_token_id: Uuid,
@@ -121,23 +170,15 @@ pub trait RefreshTokenStore: Send + Sync {
     ///   all. One plain `SELECT` does this at `READ COMMITTED`. Do not lock the
     ///   rows it returns.
     ///
-    /// Overriding it also commits the store to these rules, which keep a family
-    /// to one live token:
+    /// The concurrency rules in the trait documentation apply to every store.
+    /// The grace window is measured from `revoked_at` and
+    /// `replaced_by_token_id`, so overriding this also relies on these:
     ///
-    /// - [`Self::rotate_refresh_token`] must keep its documented compare-and-swap
-    ///   behavior: when the token is already revoked, return `Ok(false)` and change
-    ///   nothing. Two calls replacing the same token must not both succeed.
     /// - `replaced_by_token_id` is set only by rotation.
     /// - Nothing changes `revoked_at` or `replaced_by_token_id` on an already
-    ///   revoked token while its family has an unrevoked token. A window is
-    ///   measured from them. [`Self::revoke_refresh_token`] must enforce this
-    ///   atomically, because a caller's earlier read can be stale.
-    /// - [`Self::revoke_refresh_token_family`] must not miss a replacement
-    ///   committed while it runs, or that token stays live after sign-out. A
-    ///   single `UPDATE` at PostgreSQL `READ COMMITTED` can miss one. Serialize
-    ///   this method and [`Self::rotate_refresh_token`] per family, for example
-    ///   with a transaction-scoped advisory lock taken in its own statement. See
-    ///   `docs/refresh-reuse-grace.md`.
+    ///   revoked token while its family has an unrevoked token.
+    ///
+    /// See `docs/refresh-reuse-grace.md`.
     async fn find_live_refresh_tokens_in_family(
         &self,
         _session_family_id: Uuid,

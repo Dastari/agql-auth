@@ -18,6 +18,7 @@ mod current_authority;
 mod delegation_reference;
 mod error_display;
 mod grant;
+mod graphql_refresh_cookie;
 mod graphql_transport;
 mod guard_edges;
 mod jwt_signing;
@@ -28,6 +29,7 @@ mod oauth_callback_binding;
 mod oidc;
 mod oidc_client_credentials;
 mod oidc_hardening;
+mod password_hashing;
 mod password_login;
 mod password_reset_siblings;
 mod principal_reference;
@@ -36,8 +38,10 @@ mod purpose_token_replay;
 mod rate_limits;
 mod recovery;
 mod refresh_reuse_grace;
+mod refresh_store_conformance;
 mod scope_match;
 mod scopes;
+mod session_lifetime;
 mod time_invariants;
 mod token_config;
 mod totp;
@@ -177,6 +181,22 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
             }
         }
         Ok(())
+    }
+
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        _reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        let mut revoked = 0;
+        for token in self.tokens_by_id.lock().unwrap().values_mut() {
+            if token.user_id == user_id && token.revoked_at.is_none() {
+                token.revoked_at = Some(revoked_at);
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
     }
 
     async fn touch_refresh_token(

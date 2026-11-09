@@ -138,3 +138,58 @@ async fn store_less_reset_tokens_are_never_consumable() {
         Err(AuthError::PasswordResetTokenReplayed)
     ));
 }
+
+#[tokio::test]
+async fn consuming_a_reset_revokes_every_refresh_session_of_the_user() {
+    let users = super::MemoryUserStore::default();
+    let auth = test_auth_service(users.clone(), Default::default());
+    users.insert(super::stored_user(
+        &auth,
+        "user-1",
+        "alice@example.com",
+        "password123",
+    ));
+    users.insert(super::stored_user(
+        &auth,
+        "user-2",
+        "bob@example.com",
+        "password456",
+    ));
+    let first = auth
+        .login("alice@example.com", "password123", super::metadata())
+        .await
+        .unwrap();
+    let second = auth
+        .login(
+            "alice@example.com",
+            "password123",
+            ClientMetadata::default(),
+        )
+        .await
+        .unwrap();
+    let other = auth
+        .login("bob@example.com", "password456", ClientMetadata::default())
+        .await
+        .unwrap();
+
+    let store = MemoryPasswordResetStore::default();
+    let reset = auth
+        .issue_password_reset_token_with_store(&store, "user-1", Duration::hours(1))
+        .await
+        .unwrap();
+    auth.consume_password_reset_token(&store, &reset.token)
+        .await
+        .unwrap();
+
+    for payload in [first, second] {
+        assert!(
+            auth.refresh(&payload.refresh_token, ClientMetadata::default())
+                .await
+                .is_err(),
+            "a refresh session survived the password reset"
+        );
+    }
+    auth.refresh(&other.refresh_token, ClientMetadata::default())
+        .await
+        .expect("another user's session is untouched");
+}

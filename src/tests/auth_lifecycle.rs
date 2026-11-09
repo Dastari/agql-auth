@@ -265,6 +265,17 @@ impl RefreshTokenStore for RotationRaceRefreshTokenStore {
             .await
     }
 
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        self.inner
+            .revoke_refresh_tokens_for_user(user_id, revoked_at, reason)
+            .await
+    }
+
     async fn touch_refresh_token(
         &self,
         token_id: Uuid,
@@ -327,6 +338,17 @@ impl RefreshTokenStore for FailingRotationRefreshTokenStore {
     ) -> crate::AuthResult<()> {
         self.inner
             .revoke_refresh_token_family(session_family_id, revoked_at, reason)
+            .await
+    }
+
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        self.inner
+            .revoke_refresh_tokens_for_user(user_id, revoked_at, reason)
             .await
     }
 

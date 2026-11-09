@@ -135,6 +135,9 @@ pub enum AuthError {
     TokenCreation(String),
     /// Password hashing or verification failed unexpectedly.
     PasswordHashing(String),
+    /// A password to hash is longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`].
+    PasswordTooLong,
     /// Host store operation failed.
     Store(String),
     /// Authentication dependency is temporarily unavailable.
@@ -197,6 +200,7 @@ impl AuthError {
             AuthError::MissingConnectionInitAuth => "UNAUTHENTICATED",
             AuthError::TokenCreation(_) => "AUTH_SERVICE_UNAVAILABLE",
             AuthError::PasswordHashing(_) => "AUTH_SERVICE_UNAVAILABLE",
+            AuthError::PasswordTooLong => "PASSWORD_TOO_LONG",
             AuthError::Store(_) | AuthError::AuthServiceUnavailable => "AUTH_SERVICE_UNAVAILABLE",
             AuthError::Config(_) => "INVALID_CONFIGURATION",
         }
@@ -206,6 +210,7 @@ impl AuthError {
     pub fn public_message(&self) -> &'static str {
         match self {
             AuthError::InvalidCredentials => "invalid credentials",
+            AuthError::PasswordTooLong => "password is too long",
             AuthError::Unauthenticated
             | AuthError::MissingAuthorizationData
             | AuthError::MissingConnectionInitAuth
@@ -399,6 +404,7 @@ impl fmt::Display for AuthErrorDiagnostic<'_> {
             }
             AuthError::TokenCreation(detail) => write!(f, "token creation failed: {detail}"),
             AuthError::PasswordHashing(detail) => write!(f, "password hashing failed: {detail}"),
+            AuthError::PasswordTooLong => f.write_str("password is too long"),
             AuthError::Store(detail) => write!(f, "storage error: {detail}"),
             AuthError::AuthServiceUnavailable => f.write_str("authentication service unavailable"),
             AuthError::Config(detail) => write!(f, "configuration error: {detail}"),

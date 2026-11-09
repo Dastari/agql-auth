@@ -100,10 +100,11 @@ host.apply_password_reset_and_required_revocations(
 ).await?;
 ```
 
-The final host operation must check current account/expiry and implement the
-password write plus required session/refresh/API-token revocation policy using
-its transaction or fencing boundary. The token consume does not perform those
-writes or clear already accepted JWTs. If a later write fails, the token may
+Consumption revokes every refresh token of the user through
+`revoke_user_sessions`, so no refresh session survives a reset. The final host
+operation must check current account/expiry and implement the password write plus
+any API-token revocation policy using its transaction or fencing boundary. The
+token consume does not write the password or clear already accepted JWTs. If a later write fails, the token may
 already be consumed: fail closed and provide a fresh reset/recovery path, not a
 validation-only retry. Transport/CSRF controls and session status checks remain
 host responsibilities. See [password reset](recovery-mfa-and-challenges.md#password-reset)

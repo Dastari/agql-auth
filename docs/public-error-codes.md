@@ -42,6 +42,7 @@ match auth.login(principal, password, metadata).await {
 | `RATE_LIMITED` | Throttled or locked credential/request flows |
 | `AUTH_SERVICE_UNAVAILABLE` | Store failures, OIDC transport failures, token creation failures |
 | `INVALID_CONFIGURATION` | Host misconfiguration (usually fail-fast at startup) |
+| `PASSWORD_TOO_LONG` | A password to hash exceeds `PasswordHashingConfig::max_password_bytes` |
 
 OAuth 2.0 (`OAuth2Provider`) failures are distinct variants that map onto the
 stable codes above, so hosts branch on the variant and clients see no provider

@@ -67,6 +67,7 @@ fn stored_credential_records_redact_hashes_in_debug() {
         token_hash: SECRET.into(),
         created_at: now(),
         expires_at: now() + Duration::days(1),
+        session_expires_at: None,
         last_used_at: None,
         revoked_at: None,
         replaced_by_token_id: None,

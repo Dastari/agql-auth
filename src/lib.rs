@@ -168,9 +168,11 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
-    ClientMetadata, JwtSigningConfig, JwtVerificationKey, LegacyScopeClaims,
+    ClientMetadata, DEFAULT_MAX_PASSWORD_BYTES, DEFAULT_MAX_SESSION_LIFETIME, JwtSigningConfig,
+    JwtVerificationKey, LegacyScopeClaims, MAX_PASSWORD_BYTES_LIMIT,
     MAX_PREVIOUS_VERIFICATION_KEYS, MicrosoftEntraConfig, MicrosoftEntraTenant,
     OAuthBrowserBinding, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    PasswordHashingConfig,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -227,6 +229,10 @@ pub use oidc_authorization::{
     MAX_OIDC_AUTHORIZATION_VALUES, MAX_OIDC_CLAIMS_REQUEST_LENGTH, MAX_OIDC_MAX_AGE_SECONDS,
     OidcAuthorizationOptions, OidcAuthorizationOutcome, OidcAuthorizationPolicy,
     OidcIdTokenClaimRequest, OidcPrompt,
+};
+pub use password_work::{
+    DEFAULT_MAX_PASSWORD_WORKERS, DEFAULT_QUEUED_PASSWORD_JOBS_PER_WORKER, MAX_PASSWORD_WORKERS,
+    MAX_QUEUED_PASSWORD_JOBS, PasswordWorkPool, PasswordWorkPoolConfig,
 };
 pub use principal_reference::{
     CurrentPrincipalResolver, DelegationGrantCeiling, MAX_SESSION_VERSION_LENGTH,

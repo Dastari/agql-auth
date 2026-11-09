@@ -10,7 +10,7 @@ use crate::models::AuthRateLimitFlow;
 use crate::models::{PasswordResetToken, VerifiedPasswordResetToken};
 use crate::stores::{PasswordResetTokenStore, RefreshTokenStore, UserStore};
 use crate::util::map_password_reset_decode_error;
-use crate::{AuthError, AuthResult};
+use crate::{AuthError, AuthResult, RefreshTokenRevocationReason};
 
 impl<U, R> AuthService<U, R>
 where
@@ -156,12 +156,16 @@ where
     /// Validates and atomically consumes a reset ID with configured abuse
     /// protection, then invalidates the user's other outstanding reset tokens.
     ///
+    /// It then revokes every refresh token of the user through
+    /// [`Self::revoke_user_sessions`], so no refresh session survives a reset.
+    ///
     /// Requires an atomic [`PasswordResetTokenStore`] implementation. If sibling
-    /// invalidation fails the token stays consumed and the error is returned;
-    /// the user needs a fresh reset. This does not update a password or revoke
-    /// sessions/API tokens. The host binds the verified user, persists the new
-    /// password and implements revocation and recovery/fencing if any step
-    /// fails after consumption.
+    /// invalidation or session revocation fails the token stays consumed and
+    /// the error is returned; the user needs a fresh reset. This does not
+    /// update a password, revoke API tokens or invalidate access tokens already
+    /// issued. The host binds the verified user, persists the new password and
+    /// implements any further revocation and recovery/fencing if a step fails
+    /// after consumption.
     pub async fn consume_password_reset_token_with_metadata<S>(
         &self,
         store: &S,
@@ -181,10 +185,13 @@ where
                 OffsetDateTime::now_utc(),
             )
             .await?;
-        // INTEGRATION: the `sessions` stream adds an `AuthService` method that
-        // revokes all of a user's refresh families. Call it here for
-        // `verified.user_id` so completing a reset ends every refresh session,
-        // and update this method's docs and docs/secure-primitive-flows.md.
+        // A consumed reset proves the account may be compromised: end every
+        // refresh session before the host writes the new password.
+        self.revoke_user_sessions(
+            &verified.user_id,
+            RefreshTokenRevocationReason::AdminRevoked,
+        )
+        .await?;
         Ok(verified)
     }
 

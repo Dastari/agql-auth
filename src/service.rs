@@ -120,6 +120,9 @@ pub struct AuthService<U, R> {
     pub(super) rate_limit_clock: Arc<dyn Clock>,
     pub(super) login_challenge_clock: Arc<dyn Clock>,
     pub(super) argon2: Argon2<'static>,
+    /// Hash verified for unknown and disabled users: same parameters as new
+    /// hashes, so its cost matches a current user's.
+    dummy_password_hash: Arc<str>,
     pub(super) password_executor: Arc<crate::password_work::PasswordWorkPool>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
@@ -199,6 +202,8 @@ where
     {
         config.validate()?;
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
+        let argon2 = config.password_hashing.argon2()?;
+        let dummy_password_hash = dummy_password_hash(&config.password_hashing, &argon2)?;
         let rate_limit_store: Arc<dyn AuthRateLimitStore> = rate_limit_store;
 
         Ok(Self {
@@ -223,8 +228,9 @@ where
             rate_limit_store,
             rate_limit_clock,
             login_challenge_clock: Arc::new(SystemClock),
-            argon2: Argon2::default(),
-            password_executor: crate::password_work::PasswordWorkPool::shared()?,
+            argon2,
+            dummy_password_hash,
+            password_executor: crate::password_work::PasswordWorkPool::shared(),
             #[cfg(test)]
             password_work: Arc::default(),
             #[cfg(test)]
@@ -311,9 +317,52 @@ where
         self
     }
 
+    /// Runs this service's password work on `pool` instead of
+    /// [`PasswordWorkPool::shared`](crate::PasswordWorkPool::shared).
+    ///
+    /// Pass the same pool to several services to share one budget, or a
+    /// separate pool to isolate them.
+    pub fn with_password_work_pool(mut self, pool: Arc<crate::PasswordWorkPool>) -> Self {
+        self.password_executor = pool;
+        self
+    }
+
+    /// Whether a stored hash should be replaced with one made under the
+    /// current [`crate::PasswordHashingConfig`].
+    ///
+    /// True for a hash that is not Argon2id version 19 with exactly the
+    /// configured memory, iterations and lanes, or that cannot be parsed. Call
+    /// it after a successful login, while the password is at hand, and store
+    /// `hash_password(password)` in place of the old hash. It reads only the
+    /// hash's parameters and never verifies a password.
+    pub fn password_hash_needs_rehash(&self, password_hash: &str) -> bool {
+        let Ok(parsed) = PasswordHash::new(password_hash) else {
+            return true;
+        };
+        let Ok(params) = argon2::Params::try_from(&parsed) else {
+            return true;
+        };
+        let current = self.argon2.params();
+        parsed.algorithm != argon2::Algorithm::Argon2id.ident()
+            || parsed.version != Some(argon2::Version::V0x13.into())
+            || params.m_cost() != current.m_cost()
+            || params.t_cost() != current.t_cost()
+            || params.p_cost() != current.p_cost()
+    }
+
+    fn password_too_long(&self, password: &str) -> bool {
+        password.len() > self.config.password_hashing.max_password_bytes
+    }
+
     /// Hashes a password synchronously with Argon2. This blocks the caller;
-    /// async service entry points use the shared bounded worker pool.
+    /// async service entry points use the bounded worker pool.
+    ///
+    /// Returns [`AuthError::PasswordTooLong`] for a password longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`].
     pub fn hash_password(&self, password: &str) -> AuthResult<String> {
+        if self.password_too_long(password) {
+            return Err(AuthError::PasswordTooLong);
+        }
         let salt = SaltString::generate(&mut OsRng);
         self.argon2
             .hash_password(password.as_bytes(), &salt)
@@ -361,8 +410,15 @@ where
     }
 
     /// Verifies a password synchronously against an Argon2 hash. This blocks
-    /// the caller; async service entry points use the shared bounded worker pool.
+    /// the caller; async service entry points use the bounded worker pool.
+    ///
+    /// A password longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`] is
+    /// [`AuthError::InvalidCredentials`] without Argon2 work.
     pub fn verify_password(&self, password: &str, password_hash: &str) -> AuthResult<()> {
+        if self.password_too_long(password) {
+            return Err(AuthError::InvalidCredentials);
+        }
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
         let result = self
@@ -378,6 +434,9 @@ where
     }
 
     pub(super) async fn hash_password_async(&self, password: &str) -> AuthResult<String> {
+        if self.password_too_long(password) {
+            return Err(AuthError::PasswordTooLong);
+        }
         let password = zeroize::Zeroizing::new(password.to_owned());
         let argon2 = self.argon2.clone();
         self.password_executor
@@ -406,8 +465,18 @@ where
         password_hash: &str,
         deadline: Option<(Arc<dyn Clock>, OffsetDateTime)>,
     ) -> AuthResult<()> {
+        // An over-long password can never match: a wrong password, without
+        // queueing or Argon2 work. The check does not depend on the account.
+        if self.password_too_long(password) {
+            return Err(AuthError::InvalidCredentials);
+        }
         let password = zeroize::Zeroizing::new(password.to_owned());
-        let password_hash = password_hash.to_owned();
+        // The fixed dummy hash stands for the configured parameters.
+        let password_hash = if password_hash == DUMMY_PASSWORD_HASH {
+            self.dummy_password_hash.to_string()
+        } else {
+            password_hash.to_owned()
+        };
         let argon2 = self.argon2.clone();
         #[cfg(test)]
         let password_work = self.password_work.clone();
@@ -429,6 +498,10 @@ where
     }
 
     /// Performs password login and issues a local session.
+    /// Password work awaits the bounded pool; saturation returns
+    /// `AuthServiceUnavailable` and refunds the reserved attempt, so throttle
+    /// the login route at the edge as well (see
+    /// [`PasswordWorkPool`](crate::PasswordWorkPool)).
     ///
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
@@ -872,6 +945,11 @@ where
             },
         };
 
+        let session_expires_at = [Some(source), newest]
+            .into_iter()
+            .flatten()
+            .filter_map(|record| self.session_deadline(record))
+            .min();
         self.issue_tokens_only(
             auth_user,
             source.session_family_id,
@@ -879,11 +957,51 @@ where
             now,
             source.grant_source,
             Some(&authorization_role_ceiling),
+            session_expires_at,
         )
         .await
     }
 
-    /// Revokes a refresh token or its full session family.
+    /// The absolute deadline a replacement for `record` inherits.
+    ///
+    /// A record without one, from before the setting or from a store that does
+    /// not persist it, is not extended past its own expiry while a maximum
+    /// lifetime is configured.
+    fn session_deadline(&self, record: &StoredRefreshToken) -> Option<OffsetDateTime> {
+        record
+            .session_expires_at
+            .or(self.config.max_session_lifetime.map(|_| record.expires_at))
+    }
+
+    /// Revokes every refresh token of a user, in every session family.
+    ///
+    /// Call this when disabling a user, after a password change or reset, and
+    /// for "sign out everywhere". Returns the number of tokens revoked. Access
+    /// tokens already issued stay valid until they expire, so pair it with
+    /// short access-token lifetimes or a status check. Store errors are
+    /// returned; nothing is reported as revoked unless the store did it.
+    pub async fn revoke_user_sessions(
+        &self,
+        user_id: &str,
+        reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        self.refresh_store
+            .revoke_refresh_tokens_for_user(user_id, OffsetDateTime::now_utc(), reason)
+            .await
+    }
+
+    /// Ends the session that `refresh_token` belongs to.
+    ///
+    /// Use `revoke_family = true` for sign-out. It revokes every token in the
+    /// session family.
+    ///
+    /// With `false`, only the presented token is revoked while it is the
+    /// family's live token. A token that rotation has superseded, before or
+    /// during this call, is a reuse signal: its successor may be held by
+    /// someone else, so the whole family is revoked, with
+    /// [`RefreshTokenRevocationReason::ReplayDetected`] when it was already
+    /// superseded. Either way no token of the family stays live. A token
+    /// revoked for another reason, or an unknown token, changes nothing.
     pub async fn logout(&self, refresh_token: &str, revoke_family: bool) -> AuthResult<()> {
         let now = OffsetDateTime::now_utc();
         let token_hash = hash_refresh_token(refresh_token);
@@ -896,22 +1014,51 @@ where
         };
 
         if revoke_family {
+            return self
+                .refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::Logout,
+                )
+                .await;
+        }
+        if existing.is_revoked() {
+            if existing.replaced_by_token_id.is_none() {
+                // Already ended by sign-out, expiry or revocation. A second
+                // revocation could only move `revoked_at`.
+                return Ok(());
+            }
+            return self
+                .refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::ReplayDetected,
+                )
+                .await;
+        }
+
+        self.refresh_store
+            .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)
+            .await?;
+        // The store leaves a token that a concurrent rotation revoked first
+        // unchanged, so read again: a successor must not outlive the sign-out.
+        let rotated = self
+            .refresh_store
+            .find_refresh_token_by_hash(&token_hash)
+            .await?
+            .is_none_or(|current| current.replaced_by_token_id.is_some());
+        if rotated {
             self.refresh_store
                 .revoke_refresh_token_family(
                     existing.session_family_id,
                     now,
                     RefreshTokenRevocationReason::Logout,
                 )
-                .await
-        } else if self.refresh_reuse_grace.is_some() && existing.is_revoked() {
-            // A second revocation could move `revoked_at` in some stores, which
-            // would let the holder of a superseded token renew its window.
-            Ok(())
-        } else {
-            self.refresh_store
-                .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)
-                .await
+                .await?;
         }
+        Ok(())
     }
 
     /// Validates a local JWT access token and returns the authenticated user.
@@ -1654,6 +1801,11 @@ where
         grant_source: crate::RefreshGrantSource,
     ) -> AuthResult<AuthPayload> {
         let now = OffsetDateTime::now_utc();
+        let session_expires_at = self
+            .config
+            .max_session_lifetime
+            .map(|lifetime| crate::util::checked_expiry(now, lifetime, "maximum session lifetime"))
+            .transpose()?;
         let (refresh_token, record, access_token, access_token_expires_at, user) = self
             .issue_tokens_only(
                 auth_user,
@@ -1662,6 +1814,7 @@ where
                 now,
                 grant_source,
                 None,
+                session_expires_at,
             )
             .await?;
 
@@ -1678,6 +1831,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn issue_tokens_only(
         &self,
         mut auth_user: AuthUser,
@@ -1686,6 +1840,7 @@ where
         now: OffsetDateTime,
         grant_source: crate::RefreshGrantSource,
         authorization_role_ceiling: Option<&[String]>,
+        session_expires_at: Option<OffsetDateTime>,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         #[cfg(test)]
         self.token_work
@@ -1709,6 +1864,11 @@ where
         let raw_refresh_token = generate_opaque_token();
         let refresh_token_expires_at =
             crate::util::checked_expiry(now, self.config.refresh_token_ttl, "refresh-token ttl")?;
+        // Rotation never extends a session past its absolute deadline.
+        let refresh_token_expires_at = session_expires_at
+            .map_or(refresh_token_expires_at, |deadline| {
+                refresh_token_expires_at.min(deadline)
+            });
         let refreshable_metadata = RefreshableTokenMetadata {
             tenant_id: user.token_claims.tenant_id.clone(),
             organization_id: user.token_claims.organization_id.clone(),
@@ -1731,6 +1891,7 @@ where
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
             expires_at: refresh_token_expires_at,
+            session_expires_at,
             last_used_at: None,
             revoked_at: None,
             replaced_by_token_id: None,
@@ -2689,6 +2850,30 @@ fn is_reserved_access_token_claim(key: &str) -> bool {
     RESERVED_ACCESS_TOKEN_CLAIMS
         .iter()
         .any(|reserved| key.eq_ignore_ascii_case(reserved))
+}
+
+/// The dummy hash under `config`'s parameters. The defaults reuse the fixed
+/// constant; other parameters hash a fixed input once, at construction.
+fn dummy_password_hash(
+    config: &crate::PasswordHashingConfig,
+    argon2: &Argon2<'static>,
+) -> AuthResult<Arc<str>> {
+    let defaults = crate::PasswordHashingConfig::default();
+    if (config.memory_kib, config.iterations, config.parallelism)
+        == (
+            defaults.memory_kib,
+            defaults.iterations,
+            defaults.parallelism,
+        )
+    {
+        return Ok(DUMMY_PASSWORD_HASH.into());
+    }
+    let salt = SaltString::encode_b64(b"agql-auth-dummy-salt")
+        .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
+    argon2
+        .hash_password(b"agql-auth-dummy-password", &salt)
+        .map(|hash| hash.to_string().into())
+        .map_err(|err| AuthError::PasswordHashing(err.to_string()))
 }
 
 const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[

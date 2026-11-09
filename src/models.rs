@@ -827,6 +827,15 @@ pub struct StoredRefreshToken {
     pub created_at: OffsetDateTime,
     /// Expiry time.
     pub expires_at: OffsetDateTime,
+    /// Absolute expiry of the session family, set at issuance from
+    /// [`AuthConfig::max_session_lifetime`](crate::AuthConfig::max_session_lifetime)
+    /// and copied unchanged to every replacement.
+    ///
+    /// Persist it with the record. `None` means no recorded deadline: while a
+    /// maximum lifetime is configured, rotation then never extends the session
+    /// past this record's `expires_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_expires_at: Option<OffsetDateTime>,
     /// Last successful use time.
     pub last_used_at: Option<OffsetDateTime>,
     /// Revocation time, if revoked.
@@ -855,6 +864,7 @@ impl fmt::Debug for StoredRefreshToken {
             .field("token_hash", &"[redacted]")
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
+            .field("session_expires_at", &self.session_expires_at)
             .field("last_used_at", &self.last_used_at)
             .field("revoked_at", &self.revoked_at)
             .field("replaced_by_token_id", &self.replaced_by_token_id)

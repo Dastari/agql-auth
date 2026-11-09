@@ -584,14 +584,18 @@ counter field; see [MIGRATION.md](MIGRATION.md).
 ### Bounded async password work
 
 Async password login and login-challenge issuance/verification use a runtime-neutral
-pool shared across all `AuthService` instances: two worker threads and 32 queued jobs.
+`PasswordWorkPool`, by default one process-wide pool sized from the available cores
+(at most 8 workers, 16 queued jobs each); `AuthService::with_password_work_pool`
+installs another. Throttle the login route at the edge: the pool bounds work, not
+request rates.
 Saturation or executor failure returns `AuthServiceUnavailable` without recording a
 bad credential; admitted disabled accounts still perform fixed dummy verification.
 Cancellation retains queued/running work until completion. A committed challenge
 reservation is never refunded, including when the password queue is unavailable.
 
 The explicit `hash_password` and `verify_password` helpers remain synchronous CPU
-work. Hosts own request concurrency/body limits, password/code size policy and
-accepted stored Argon2 costs; a bounded job count does not bound one job's memory or
-CPU. The executor does not log credentials or hashes. See the
+work. `AuthConfig::password_hashing` sets the Argon2id parameters and a password
+length cap (1024 bytes by default), and `password_hash_needs_rehash` flags stored
+hashes made with other parameters. Hosts own request concurrency/body limits; a
+bounded job count does not bound one job's memory or CPU. The executor does not log credentials or hashes. See the
 [migration guide](MIGRATION.md#0210-to-0211-bounded-async-password-work).
