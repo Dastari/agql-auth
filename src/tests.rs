@@ -12,6 +12,7 @@ mod combined;
 mod consumer_refresh_store;
 mod consumer_store;
 mod current_authority;
+mod delegation_reference;
 mod grant;
 mod graphql_transport;
 mod jwt_signing;

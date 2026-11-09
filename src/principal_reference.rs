@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    AccessTokenGrantKind, AuthError, AuthPrincipal, AuthResult, AuthUser, ExactOperationBinding,
+    AccessTokenGrantKind, ActorIdentity, AuthError, AuthPrincipal, AuthResult, AuthUser,
+    ExactOperationBinding, MfaState,
 };
 
 /// Maximum UTF-8 byte length of an authoritative session/security version.
@@ -24,12 +25,36 @@ pub enum PrincipalReferenceKind {
     },
 }
 
+/// Upper bound on the authority of a session-bound delegation, persisted with
+/// its [`PrincipalReference`].
+///
+/// It records what the delegated token carried, not current authority:
+/// [`ResolvedPrincipal::new`] intersects the resolved parent's grants with it,
+/// so a resolved delegation never gains a grant the token did not have.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationGrantCeiling {
+    /// Roles the delegated token carried.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// Scopes the delegated token carried.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Typed authorization roles the delegated token carried.
+    #[serde(default)]
+    pub authorization_roles: Vec<String>,
+    /// `auth_time` of the delegated token. The parent's assurance is kept only
+    /// while it still describes this authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
+}
+
 /// Serializable, non-secret reference to an authenticated principal.
 ///
-/// This type intentionally omits bearer tokens, cookies, token hashes, roles,
-/// and scopes. Long-lived work must resolve current authority through
-/// [`CurrentPrincipalResolver`] rather than trusting a stored authorization
-/// snapshot.
+/// This type intentionally omits bearer tokens, cookies, token hashes and
+/// current roles and scopes. Long-lived work must resolve current authority
+/// through [`CurrentPrincipalResolver`] rather than trusting a stored
+/// authorization snapshot. A session-bound delegation also records its
+/// [`DelegationGrantCeiling`], which bounds what resolution can return.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrincipalReference {
     /// Principal kind.
@@ -75,6 +100,10 @@ pub struct PrincipalReference {
     /// Exact registered operation binding when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<ExactOperationBinding>,
+    /// Grant ceiling of a session-bound delegation; `None` for other kinds.
+    /// A delegation reference without one cannot be resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_ceiling: Option<DelegationGrantCeiling>,
 }
 
 impl PrincipalReference {
@@ -170,6 +199,14 @@ impl AuthPrincipal {
                     expires_at: metadata.expires_at,
                     correlation_id: metadata.correlation_id.clone(),
                     operation: metadata.operation.clone(),
+                    grant_ceiling: user.is_session_bound_delegation().then(|| {
+                        DelegationGrantCeiling {
+                            roles: user.roles.clone(),
+                            scopes: user.scopes.clone(),
+                            authorization_roles: metadata.authorization_roles.clone(),
+                            auth_time: metadata.auth_time,
+                        }
+                    }),
                 }
             }
             AuthPrincipal::ApiToken(token) => PrincipalReference {
@@ -190,18 +227,24 @@ impl AuthPrincipal {
                 expires_at: Some(token.expires_at),
                 correlation_id: None,
                 operation: None,
+                grant_ceiling: None,
             },
         }
     }
 }
 
 /// Freshly rehydrated principal paired with the reference used to resolve it.
+///
+/// For a session-bound delegation, [`Self::principal`] is never the parent
+/// session itself: it is the delegated view described at [`Self::new`].
 #[derive(Debug, Clone)]
 pub struct ResolvedPrincipal {
     reference: PrincipalReference,
     principal: AuthPrincipal,
     resolved_at: OffsetDateTime,
     current_session_authority: bool,
+    /// Resolved parent session of a delegation, kept only for matching.
+    delegation_parent: Option<AuthPrincipal>,
 }
 
 impl ResolvedPrincipal {
@@ -211,11 +254,25 @@ impl ResolvedPrincipal {
     /// # Errors
     ///
     /// Returns [`AuthError::Forbidden`] when the host resolved a different
-    /// principal or binding than the requested reference. For a
-    /// session-bound delegation, token-specific actor/resource/operation
-    /// bindings remain on the reference while the resolved principal is the
-    /// underlying authoritative user session; subject, session, family,
-    /// tenant, and session version must still match exactly.
+    /// principal or binding than the requested reference.
+    ///
+    /// For a session-bound delegation the host resolves the underlying
+    /// authoritative user session; subject, session, family, tenant, and
+    /// session version must match exactly, and the reference must carry its
+    /// [`DelegationGrantCeiling`] (references persisted before 0.27 do not and
+    /// are refused). [`Self::principal`] is then a delegated view of that
+    /// parent, never more than the delegated token had:
+    ///
+    /// - roles, scopes and authorization roles are the parent's current values
+    ///   intersected exactly with the ceiling;
+    /// - the reference's token ID, actor, resource, operation and correlation
+    ///   replace the parent's, and the grant kind stays
+    ///   [`AccessTokenGrantKind::SessionBoundDelegation`];
+    /// - expiry is the earlier of the delegated token's and the parent's;
+    /// - the parent's assurance is kept only while its `auth_time` equals the
+    ///   delegated token's, and custom additional claims are dropped.
+    ///
+    /// The operation must still enforce the delegation bindings.
     pub fn new(
         reference: PrincipalReference,
         principal: AuthPrincipal,
@@ -224,12 +281,28 @@ impl ResolvedPrincipal {
         if !reference.matches(&principal) {
             return Err(AuthError::Forbidden);
         }
+        if reference.grant_kind == Some(AccessTokenGrantKind::SessionBoundDelegation) {
+            let (AuthPrincipal::User(parent), Some(ceiling)) =
+                (&principal, reference.grant_ceiling.as_ref())
+            else {
+                return Err(AuthError::Forbidden);
+            };
+            let delegated = AuthPrincipal::User(delegated_view(&reference, ceiling, parent));
+            return Ok(Self {
+                reference,
+                principal: delegated,
+                resolved_at,
+                current_session_authority: false,
+                delegation_parent: Some(principal),
+            });
+        }
 
         Ok(Self {
             reference,
             principal,
             resolved_at,
             current_session_authority: false,
+            delegation_parent: None,
         })
     }
 
@@ -297,7 +370,7 @@ impl ResolvedPrincipal {
             {
                 // Ordinary sessions opt in only through the validated constructor.
                 // Both paths still require independent original-token status.
-                reference.matches(self.principal())
+                reference.matches(self.delegation_parent.as_ref().unwrap_or(self.principal()))
             } else {
                 self.principal().reference() == *reference
             }
@@ -309,6 +382,9 @@ impl ResolvedPrincipal {
     }
 
     /// Returns the freshly resolved principal and its current authority.
+    ///
+    /// For a session-bound delegation this is the narrowed delegated view, not
+    /// the parent session; see [`Self::new`].
     pub fn principal(&self) -> &AuthPrincipal {
         &self.principal
     }
@@ -318,10 +394,49 @@ impl ResolvedPrincipal {
         self.resolved_at
     }
 
-    /// Consumes the wrapper and returns the principal.
+    /// Consumes the wrapper and returns [`Self::principal`].
     pub fn into_principal(self) -> AuthPrincipal {
         self.principal
     }
+}
+
+/// Projects a resolved parent session onto a delegation reference.
+fn delegated_view(
+    reference: &PrincipalReference,
+    ceiling: &DelegationGrantCeiling,
+    parent: &AuthUser,
+) -> AuthUser {
+    let mut user = parent.clone();
+    user.roles.retain(|role| ceiling.roles.contains(role));
+    user.scopes.retain(|scope| ceiling.scopes.contains(scope));
+    let claims = &mut user.token_claims;
+    claims
+        .authorization_roles
+        .retain(|role| ceiling.authorization_roles.contains(role));
+    claims.jti = reference.token_id.clone();
+    claims.grant_kind = Some(AccessTokenGrantKind::SessionBoundDelegation);
+    claims.session_version = reference.session_version.clone();
+    claims.actor = reference.actor_subject.clone().map(|sub| ActorIdentity {
+        sub,
+        amr: Vec::new(),
+    });
+    claims.resource_type = reference.resource_type.clone();
+    claims.resource_id = reference.resource_id.clone();
+    claims.correlation_id = reference.correlation_id.clone();
+    claims.operation = reference.operation.clone();
+    claims.expires_at = match (reference.expires_at, claims.expires_at) {
+        (Some(delegated), Some(parent)) => Some(delegated.min(parent)),
+        (delegated, parent) => delegated.or(parent),
+    };
+    claims.additional.clear();
+    if claims.auth_time != ceiling.auth_time {
+        claims.auth_time = None;
+        claims.amr = None;
+        claims.acr = None;
+        user.session.assurance = None;
+        user.session.mfa = MfaState::default();
+    }
+    user
 }
 
 /// Host implementation that resolves current principal authority from a safe

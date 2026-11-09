@@ -226,8 +226,8 @@ pub use oidc_authorization::{
     OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use principal_reference::{
-    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
-    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    CurrentPrincipalResolver, DelegationGrantCeiling, MAX_SESSION_VERSION_LENGTH,
+    PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
     VerifiedActiveUserSessionResolver,
 };
 pub use purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};

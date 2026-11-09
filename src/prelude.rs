@@ -80,8 +80,8 @@ pub use crate::oidc_authorization::{
     OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use crate::principal_reference::{
-    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
-    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    CurrentPrincipalResolver, DelegationGrantCeiling, MAX_SESSION_VERSION_LENGTH,
+    PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
     VerifiedActiveUserSessionResolver,
 };
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
