@@ -138,7 +138,9 @@ impl GraphqlRefreshCookieConfig {
 }
 
 /// Refresh-cookie transport action derived from a GraphQL response.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` redacts the raw refresh token.
+#[derive(Clone, PartialEq, Eq)]
 pub enum GraphqlRefreshCookieDirective {
     /// Set or rotate the refresh cookie using this raw token and expiry.
     Set {
@@ -149,6 +151,22 @@ pub enum GraphqlRefreshCookieDirective {
     },
     /// Clear the refresh cookie.
     Clear,
+}
+
+impl std::fmt::Debug for GraphqlRefreshCookieDirective {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Set {
+                refresh_token_expires_at,
+                ..
+            } => f
+                .debug_struct("Set")
+                .field("refresh_token", &"[redacted]")
+                .field("refresh_token_expires_at", refresh_token_expires_at)
+                .finish(),
+            Self::Clear => f.write_str("Clear"),
+        }
+    }
 }
 
 /// Extracts a refresh-cookie directive from a successful GraphQL response.

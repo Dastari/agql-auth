@@ -13,6 +13,7 @@ mod current_authority;
 mod grant;
 mod graphql_transport;
 mod jwt_signing;
+mod model_redaction;
 mod oauth2;
 mod oidc;
 mod oidc_client_credentials;

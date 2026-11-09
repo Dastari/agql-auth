@@ -171,7 +171,10 @@ backoff and `AuthError::AuthLocked` during temporary lockout. Password-reset
 and login-code request helpers suppress those errors and return `Ok(false)` so
 the host can avoid revealing whether the principal exists.
 
-`Debug` output for issued reset tokens, TOTP secrets/provisioning URIs, local
-auth payloads, OIDC token responses, and issued API tokens redacts raw secret
-material. Serialization still contains the actual values when those structs are
-intentionally returned by the host.
+`Debug` output for issued reset tokens, issued login codes, TOTP
+secrets/provisioning URIs, local auth payloads, refresh-cookie directives, OIDC
+token responses and issued API tokens redacts raw secret material. Stored
+records (`StoredUser`, `StoredLoginChallenge`, `StoredRefreshToken`,
+`StoredApiToken`) redact their password, code and token hashes. Serialization
+still contains the actual values when those structs are intentionally returned
+or persisted by the host.
