@@ -50,7 +50,14 @@ The crate generates the code, stores only a password hash of that code, tracks
 attempts, and consumes the challenge once. Each verification first reserves an
 attempt atomically in the store. The cap includes all admitted guesses and
 cancelled work, preventing concurrent callers from sharing the last available
-attempt. Failed or expired attempts never create verified authority. The service
+attempt. The guess is also counted against the principal and client
+rate-limit buckets before the code is checked. Failed or expired attempts
+never create verified authority.
+
+`LoginChallengeOptions` is validated when the challenge is created:
+`code_length` must be 6 to 12 digits and `max_attempts` 1 to 10. Anything else
+returns `InvalidConfiguration`. Six digits with at most ten guesses keeps the
+chance of guessing one challenge at or below 1 in 100,000. The service
 uses system UTC by default; `with_login_challenge_clock` installs a separate
 trusted clock aligned with your challenge store.
 
@@ -110,6 +117,7 @@ The host stores the user's TOTP secret and owns enrollment UI.
 use agql_auth::TotpOptions;
 use time::OffsetDateTime;
 
+// 20 to 64 bytes; 20 (160 bits) is the length RFC 4226 recommends.
 let secret = auth.generate_totp_secret(20)?;
 let provisioning = auth.build_totp_provisioning(
     &secret,
@@ -124,12 +132,31 @@ confirmation succeeds. Generating/provisioning a secret does not enroll a factor
 or establish MFA. Verification below uses an existing confirmed factor loaded
 for the authenticated user, not the just-generated secret.
 
+TOTP inputs fail closed with `InvalidConfiguration` or `InvalidTotpSecret`:
+
+| Input | Accepted |
+| --- | --- |
+| `generate_totp_secret` length | 20 to 64 bytes |
+| Stored secret used for provisioning or verification | at least 16 bytes (128 bits, the RFC 4226 minimum) |
+| `digits` | 6 to 8 |
+| `period_seconds` | 15 to 300 |
+| `allowed_skew` | 0 to 2 steps each side |
+
+New secrets default to the 160 bits RFC 4226 recommends and match the
+HMAC-SHA1 output size; 64 bytes is the HMAC-SHA1 block size, beyond which keys
+are hashed down. Verification accepts 128-bit secrets so existing enrollments
+at the RFC minimum keep working. Factors enrolled with shorter secrets, such as
+80-bit ones, must be re-enrolled.
+
 `verify_totp_code` is stateless and has no attempt limiter.
 `verify_totp_code_for_principal` adds configured abuse controls but still permits
 replay. Neither changes enrollment or session assurance. Production flows
 should prefer `verify_totp_code_with_replay_store_and_metadata`, which records
 the accepted time step through `TotpReplayStore`, rejects the same step on
-reuse, and applies per-principal/per-client abuse protection:
+reuse, and applies per-principal/per-client abuse protection. Both rate-limited
+variants count the attempt before checking the code, so a concurrent burst
+cannot verify more codes than the lockout budget allows; a replayed step stays
+counted:
 
 ```rust
 // Host-owned lookup must enforce confirmed enrollment and user/session ownership.

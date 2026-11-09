@@ -95,7 +95,8 @@ The store receives opaque keys:
   `totp_verification`, `password_reset_token_consumption`,
   `password_reset_request`, or `login_code_request`
 - `bucket`, either `principal` or `client`
-- `value_hash`, a SHA-256 hash of the normalized principal/user/client value
+- `value_hash`, a SHA-256 hash of the normalized principal/user/client value;
+  password login uses the resolved local user ID for known accounts
 
 The store persists `AuthRateLimitSnapshot`: the state plus a fresh UUID
 revision. `compare_exchange_auth_rate_limit_state` must conditionally insert
