@@ -104,12 +104,16 @@ the store to revoke the token family. Hosts whose clients can lose a response af
 commit, such as browsers, can opt in to a short
 [refresh reuse grace](refresh-reuse-grace.md).
 
-Logout revokes either one refresh token or the whole family:
+Sign-out revokes the whole token family. Use this form:
 
 ```rust
-auth.logout(refresh_token, false).await?; // one token
-auth.logout(refresh_token, true).await?;  // token family
+auth.logout(refresh_token, true).await?;
 ```
+
+`logout(refresh_token, false)` revokes only the presented token while it is the
+family's live token. A token that rotation already superseded, or supersedes
+during the call, is treated as a reuse signal and revokes the whole family, so a
+successor held by someone else cannot outlive the sign-out.
 
 Logout does not revoke already-issued stateless access tokens. They remain
 valid until `exp`, so keep access-token lifetimes short and add host-side

@@ -39,6 +39,9 @@ every step. This is a successor, not a branch.
 Anything else is replay, as it is without the option: the family is revoked and the call
 returns `RefreshTokenReplayDetected`. Sign-out, administrative revocation and earlier
 replay leave a family with no live token, so they end the grace even inside the window.
+Sign-out does this whichever token it presents: `logout(token, false)` with a token
+that rotation has superseded revokes the family as `ReplayDetected`, inside the window
+too, because the successor may be someone else's.
 
 Losing the rotation race follows the same rule. When `rotate_refresh_token` returns
 `false`, the token is read again. If it qualifies, the call succeeds as above, and both
@@ -46,8 +49,8 @@ callers of a concurrent double refresh get a token.
 
 A window is measured from the presented token's own `revoked_at`, which a reuse never
 writes, so a chain of reuses cannot keep an old token usable. A reuse only ever writes
-the family's newest token. With the option on, `logout(token, false)` on an
-already-revoked token does nothing, so it cannot move `revoked_at` either.
+the family's newest token. Sign-out with a superseded token ends the family rather than
+revoking that token again, so it cannot move `revoked_at` and leave a live successor.
 
 The window is symmetric, so a small clock difference between instances does not turn a
 race into a sign-out. A `revoked_at` further ahead of the local clock than the window

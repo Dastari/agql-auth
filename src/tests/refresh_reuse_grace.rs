@@ -197,8 +197,10 @@ async fn off_by_default_a_lost_race_is_replay_and_logout_of_a_revoked_token_stil
     assert_eq!(store.find_live_calls.load(Ordering::SeqCst), 0);
     assert_eq!(store.inner.family_revocations.lock().unwrap().len(), 1);
 
+    // The token was superseded, so sign-out with it revokes the family again.
     h.auth.logout(SEED_TOKEN, false).await.unwrap();
-    assert_eq!(store.revoke_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.revoke_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.inner.family_revocations.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -350,8 +352,10 @@ async fn a_chain_of_reuses_cannot_extend_an_old_token_past_its_window() {
     h.assert_replay_ends_family(SEED_TOKEN).await;
 }
 
+/// Sign-out with a superseded token is a reuse signal, inside the window too:
+/// the token's successor may be someone else's, so the family ends as replay.
 #[tokio::test]
-async fn logout_of_a_superseded_token_cannot_renew_its_window() {
+async fn logout_of_a_superseded_token_inside_the_window_is_replay() {
     let store = Arc::new(ScriptedStore::default());
     let h = Harness::new(store.clone()).await;
     let second = h.rotated(SEED_TOKEN).await;
@@ -360,12 +364,57 @@ async fn logout_of_a_superseded_token_cannot_renew_its_window() {
     h.clock.advance_seconds(WINDOW_SECONDS - 1);
     h.auth.logout(SEED_TOKEN, false).await.unwrap();
     assert_eq!(store.revoke_calls.load(Ordering::SeqCst), 0);
-    let after = h.record(SEED_TOKEN).await;
-    assert_eq!(after.revoked_at, before.revoked_at);
-    h.assert_only_live(&second).await;
+    let revocations = store.inner.family_revocations.lock().unwrap().clone();
+    assert_eq!(revocations.len(), 1);
+    assert_eq!(revocations[0].0, h.family);
+    assert_eq!(
+        revocations[0].2,
+        RefreshTokenRevocationReason::ReplayDetected
+    );
+    assert_eq!(
+        h.record(SEED_TOKEN).await.replaced_by_token_id,
+        before.replaced_by_token_id
+    );
+    assert_eq!(h.live_count().await, 0);
+    assert!(h.record(&second).await.is_revoked());
+
+    h.assert_replay_ends_family(SEED_TOKEN).await;
+}
+
+#[tokio::test]
+async fn logout_of_a_token_revoked_without_a_replacement_changes_nothing() {
+    let store = Arc::new(ScriptedStore::default());
+    let h = Harness::with(store.clone(), None, |auth| auth).await;
+    let second = h.rotated(SEED_TOKEN).await;
+    h.auth.logout(&second, false).await.unwrap();
+    assert_eq!(store.revoke_calls.load(Ordering::SeqCst), 1);
+    let revoked = h.record(&second).await;
 
     h.clock.advance_seconds(1);
-    h.assert_replay_ends_family(SEED_TOKEN).await;
+    h.auth.logout(&second, false).await.unwrap();
+    assert_eq!(store.revoke_calls.load(Ordering::SeqCst), 1);
+    assert!(store.inner.family_revocations.lock().unwrap().is_empty());
+    assert_eq!(h.record(&second).await.revoked_at, revoked.revoked_at);
+}
+
+#[tokio::test]
+async fn logout_of_a_superseded_token_ends_the_family() {
+    for window in [None, Some(WINDOW_SECONDS)] {
+        let h = Harness::with(
+            Arc::new(MemoryRefreshTokenStore::default()),
+            window,
+            |auth| auth,
+        )
+        .await;
+        let successor = h.rotated(SEED_TOKEN).await;
+        h.auth.logout(SEED_TOKEN, false).await.unwrap();
+        assert_eq!(
+            h.live_count().await,
+            0,
+            "signing out with a rotated token must not leave its successor live"
+        );
+        assert!(h.refresh(&successor).await.is_err());
+    }
 }
 
 // Revoked families and ineligible tokens.
@@ -587,12 +636,15 @@ pub(super) async fn racing_different_tokens_contract<S: RefreshTokenStore + 'sta
 
 /// Sign-out reads a token, then a rotation of it commits before sign-out revokes it.
 ///
-/// The service's read cannot see the rotation, so only the store's atomic check
-/// keeps the rotation's `revoked_at` and replacement, and with them the grace.
+/// The service's read cannot see the rotation. The store's atomic check must
+/// keep the rotation's `revoked_at` and replacement, and the service must then
+/// see the rotation and end the family, so the replacement does not outlive
+/// the sign-out.
 pub(super) async fn logout_racing_rotation_contract<S: RefreshTokenStore + 'static>(store: Arc<S>) {
     let racing = Arc::new(RotateBeforeRevoke {
         inner: store,
         armed: Mutex::default(),
+        after_revoke: Mutex::default(),
     });
     let h = Harness::new(racing.clone()).await;
     let seed = h.record(SEED_TOKEN).await;
@@ -606,24 +658,32 @@ pub(super) async fn logout_racing_rotation_contract<S: RefreshTokenStore + 'stat
 
     h.auth.logout(SEED_TOKEN, false).await.unwrap();
 
-    let after = h.record(SEED_TOKEN).await;
+    let after_revoke = racing.after_revoke.lock().unwrap().take().unwrap();
     assert_eq!(
-        after.revoked_at,
+        after_revoke.revoked_at,
         Some(rotated_at),
-        "the rotation's time stays"
+        "a stale revocation must not overwrite the rotation's time"
     );
-    assert_eq!(after.replaced_by_token_id, Some(competitor.id));
-    h.assert_only_live(COMPETITOR_TOKEN).await;
-
-    // The token keeps its grace: a reuse replaces the newest token, no replay.
-    let reused = h.rotated(SEED_TOKEN).await;
-    h.assert_only_live(&reused).await;
+    assert_eq!(after_revoke.replaced_by_token_id, Some(competitor.id));
+    assert_eq!(
+        h.record(SEED_TOKEN).await.replaced_by_token_id,
+        Some(competitor.id)
+    );
+    assert_eq!(
+        h.live_count().await,
+        0,
+        "the rotation's replacement must not outlive the sign-out"
+    );
+    assert!(h.refresh(COMPETITOR_TOKEN).await.is_err());
+    h.assert_replay_ends_family(SEED_TOKEN).await;
 }
 
 /// Commits one armed rotation of a token just before revoking it.
 struct RotateBeforeRevoke<S> {
     inner: Arc<S>,
     armed: Mutex<Option<(StoredRefreshToken, OffsetDateTime)>>,
+    /// The seed record as the store left it after the stale revocation.
+    after_revoke: Mutex<Option<StoredRefreshToken>>,
 }
 
 #[async_trait]
@@ -647,6 +707,7 @@ impl<S: RefreshTokenStore + 'static> RefreshTokenStore for RotateBeforeRevoke<S>
         reason: RefreshTokenRevocationReason,
     ) -> crate::AuthResult<()> {
         let armed = self.armed.lock().unwrap().take();
+        let raced = armed.is_some();
         if let Some((replacement, rotated_at)) = armed {
             assert!(
                 self.inner
@@ -656,7 +717,14 @@ impl<S: RefreshTokenStore + 'static> RefreshTokenStore for RotateBeforeRevoke<S>
         }
         self.inner
             .revoke_refresh_token(token_id, revoked_at, replaced_by_token_id, reason)
-            .await
+            .await?;
+        if raced {
+            *self.after_revoke.lock().unwrap() = self
+                .inner
+                .find_refresh_token_by_hash(&hash_refresh_token(SEED_TOKEN))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn revoke_refresh_token_family(
@@ -712,7 +780,7 @@ impl<S: RefreshTokenStore + 'static> RefreshTokenStore for RotateBeforeRevoke<S>
 }
 
 #[tokio::test]
-async fn logout_racing_a_rotation_keeps_the_rotation_and_its_grace() {
+async fn logout_racing_a_rotation_keeps_the_rotation_and_ends_the_family() {
     logout_racing_rotation_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
 }
 

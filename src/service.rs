@@ -864,7 +864,18 @@ where
         .await
     }
 
-    /// Revokes a refresh token or its full session family.
+    /// Ends the session that `refresh_token` belongs to.
+    ///
+    /// Use `revoke_family = true` for sign-out. It revokes every token in the
+    /// session family.
+    ///
+    /// With `false`, only the presented token is revoked while it is the
+    /// family's live token. A token that rotation has superseded, before or
+    /// during this call, is a reuse signal: its successor may be held by
+    /// someone else, so the whole family is revoked, with
+    /// [`RefreshTokenRevocationReason::ReplayDetected`] when it was already
+    /// superseded. Either way no token of the family stays live. A token
+    /// revoked for another reason, or an unknown token, changes nothing.
     pub async fn logout(&self, refresh_token: &str, revoke_family: bool) -> AuthResult<()> {
         let now = OffsetDateTime::now_utc();
         let token_hash = hash_refresh_token(refresh_token);
@@ -877,22 +888,51 @@ where
         };
 
         if revoke_family {
+            return self
+                .refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::Logout,
+                )
+                .await;
+        }
+        if existing.is_revoked() {
+            if existing.replaced_by_token_id.is_none() {
+                // Already ended by sign-out, expiry or revocation. A second
+                // revocation could only move `revoked_at`.
+                return Ok(());
+            }
+            return self
+                .refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::ReplayDetected,
+                )
+                .await;
+        }
+
+        self.refresh_store
+            .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)
+            .await?;
+        // The store leaves a token that a concurrent rotation revoked first
+        // unchanged, so read again: a successor must not outlive the sign-out.
+        let rotated = self
+            .refresh_store
+            .find_refresh_token_by_hash(&token_hash)
+            .await?
+            .is_none_or(|current| current.replaced_by_token_id.is_some());
+        if rotated {
             self.refresh_store
                 .revoke_refresh_token_family(
                     existing.session_family_id,
                     now,
                     RefreshTokenRevocationReason::Logout,
                 )
-                .await
-        } else if self.refresh_reuse_grace.is_some() && existing.is_revoked() {
-            // A second revocation could move `revoked_at` in some stores, which
-            // would let the holder of a superseded token renew its window.
-            Ok(())
-        } else {
-            self.refresh_store
-                .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)
-                .await
+                .await?;
         }
+        Ok(())
     }
 
     /// Validates a local JWT access token and returns the authenticated user.
