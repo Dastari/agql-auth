@@ -286,8 +286,18 @@ Recommended database constraints:
 
 `TotpReplayStore` is optional but recommended for production MFA. Stateless
 TOTP verification can accept the same valid code more than once within the skew
-window. `consume_totp_step` should atomically insert or mark
-`(principal_id, factor_id, step)` and return `true` only for the first consume.
+window. `consume_totp_step` must insert `(principal_id, factor_id, step)` in one
+atomic operation backed by a uniqueness constraint and return `true` only when
+that call inserted it, across all processes. A read followed by a separate
+insert is not atomic. Store a missing `factor_id` as one value such as `''`,
+since SQL `NULL`s do not collide in a unique index:
+
+```sql
+INSERT INTO totp_steps (principal_id, factor_id, step, consumed_at)
+VALUES (?, COALESCE(?, ''), ?, ?)
+ON CONFLICT (principal_id, factor_id, step) DO NOTHING;
+-- true exactly when one row was inserted
+```
 
 ## External Identities
 
@@ -296,7 +306,11 @@ window. `consume_totp_step` should atomically insert or mark
 For Microsoft Entra work/school accounts, `agql-auth` prefers `tid + oid` as
 the stable external subject. For generic OIDC it falls back to `iss + sub`.
 
-The store should treat `(provider_name, external_subject)` as unique. Do not use
+`link_external_identity` must enforce `(provider_name, external_subject)`
+uniqueness atomically, with a unique constraint: a concurrent second link for
+the same pair returns `Err`, and an existing link is never re-pointed to another
+user. The OIDC callback links only when no link was found, so a concurrent
+first login fails closed rather than creating two links. Do not use
 email, UPN, display name, or preferred username as authorization identifiers;
 those fields can change and are not stable identity keys.
 

@@ -341,11 +341,26 @@ pub trait OAuthStateStore: Send + Sync {
 ///
 /// Production MFA flows should prefer
 /// [`AuthService::verify_totp_code_with_replay_store`](crate::AuthService::verify_totp_code_with_replay_store)
-/// over stateless verification. Implementations should atomically insert the
-/// `(principal_id, factor_id, step)` tuple and return `Ok(true)` only for the
-/// first successful consume operation.
+/// over stateless verification.
 pub trait TotpReplayStore: Send + Sync {
     /// Consumes a valid TOTP time step once for a principal/factor.
+    ///
+    /// Must insert the `(principal_id, factor_id, step)` tuple in one atomic
+    /// operation backed by a uniqueness constraint, and return `Ok(true)` only
+    /// when this call inserted it. Concurrent calls for the same tuple, from
+    /// any process, must see exactly one `Ok(true)`. A read followed by a
+    /// separate insert is not atomic. Treat `factor_id = None` as one value
+    /// (for example store `''`), because SQL `NULL`s do not collide in a
+    /// unique index:
+    ///
+    /// ```sql
+    /// INSERT INTO totp_steps (principal_id, factor_id, step, consumed_at)
+    /// VALUES (?, COALESCE(?, ''), ?, ?)
+    /// ON CONFLICT (principal_id, factor_id, step) DO NOTHING;
+    /// -- Ok(true) exactly when one row was inserted
+    /// ```
+    ///
+    /// Return `Err` when the outcome is unknown; never `Ok(true)`.
     async fn consume_totp_step(
         &self,
         principal_id: &str,
@@ -366,6 +381,18 @@ pub trait ExternalIdentityStore: Send + Sync {
     ) -> AuthResult<Option<ExternalIdentity>>;
 
     /// Links an external identity to a local user.
+    ///
+    /// Must be atomic on `(provider_name, external_subject)`: a unique
+    /// constraint makes a concurrent second link for the same pair fail with
+    /// `Err`, and an existing link must never be silently re-pointed to
+    /// another user. Check-then-insert without the constraint is not enough:
+    ///
+    /// ```sql
+    /// -- UNIQUE (provider_name, external_subject)
+    /// INSERT INTO external_identities (provider_name, external_subject, user_id, ...)
+    /// VALUES (?, ?, ?, ...);
+    /// -- a unique violation is returned as Err
+    /// ```
     async fn link_external_identity(&self, identity: ExternalIdentity) -> AuthResult<()>;
 
     /// Updates the stored claims snapshot for an existing external identity.
