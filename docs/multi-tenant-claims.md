@@ -46,7 +46,47 @@ Profiles:
 
 - `ClaimRequirements::none()` — compatibility default
 - `ClaimRequirements::tenant_and_jti()` — multi-tenant API baseline
-- `ClaimRequirements::tenant_jti_and_cnf()` — multi-tenant + proof-of-possession
+- `ClaimRequirements::tenant_jti_and_cnf()` — multi-tenant + verified
+  proof-of-possession
+
+## Confirmation (`cnf`) Binding
+
+`require_cnf` checks possession, not just that a `cnf` claim exists. The host
+verifies the client certificate (mTLS, RFC 8705) or the DPoP proof key
+(RFC 9449) itself and passes the resulting SHA-256 thumbprint; the validator
+compares it with `cnf` in constant time:
+
+```rust
+use agql_auth::{AccessTokenValidator, ClaimRequirements, PresentedConfirmation};
+
+let validator = AccessTokenValidator::builder()
+    .issuer("agql-auth")
+    .audience("orders-api")
+    .rs256_public_pem(public_pem)
+    .claim_requirements(ClaimRequirements::tenant_jti_and_cnf())
+    .build()?;
+
+// Thumbprint of the certificate the TLS layer authenticated for this request.
+let presented = PresentedConfirmation::certificate_thumbprint(cert_x5t_s256);
+let user = validator.authenticate_bearer_with_confirmation(authorization_header, &presented)?;
+```
+
+With `require_cnf` set, the plain `authenticate_access_token`,
+`authenticate_bearer`, `inject_http_auth` and `authenticate_connection_init_value`
+paths fail closed, because they have no presented key to compare. Use the
+`*_with_confirmation` methods (`inject_http_auth_with_confirmation` for request
+injection). Every confirmation method in the token must match:
+a token bound with both `x5t#S256` and `jkt` needs both thumbprints. When the
+caller presents material, a token carrying `cnf` is always checked, even without
+`require_cnf`. Hosts that read `AccessTokenMetadata::cnf` themselves can call
+`AccessTokenMetadata::verify_confirmation`.
+
+## Delegated And Actor Tokens
+
+`AccessTokenMetadata::is_delegated()` is true for a session-bound delegation
+(`grant_kind = session_bound_delegation`) and for any token carrying `actor`.
+The crate's user and principal guards refuse such tokens unless the guard opts
+in with `allow_delegated()`; see [Authorization](authorization.md#delegated-tokens).
 
 ## Issuing Claims
 

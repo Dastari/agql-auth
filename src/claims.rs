@@ -134,6 +134,107 @@ pub struct AccessTokenMetadata {
     pub additional: BTreeMap<String, JsonValue>,
 }
 
+impl AccessTokenMetadata {
+    /// Returns whether the token acts on behalf of someone else: a
+    /// [`AccessTokenGrantKind::SessionBoundDelegation`] or any token carrying
+    /// an `actor` claim.
+    ///
+    /// The crate's user and principal guards refuse such tokens unless the
+    /// guard opts in with `allow_delegated()`.
+    pub fn is_delegated(&self) -> bool {
+        self.grant_kind == Some(AccessTokenGrantKind::SessionBoundDelegation)
+            || self.actor.is_some()
+    }
+
+    /// Verifies that the caller presented the key or certificate the token's
+    /// `cnf` claim is bound to.
+    ///
+    /// `presented` is material the host verified itself: the SHA-256
+    /// thumbprint of the mTLS client certificate the TLS layer authenticated
+    /// (`x5t#S256`, RFC 8705) or of the JWK whose DPoP proof it checked (`jkt`,
+    /// RFC 9449). Every confirmation method in the token must be matched;
+    /// values are compared in constant time. A token without `cnf`, or with a
+    /// method the caller did not present, fails.
+    pub fn verify_confirmation(
+        &self,
+        presented: &PresentedConfirmation,
+    ) -> Result<(), ClaimRequirementError> {
+        let cnf = self.cnf.as_ref().ok_or(ClaimRequirementError::MissingCnf)?;
+        if cnf.x5t_s256.is_none() && cnf.jkt.is_none() {
+            return Err(ClaimRequirementError::MissingCnf);
+        }
+        for (bound, offered) in [
+            (&cnf.x5t_s256, &presented.x5t_s256),
+            (&cnf.jkt, &presented.jkt),
+        ] {
+            if let Some(bound) = bound {
+                let matched = offered
+                    .as_deref()
+                    .is_some_and(|offered| constant_time_eq(bound, offered));
+                if !matched {
+                    return Err(ClaimRequirementError::ConfirmationMismatch);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Proof-of-possession material the host verified for the current request.
+///
+/// Pass it to [`AccessTokenMetadata::verify_confirmation`] or
+/// `AccessTokenValidator::authenticate_bearer_with_confirmation`. Values are
+/// base64url SHA-256 thumbprints, compared exactly.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PresentedConfirmation {
+    x5t_s256: Option<String>,
+    jkt: Option<String>,
+}
+
+impl PresentedConfirmation {
+    /// Material for an mTLS client certificate the TLS layer authenticated.
+    pub fn certificate_thumbprint(x5t_s256: impl Into<String>) -> Self {
+        Self {
+            x5t_s256: Some(x5t_s256.into()),
+            jkt: None,
+        }
+    }
+
+    /// Material for a JWK whose proof of possession (for example DPoP) the
+    /// host verified.
+    pub fn jwk_thumbprint(jkt: impl Into<String>) -> Self {
+        Self {
+            x5t_s256: None,
+            jkt: Some(jkt.into()),
+        }
+    }
+
+    /// Adds a verified JWK thumbprint to certificate material.
+    pub fn with_jwk_thumbprint(mut self, jkt: impl Into<String>) -> Self {
+        self.jkt = Some(jkt.into());
+        self
+    }
+}
+
+impl std::fmt::Debug for PresentedConfirmation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PresentedConfirmation")
+            .field("x5t_s256", &self.x5t_s256.is_some())
+            .field("jkt", &self.jkt.is_some())
+            .finish()
+    }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use subtle::ConstantTimeEq;
+    // Hash first so neither the comparison time nor an early length check
+    // reveals how much of the bound value matched.
+    Sha256::digest(left.as_bytes())
+        .ct_eq(&Sha256::digest(right.as_bytes()))
+        .into()
+}
+
 /// Policy that requires selected claim sets for a resource server.
 ///
 /// Defaults keep existing tokens valid. Stricter resource servers opt in
@@ -147,7 +248,13 @@ pub struct ClaimRequirements {
     pub require_tenant_id: bool,
     /// Require a non-empty organization identifier.
     pub require_organization_id: bool,
-    /// Require confirmation binding (`cnf`).
+    /// Require a confirmation binding (`cnf`) and proof that the caller holds
+    /// the bound key or certificate.
+    ///
+    /// Validation compares the token's `cnf` with the
+    /// [`PresentedConfirmation`] the caller supplies (see
+    /// [`Self::validate_with_confirmation`]). Without presented material the
+    /// requirement fails closed: presence of `cnf` alone proves nothing.
     pub require_cnf: bool,
     /// Require `purpose = access_token` (reject legacy tokens missing purpose).
     pub require_purpose: bool,
@@ -182,7 +289,11 @@ impl ClaimRequirements {
         }
     }
 
-    /// Multi-tenant API that also requires confirmation binding.
+    /// Multi-tenant API that also requires a verified confirmation binding.
+    ///
+    /// Tokens validate only through a confirmation-aware path such as
+    /// `AccessTokenValidator::authenticate_bearer_with_confirmation`, which
+    /// compares `cnf` with the certificate or key the host verified.
     pub fn tenant_jti_and_cnf() -> Self {
         Self {
             require_jti: true,
@@ -192,8 +303,23 @@ impl ClaimRequirements {
         }
     }
 
-    /// Validates metadata against this policy.
+    /// Validates metadata against this policy without presented
+    /// proof-of-possession material.
+    ///
+    /// When [`Self::require_cnf`] is set this fails with
+    /// [`ClaimRequirementError::ConfirmationNotPresented`]; use
+    /// [`Self::validate_with_confirmation`].
     pub fn validate(&self, metadata: &AccessTokenMetadata) -> Result<(), ClaimRequirementError> {
+        self.validate_with_confirmation(metadata, None)
+    }
+
+    /// Validates metadata against this policy, verifying `cnf` against the
+    /// key or certificate the host verified for this request.
+    pub fn validate_with_confirmation(
+        &self,
+        metadata: &AccessTokenMetadata,
+        presented: Option<&PresentedConfirmation>,
+    ) -> Result<(), ClaimRequirementError> {
         if self.require_jti && metadata.jti.as_ref().is_none_or(|v| v.trim().is_empty()) {
             return Err(ClaimRequirementError::MissingJti);
         }
@@ -220,6 +346,8 @@ impl ClaimRequirements {
             if cnf.x5t_s256.is_none() && cnf.jkt.is_none() {
                 return Err(ClaimRequirementError::MissingCnf);
             }
+            let presented = presented.ok_or(ClaimRequirementError::ConfirmationNotPresented)?;
+            metadata.verify_confirmation(presented)?;
         }
         if self.require_purpose
             && metadata.purpose.as_deref() != Some(crate::token_decode::ACCESS_TOKEN_PURPOSE)
@@ -316,4 +444,9 @@ pub enum ClaimRequirementError {
     MissingSessionVersion,
     /// Exact registered operation binding was missing or empty.
     MissingOperationBinding,
+    /// The presented key or certificate did not match the token's `cnf`.
+    ConfirmationMismatch,
+    /// `require_cnf` is set but the caller supplied no presented key or
+    /// certificate to compare.
+    ConfirmationNotPresented,
 }
