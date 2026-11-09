@@ -22,6 +22,7 @@ mod provider_http;
 mod rate_limits;
 mod recovery;
 mod refresh_reuse_grace;
+mod refresh_store_conformance;
 mod scope_match;
 mod scopes;
 mod time_invariants;

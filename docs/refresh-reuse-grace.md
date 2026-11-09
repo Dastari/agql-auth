@@ -116,38 +116,19 @@ SELECT * FROM refresh_tokens
 WHERE session_family_id = ? AND revoked_at IS NULL;
 ```
 
-Overriding it also commits the store to these rules:
+Every `RefreshTokenStore` must already follow the
+[concurrency rules](storage-traits.md#concurrency-rules): rotation is a compare-and-swap
+decided by its update, single revocation leaves a revoked row unchanged, and family
+revocation is serialized with rotation per family so it cannot miss a replacement. The
+grace makes rotations more common, so a store that breaks them fails more often with it
+on. Overriding the read also relies on these:
 
-1. **`rotate_refresh_token` stays a compare-and-swap.** This is the existing contract:
-   revoke the current token and insert the replacement in one transaction, and return
-   `Ok(false)`, changing nothing, when the current token is already revoked. There is no
-   new write operation.
-2. **`replaced_by_token_id` is set only by rotation.** The record has no reason field,
+1. **`replaced_by_token_id` is set only by rotation.** The record has no reason field,
    so this is how a rotation is recognized.
-3. **A revoked token's `revoked_at` and `replaced_by_token_id` do not change while its
-   family is live.** A window is measured from them. `revoke_refresh_token` must check
-   this in the same statement, `UPDATE ... WHERE id = ? AND revoked_at IS NULL`, because
-   its caller may have read the token before a concurrent rotation. Without the check,
-   a sign-out racing a rotation overwrites the rotation and ends that token's grace early.
-   Changing them during family revocation is harmless, because no live token remains.
-4. **Family revocation cannot miss a replacement.** At PostgreSQL `READ COMMITTED`, a
-   single `UPDATE ... WHERE session_family_id = ? AND revoked_at IS NULL` can block on
-   the newest row while a rotation commits. It then skips that row and never sees the
-   replacement, which stays live after sign-out. Ordinary rotation has the same hazard,
-   and the grace makes rotations more common. Serialize the two per family:
-
-```sql
--- In both revoke_refresh_token_family and rotate_refresh_token. The lock is its own
--- statement, so the statements after it read what the previous holder committed.
-BEGIN;
-SELECT pg_advisory_xact_lock(hashtextextended(?, 0)); -- the session family ID
-UPDATE refresh_tokens SET revoked_at = ?, ...
-WHERE session_family_id = ? AND revoked_at IS NULL;
-COMMIT;
-```
-
-`SERIALIZABLE` with retries also works. So does SQLite with `BEGIN IMMEDIATE`, which
-serializes writers.
+2. **A revoked token's `revoked_at` and `replaced_by_token_id` do not change while its
+   family is live.** A window is measured from them. The atomic check in
+   `revoke_refresh_token` keeps this when a sign-out races a rotation. Changing them
+   during family revocation is harmless, because no live token remains.
 
 ### Why one live token holds under concurrency
 

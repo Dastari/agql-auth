@@ -17,6 +17,9 @@ use super::refresh_reuse_grace::{
     SEED_TOKEN, double_refresh_contract, logout_racing_rotation_contract,
     racing_different_tokens_contract, racing_reuses_contract, seed_record, sequential_contract,
 };
+use super::refresh_store_conformance::{
+    racing_rotations_contract, rotation_racing_family_revocation_contract,
+};
 use crate::prelude::*;
 
 struct ConsumerRefreshStore {
@@ -25,6 +28,8 @@ struct ConsumerRefreshStore {
     table: String,
     /// Holds the next rotation open before COMMIT until `release` appears here.
     pause_next_rotation: Mutex<Option<PathBuf>>,
+    /// Holds the next family revocation open the same way.
+    pause_next_family_revocation: Mutex<Option<PathBuf>>,
 }
 
 impl ConsumerRefreshStore {
@@ -34,6 +39,7 @@ impl ConsumerRefreshStore {
             database,
             table: format!("agql_refresh_conformance_{}", Uuid::new_v4().simple()),
             pause_next_rotation: Mutex::default(),
+            pause_next_family_revocation: Mutex::default(),
         });
         store.call(json!({"op": "init"})).await.unwrap();
         store
@@ -130,11 +136,13 @@ impl RefreshTokenStore for ConsumerRefreshStore {
         revoked_at: OffsetDateTime,
         reason: RefreshTokenRevocationReason,
     ) -> crate::AuthResult<()> {
+        let pause = self.pause_next_family_revocation.lock().unwrap().take();
         self.call(json!({
             "op": "revoke_family",
             "family": session_family_id,
             "revoked_at": revoked_at,
             "reason": reason_text(&reason),
+            "pause_dir": pause,
         }))
         .await?;
         Ok(())
@@ -246,24 +254,7 @@ async fn family_revocation_during_rotation_contract(store: Arc<ConsumerRefreshSt
                 .await
         }
     });
-    let blocked = store
-        .call(json!({"op": "blocked_lock_requests"}))
-        .await
-        .unwrap();
-    if blocked.is_null() {
-        // SQLite has no lock view. Its writer lock serializes the revocation
-        // whenever it starts, so the order does not change the outcome.
-        sleep_ms(300).await;
-    } else {
-        wait_for("the revocation to block", async || {
-            store
-                .call(json!({"op": "blocked_lock_requests"}))
-                .await
-                .unwrap()
-                != json!(0)
-        })
-        .await;
-    }
+    wait_for_blocked(&store).await;
     assert!(
         !revocation.is_finished(),
         "the revocation must wait for the rotation"
@@ -286,12 +277,106 @@ async fn family_revocation_during_rotation_contract(store: Arc<ConsumerRefreshSt
     );
 }
 
+/// Rotation that starts while a family revocation is uncommitted.
+///
+/// The revocation is held after its writes and before COMMIT, the rotation is
+/// started and shown to be blocked, then the revocation is released. The
+/// rotation must find the token revoked and insert nothing. A port that reads
+/// without a lock, inserts, and ignores the row count of its update would
+/// return `true` here and leave its replacement live after sign-out.
+async fn rotation_during_family_revocation_contract(store: Arc<ConsumerRefreshStore>) {
+    let now = OffsetDateTime::now_utc();
+    let family = Uuid::new_v4();
+    let current = seed_record(SEED_TOKEN, family, Uuid::new_v4(), now);
+    store.insert_refresh_token(current.clone()).await.unwrap();
+    let replacement = seed_record("replacement", family, current.session_id, now);
+
+    let pause = std::env::temp_dir().join(format!("agql-refresh-pause-{}", Uuid::new_v4()));
+    std::fs::create_dir(&pause).unwrap();
+    *store.pause_next_family_revocation.lock().unwrap() = Some(pause.clone());
+
+    let revocation = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .revoke_refresh_token_family(family, now, RefreshTokenRevocationReason::Logout)
+                .await
+        }
+    });
+    let paused = pause.join("paused");
+    wait_for("the revocation to hold", async || {
+        Path::new(&paused).exists()
+    })
+    .await;
+
+    let rotation = tokio::spawn({
+        let store = store.clone();
+        let id = current.id;
+        async move {
+            store
+                .rotate_refresh_token(id, replacement, now, None, None)
+                .await
+        }
+    });
+    wait_for_blocked(&store).await;
+    assert!(
+        !rotation.is_finished(),
+        "the rotation must wait for the revocation"
+    );
+
+    std::fs::write(pause.join("release"), b"").unwrap();
+    revocation.await.unwrap().unwrap();
+    assert!(
+        !rotation.await.unwrap().unwrap(),
+        "a rotation of a token revoked under it must report the conflict"
+    );
+    let _ = std::fs::remove_dir_all(&pause);
+
+    let live = store
+        .find_live_refresh_tokens_in_family(family)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        live.is_empty(),
+        "a rotation that lost to sign-out must not insert: {} live",
+        live.len()
+    );
+}
+
+/// Waits until a second writer is blocked behind a held transaction.
+async fn wait_for_blocked(store: &ConsumerRefreshStore) {
+    let blocked = store
+        .call(json!({"op": "blocked_lock_requests"}))
+        .await
+        .unwrap();
+    if blocked.is_null() {
+        // SQLite has no lock view. Its writer lock serializes the second
+        // writer whenever it starts, so the order does not change the outcome.
+        sleep_ms(300).await;
+    } else {
+        wait_for("the second writer to block", async || {
+            store
+                .call(json!({"op": "blocked_lock_requests"}))
+                .await
+                .unwrap()
+                != json!(0)
+        })
+        .await;
+    }
+}
+
 /// Races are repeated because one interleaving proves little.
 const RACE_ROUNDS: usize = 8;
 
 async fn contract(backend: &'static str, database: &str) {
-    for contract in 0..6 {
-        let rounds = if contract == 0 { 1 } else { RACE_ROUNDS };
+    for contract in 0..9 {
+        let rounds = match contract {
+            0 => 1,
+            // These repeat internally.
+            7 | 8 => 2,
+            _ => RACE_ROUNDS,
+        };
         for _ in 0..rounds {
             let database = if backend == "sqlite" {
                 std::env::temp_dir()
@@ -312,7 +397,10 @@ async fn contract(backend: &'static str, database: &str) {
                 2 => racing_reuses_contract(store.clone()).await,
                 3 => racing_different_tokens_contract(store.clone()).await,
                 4 => logout_racing_rotation_contract(store.clone()).await,
-                _ => family_revocation_during_rotation_contract(store.clone()).await,
+                5 => family_revocation_during_rotation_contract(store.clone()).await,
+                6 => rotation_during_family_revocation_contract(store.clone()).await,
+                7 => rotation_racing_family_revocation_contract(store.clone()).await,
+                _ => racing_rotations_contract(store.clone()).await,
             }
             store.cleanup().await;
         }

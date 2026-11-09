@@ -89,18 +89,43 @@ def family_lock(family):
     return f"SELECT pg_advisory_xact_lock(hashtextextended({literal(family)}, 0));"
 
 
+def pause_dir():
+    """A test can hold a write transaction open before COMMIT, after its writes."""
+    pause = request.get("pause_dir")
+    if pause and not re.fullmatch(r"[A-Za-z0-9_./-]+", pause):
+        raise ValueError("invalid pause directory")
+    return pause
+
+
+def sqlite_hold(pause):
+    if pause:
+        open(os.path.join(pause, "paused"), "w").close()
+        while not os.path.exists(os.path.join(pause, "release")):
+            time.sleep(0.02)
+
+
+def psql_hold(pause):
+    return (f"\n\\! touch {pause}/paused\n"
+            f"\\! while [ ! -e {pause}/release ]; do sleep 0.02; done\n") if pause else " "
+
+
 op = request["op"]
 result = None
 if op == "init":
     create = (f"CREATE TABLE {table} (id TEXT PRIMARY KEY, family TEXT NOT NULL, "
               "token_hash TEXT NOT NULL UNIQUE, revoked_at TEXT, replaced_by TEXT, last_used_at TEXT, "
               "ip_address TEXT, user_agent TEXT, reason TEXT, record TEXT NOT NULL)")
+    # At most one live token per family: a broken rotation or a branch fails
+    # loudly instead of leaving two live tokens.
+    one_live = (f"CREATE UNIQUE INDEX {table}_one_live ON {table} (family) "
+                "WHERE revoked_at IS NULL")
     if backend == "sqlite":
         with sqlite_connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(create)
+            connection.execute(one_live)
     else:
-        psql(create + ";")
+        psql(f"{create}; {one_live};")
     result = True
 elif op == "drop":
     if backend == "sqlite":
@@ -138,13 +163,15 @@ elif op == "revoke_family":
     sql = (f"UPDATE {table} SET revoked_at = {literal(stamp(request['revoked_at']))}, "
            f"reason = {literal(request['reason'])} "
            f"WHERE family = {literal(family)} AND revoked_at IS NULL")
+    pause = pause_dir()
     if backend == "sqlite":
         with sqlite_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(sql)
+            sqlite_hold(pause)
             connection.execute("COMMIT")
     else:
-        psql(f"BEGIN; {family_lock(family)} {sql}; COMMIT;")
+        psql(f"BEGIN; {family_lock(family)} {sql};{psql_hold(pause)}COMMIT;")
     result = True
 elif op == "touch":
     sql = (f"UPDATE {table} SET last_used_at = {literal(stamp(request['used_at']))}, "
@@ -164,32 +191,26 @@ elif op == "rotate":
               f"ip_address = {literal(request.get('ip_address'))}, "
               f"user_agent = {literal(request.get('user_agent'))} "
               f"WHERE id = {literal(request['current'])} AND revoked_at IS NULL")
-    pause = request.get("pause_dir")
-    if pause and not re.fullmatch(r"[A-Za-z0-9_./-]+", pause):
-        raise ValueError("invalid pause directory")
+    pause = pause_dir()
     if backend == "sqlite":
+        # Update first and check the row count: the canonical shape. SQLite has
+        # no SELECT ... FOR UPDATE, and BEGIN IMMEDIATE serializes writers.
         with sqlite_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             result = connection.execute(update).rowcount == 1
             if result:
                 connection.execute(f"INSERT INTO {table} VALUES ({insert_values(token)})")
-            if pause:
-                open(os.path.join(pause, "paused"), "w").close()
-                while not os.path.exists(os.path.join(pause, "release")):
-                    time.sleep(0.02)
+            sqlite_hold(pause)
             connection.execute("COMMIT")
     else:
         # One statement: the revoke and the insert commit together or not at
         # all. A concurrent caller blocks on the row, re-evaluates revoked_at
         # after the first commit and then matches no row, so it inserts nothing.
-        # A test can hold the transaction open before COMMIT, after the writes.
-        hold = (f"\n\\! touch {pause}/paused\n"
-                f"\\! while [ ! -e {pause}/release ]; do sleep 0.02; done\n") if pause else " "
         rows = psql(
             f"BEGIN; {family_lock(token['session_family_id'])} "
             f"WITH updated AS ({update} RETURNING id) "
             f"INSERT INTO {table} SELECT v.* FROM (VALUES ({insert_values(token)})) AS v, updated "
-            f"RETURNING 1;{hold}COMMIT;"
+            f"RETURNING 1;{psql_hold(pause)}COMMIT;"
         )
         result = len([line for line in rows if line.strip() == "1"]) == 1
 elif op == "blocked_lock_requests":
