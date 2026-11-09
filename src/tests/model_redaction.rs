@@ -173,6 +173,7 @@ fn already_redacted_secret_carriers_stay_redacted() {
         "{:?}",
         IssuedPurposeToken {
             token: SECRET.into(),
+            token_id: uuid::Uuid::nil(),
             subject: "user-1".into(),
             purpose: "purpose".into(),
             audience: "aud".into(),

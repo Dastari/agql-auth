@@ -291,9 +291,19 @@ async fn session_bound_grant_preserves_active_session_and_current_assurance_with
         })
         .build()
         .unwrap();
-    assert_eq!(
+    // require_cnf proves possession (0.27): the plain path fails closed and the
+    // confirmation-aware path needs the bound key thumbprint.
+    assert!(
         validator
             .authenticate_access_token(&grant.access_token)
+            .is_err()
+    );
+    assert_eq!(
+        validator
+            .authenticate_access_token_with_confirmation(
+                &grant.access_token,
+                &PresentedConfirmation::jwk_thumbprint("tool-key-thumbprint"),
+            )
             .unwrap(),
         decoded
     );

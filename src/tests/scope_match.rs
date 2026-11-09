@@ -16,7 +16,8 @@ fn hierarchical_matcher_satisfies_golden_vectors() {
         (6, "a.b.*", "a.b", false),
         // Bare "*" has no meaning unless allow_universal_wildcard is enabled.
         (7, "*", "anything.at.all", false),
-        (8, "a.b*", "a.bc", true),
+        // Changed in 0.27: a partial-segment wildcard is literal.
+        (8, "a.b*", "a.bc", false),
         (9, "a.*.d", "a.c.d", true),
         (10, "a.*.d", "a.c.x.d", false),
         (11, "a.*.d", "a.d", false),
@@ -171,6 +172,7 @@ fn hierarchical_matcher_satisfies_guard_golden_vectors() {
             false,
         ),
         ("G10", "any", vec!["a.b.read"], vec![], false),
+        ("G11", "all", vec![], vec!["a.b.read"], false),
     ];
 
     for (id, mode, required, granted, expected) in vectors {

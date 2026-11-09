@@ -52,8 +52,9 @@ sessions or API/service tokens, use `AuthPrincipal`:
 - `AuthPrincipal::ApiToken(ApiTokenPrincipal)`
 
 `AuthPrincipal` exposes `subject()`, `roles()`, `scopes()`, scope helper
-methods, and API-token accessors for audience, resource binding, token ID, and
-expiry. API-token principals return an empty role list unless the host models
+methods, `expires_at()` (the access-token `exp` for users, the token expiry for
+API tokens), and API-token accessors for audience, resource binding and token
+ID. API-token principals return an empty role list unless the host models
 roles separately.
 
 ## Scope Matching
@@ -130,6 +131,32 @@ impl Query {
 
 Use resolver code when authorization depends on object ownership, tenant
 membership, or other dynamic data.
+
+A guard built from an empty list (`RequireAllRoles::new(Vec::<String>::new())`,
+`RequireAllScopes`, `RequireAllPrincipalScopes`, or the `Any` variants) denies
+every request: an empty requirement is treated as a configuration mistake, not
+as "nothing required". The `has_all_scopes` helpers and
+`ScopeMatch::has_all_scopes` likewise return `false` for an empty list.
+
+### Delegated Tokens
+
+Every user and principal guard refuses delegated credentials by default: a
+session-bound delegation (`grant_kind = session_bound_delegation`) and any
+access token carrying an `actor` claim (impersonation or on-behalf-of). They
+act for someone else and are not ordinary bearers. A resolver meant to run
+under delegation opts in on its guard:
+
+```rust
+#[graphql(guard = "RequireScope::new(\"records.read\").allow_delegated()")]
+async fn delegated_records(&self) -> Vec<Record> {
+    // ...
+}
+```
+
+`AccessTokenMetadata::is_delegated()` exposes the same classification to
+resolver code. API-token principals are not delegations and are unaffected.
+`auth_user_from_ctx` does not apply this rule; resolvers that read the user
+directly must check it themselves.
 
 For resolvers that accept either a user session or an API token, use the generic
 principal guards. `CombinedAuth` can inject either credential type into one

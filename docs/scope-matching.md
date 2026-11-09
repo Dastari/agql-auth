@@ -72,23 +72,29 @@ For `matches(granted, required)`:
 3. If `granted == required`, allow.
 4. If `granted` equals the bare wildcard, allow only when
    `allow_universal_wildcard` is true.
-5. If `granted` ends with the wildcard and multi-segment mode is enabled, strip
-   the trailing wildcard and require `required.starts_with(prefix)`.
-6. If `granted` ends with the wildcard and multi-segment mode is disabled, the
-   trailing wildcard consumes exactly one remaining segment.
-7. Otherwise split both strings on the separator. Segment counts must be equal,
-   and each granted segment must equal the required segment or equal the
-   wildcard (middle wildcards are whole segments only).
+5. Split both strings on the separator. If the last granted segment equals the
+   wildcard (and is not the only segment), the granted prefix segments must
+   equal the first required segments exactly, and the wildcard consumes the
+   remaining required segments: one or more in multi-segment mode, exactly one
+   otherwise. Every consumed segment must be non-empty.
+6. Otherwise segment counts must be equal, and each granted segment must equal
+   the required segment or equal the wildcard (middle wildcards are whole
+   segments only).
 
-Wildcards are interpreted only in the granted scope. The required scope is
-treated literally. Leading wildcards and partial middle globs are not given
-special product-specific meaning beyond the rules above.
+Wildcards are interpreted only in the granted scope and only as whole
+segments. The required scope is treated literally. A wildcard inside a segment
+has no wildcard meaning: `tenant.1*` matches only the literal `tenant.1*`, never
+`tenant.10.read`, and `tenant.1.*` never covers `tenant.10.read`. Before 0.27 a
+trailing wildcard was a raw string prefix, so `tenant.1*` matched
+`tenant.10.read` and `a.b*` matched `a.bc` (golden vector 8 changed).
 
 ## Golden Vectors
 
 Language-neutral JSON vectors live at
 [`testdata/scope_match_golden.json`](../testdata/scope_match_golden.json) so
-non-Rust routers can implement identical behavior.
+non-Rust routers can implement identical behavior. The file is at version
+`2.0` since 0.27 because vector 8 changed meaning; update external
+implementations together with it.
 
 Summary:
 
@@ -98,6 +104,9 @@ Summary:
 | 2 | `a.b.c.read` | `a.b.c.write` | deny |
 | 3 | `a.b.*` | `a.b.c` | allow |
 | 4 | `a.b.*` | `a.b.c.d` | allow (multi-segment) |
+| 8 | `a.b*` | `a.bc` | deny (partial-segment wildcard is literal) |
+| 40 | `tenant.1*` | `tenant.10.read` | deny |
+| 42 | `tenant.1.*` | `tenant.10.read` | deny |
 | 7 | `*` | `anything.at.all` | deny by default |
 | 30 | `*` | `orders.read` | allow when `allow_universal_wildcard` |
 | 25 | `orders.*` | `orders.items.read` | deny when single-segment mode |
@@ -186,6 +195,19 @@ Pattern selection uses the configured separator, wildcard, multi-segment, and
 universal-wildcard options. Pattern values select which requirements are
 exact-only; they never become grants.
 
+A verified [role-scope catalogue](role-scope-expansion.md) carries its own
+exact-only classification (`RoleScopeDefinition::exact_only` and
+`exact_only_scope_patterns`). Build the request-time matcher from it so that
+classification is enforced:
+
+```rust
+let matcher = catalogue.hierarchical_scope_match(
+    HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+)?;
+// or merge into options you build yourself:
+let options = catalogue.apply_exact_only(HierarchicalScopeOptions::default());
+```
+
 Validation rejects an exact-only pattern equal to the configured bare
 wildcard. Every other wildcard-bearing exact-only pattern is accepted with a
 [`HierarchicalScopeValidationWarning`](../src/scope_match.rs), because it can
@@ -196,6 +218,7 @@ surface `matcher.validation_warnings()` rather than hiding those diagnostics.
 
 `RequireScope`, `RequireAnyScope`, `RequireAllScopes`, and the
 `Require*PrincipalScope` guards read `AuthRuntime` from request data and fall
-back to exact matching when no runtime is present. `AuthService`,
+back to exact matching when no runtime is present. Guards with an empty scope
+list deny, and `has_all_scopes` returns `false` for an empty list. `AuthService`,
 `AccessTokenValidator`, and `CombinedAuth` inject runtime data on successful
 authentication.

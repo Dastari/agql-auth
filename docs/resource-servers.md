@@ -45,9 +45,9 @@ access-token claim shape: `typ`, `purpose`, `iss`, `aud`, `sub`, `sid`, `roles`,
 standard `scope`, `ctx`, `exp`, `iat`, optional `nbf`, and optional multi-tenant metadata
 (`jti`, `tenant_id`, `organization_id`, `session_family_id`, `actor`, `auth_time`,
 `amr`, `acr`, `cnf`, resource binding, `correlation_id`). New access tokens carry
-`typ = "access"`, `purpose = "access_token"`, and a unique `jti`. Legacy tokens
-missing purpose still validate under the default purpose policy. The pre-0.14
-`scopes` array is accepted by default during migration; see
+`typ = "access"`, `purpose = "access_token"`, and a unique `jti`; every token
+issued since 0.6.0 carries `typ` and `purpose`, and the validator requires both
+by default. The pre-0.14 `scopes` array is rejected by default; see
 [Access-token scope claims](access-token-scope-claims.md).
 
 ## Validation Policy Highlights
@@ -56,12 +56,18 @@ missing purpose still validate under the default purpose policy. The pre-0.14
 - Issuer and audience validation (including multi-audience tokens)
 - Expiry and `nbf` checks with configurable bounded clock skew (`leeway_seconds`, max 300)
 - Injectable clock for deterministic tests
-- Expected `kid` where configured; multi-key JWKS resolves by token `kid`
-- HS256 only with `accept_hs256(true)`
-- Purpose policy: `AccessTokenOrLegacy` (default) or `RequireAccessToken`
-- Legacy scope policy: `Accept` (default migration mode) or `Reject`
-- Claim requirements via `ClaimRequirements`
-- Bearer parse mode: `BearerOrRaw` (default) or `RequireBearer`
+- Optional `kid` pin (`key_id` or `key_ids`); JWKS keys resolve by token `kid`
+- Each key verifies only its own algorithm
+- HMAC (HS256/384/512) only with `accept_hs256(true)`, including keys from a
+  custom `key_resolver`
+- Purpose policy: `RequireAccessToken` (default; requires `typ` and `purpose`)
+  or the legacy opt-in `AccessTokenOrLegacy`
+- Legacy scope policy: `Reject` (default) or the migration opt-in `Accept`
+- Claim requirements via `ClaimRequirements`; `require_cnf` verifies the
+  presented certificate or key (see
+  [Multi-tenant claims](multi-tenant-claims.md#confirmation-cnf-binding))
+- Bearer parse mode: `RequireBearer` (default) or the legacy opt-in
+  `BearerOrRaw`; it also applies to WebSocket `connection_init` values
 - Basic and other schemes are rejected
 - Missing auth is distinguishable from invalid auth; invalid never becomes anonymous
 
@@ -78,8 +84,10 @@ let validator = AccessTokenValidator::builder()
     .build()?;
 ```
 
-For a multi-key JWKS, `key_id` is required. For a one-key JWKS, the validator
-uses that key and requires the token `kid` when the JWK includes one.
+A multi-key JWKS resolves each token by its `kid`, so it can hold the outgoing
+and incoming keys during a rotation. `key_id` / `key_ids` optionally pin the
+accepted `kid`s. For a one-key JWKS, the validator uses that key and requires
+the token `kid` when the JWK includes one. See [Key rotation](key-rotation.md).
 
 ## HS256 Gate
 
@@ -106,6 +114,9 @@ tokens. On success it inserts `AuthUser`, `AuthPrincipal::User`, and
 ```rust
 let request = validator.inject_http_auth(graphql_request, authorization_header)?;
 ```
+
+Use `inject_http_auth_with_confirmation` instead when the host verified a
+client certificate or proof-of-possession key for the request.
 
 Use `authenticate_connection_init_value` for GraphQL WebSocket payloads:
 
@@ -139,17 +150,37 @@ let validator = AccessTokenValidator::builder()
 
 Exact matching remains the default.
 
-After all pre-0.14 access tokens have expired, disable the legacy array on each
-resource server independently:
+The legacy array is rejected by default. Re-enable it only while an issuer
+still emits it:
 
 ```rust
 use agql_auth::LegacyScopeClaims;
 
 let validator = AccessTokenValidator::builder()
     // issuer, audience, and public-key configuration
-    .legacy_scope_claims(LegacyScopeClaims::Reject)
+    .legacy_scope_claims(LegacyScopeClaims::Accept)
     .build()?;
 ```
+
+## Upgrading To 0.27 Defaults
+
+0.27 tightens three validator defaults: `typ`/`purpose` are required, the
+`Bearer` scheme is required, and the legacy `scopes` array is rejected. A 0.26
+issuer already mints `typ`, `purpose` and the standard `scope` on every access
+token (unless it was explicitly configured with
+`AccessTokenScopeClaimFormat::LegacyArray`), so resource servers can upgrade
+before, after or alongside issuers. Order:
+
+1. Confirm every client sends `Authorization: Bearer <token>` (and
+   `"Bearer <token>"` in WebSocket `connection_init` values). Otherwise set
+   `.bearer_parse_mode(BearerParseMode::BearerOrRaw)` before upgrading.
+2. If any issuer uses `LegacyArray`, either switch it to `Standard` and wait
+   out the maximum access-token TTL first, or set
+   `.legacy_scope_claims(LegacyScopeClaims::Accept)` on validators.
+3. Only an issuer older than 0.6 mints tokens without `typ`/`purpose`; keep
+   `.purpose_policy(PurposePolicy::AccessTokenOrLegacy)` while one is running.
+4. Upgrade resource servers, then issuers (or in either order when steps 1 to
+   3 hold).
 
 Access-token time claims must fit the supported `time::OffsetDateTime` range.
 Out-of-range signed `exp`, `iat`, or `nbf` values fail with `InvalidAccessToken`;

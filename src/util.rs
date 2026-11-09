@@ -59,6 +59,18 @@ pub(crate) fn checked_jwt_expiry(
     Ok(expiry)
 }
 
+/// Removes duplicates while keeping first-seen order.
+pub(crate) fn dedupe_stable(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
+}
+
 pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {
     strip_bearer_prefix_with_mode(input, crate::token_decode::BearerParseMode::BearerOrRaw)
 }

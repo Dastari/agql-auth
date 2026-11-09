@@ -502,3 +502,22 @@ pub trait ApiTokenStore: Send + Sync {
         ))
     }
 }
+
+#[async_trait]
+/// Records consumed purpose-token ids so a purpose token succeeds at most once.
+///
+/// Used by
+/// [`AuthService::consume_purpose_token`](crate::AuthService::consume_purpose_token).
+/// Implementations must insert `token_id` atomically (for example a unique-key
+/// insert) and return `Ok(true)` only for the first call with that id, and
+/// `Ok(false)` for every later call. Records must be kept at least until
+/// `expires_at`; they may be deleted afterwards because the token no longer
+/// validates. Return an error, never `Ok(true)`, when the outcome is unknown.
+pub trait PurposeTokenReplayStore: Send + Sync {
+    /// Atomically marks a purpose-token id as consumed.
+    async fn consume_purpose_token(
+        &self,
+        token_id: Uuid,
+        expires_at: OffsetDateTime,
+    ) -> AuthResult<bool>;
+}
