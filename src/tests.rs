@@ -10,6 +10,7 @@ mod challenge_binding;
 mod challenges;
 mod channel;
 mod claims_and_status;
+mod clock_unification;
 mod combined;
 mod confirmation;
 mod consumer_refresh_store;

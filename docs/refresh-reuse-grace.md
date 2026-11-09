@@ -56,7 +56,8 @@ The window is symmetric, so a small clock difference between instances does not 
 race into a sign-out. A `revoked_at` further ahead of the local clock than the window
 is refused. Skew can extend a token's use by as much as the skew, and only skew smaller
 than the window has this effect. Keep instances synchronized. Tests can inject a clock
-with `with_refresh_rotation_clock`.
+with `with_session_clock` (formerly `with_refresh_rotation_clock`), which also covers
+issuance, logout and service-side validation.
 
 ## No widening
 

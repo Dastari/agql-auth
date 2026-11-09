@@ -42,7 +42,7 @@ where
         ttl: Duration,
     ) -> AuthResult<PasswordResetToken> {
         let user_id = user_id.into();
-        let issued_at = OffsetDateTime::now_utc();
+        let issued_at = self.session_clock.now();
         let expires_at = crate::util::checked_jwt_expiry(issued_at, ttl, "password-reset ttl")?;
         let token_id = Uuid::new_v4();
         let claims = PasswordResetTokenClaims {
@@ -90,7 +90,7 @@ where
             .invalidate_password_reset_tokens_for_user(
                 &issued.user_id,
                 Some(issued.token_id),
-                OffsetDateTime::now_utc(),
+                self.session_clock.now(),
             )
             .await?;
         Ok(issued)
@@ -128,7 +128,7 @@ where
             .map_err(|_| AuthError::InvalidPasswordResetToken)?;
         let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
             .map_err(|_| AuthError::InvalidPasswordResetToken)?;
-        if expires_at <= OffsetDateTime::now_utc() {
+        if expires_at <= self.session_clock.now() {
             return Err(AuthError::PasswordResetTokenExpired);
         }
 
@@ -182,7 +182,7 @@ where
             .invalidate_password_reset_tokens_for_user(
                 &verified.user_id,
                 None,
-                OffsetDateTime::now_utc(),
+                self.session_clock.now(),
             )
             .await?;
         // A consumed reset proves the account may be compromised: end every
@@ -230,7 +230,7 @@ where
             .await?;
 
         let consumed = store
-            .consume_password_reset_token(verified.token_id, OffsetDateTime::now_utc())
+            .consume_password_reset_token(verified.token_id, self.session_clock.now())
             .await?;
         if !consumed {
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)

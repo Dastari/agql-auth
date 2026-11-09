@@ -135,7 +135,7 @@ pub struct AuthService<U, R> {
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
     refresh_grant_authority: Option<Arc<dyn crate::RefreshGrantAuthority>>,
-    refresh_rotation_clock: Arc<dyn Clock>,
+    session_clock: Arc<dyn Clock>,
     refresh_reuse_grace: Option<Duration>,
     refresh_reuse_grace_observer: Option<Arc<dyn RefreshReuseGraceObserver>>,
     fixed_delegation_audience: Option<String>,
@@ -218,7 +218,7 @@ where
             active_user_session_resolver: None,
             additional_token_roles_provider: None,
             refresh_grant_authority: None,
-            refresh_rotation_clock: Arc::new(SystemClock),
+            session_clock: Arc::new(SystemClock),
             refresh_reuse_grace: None,
             refresh_reuse_grace_observer: None,
             fixed_delegation_audience: None,
@@ -306,14 +306,35 @@ where
         self
     }
 
-    /// Sets the trusted clock for refresh and step-up rotation.
+    /// Sets the trusted clock for local tokens and refresh sessions.
     ///
-    /// It stamps rotations and decides refresh-token expiry and the reuse grace,
-    /// and it sets the times in the tokens those calls issue. It does not change
-    /// login, logout or validation, which keep the system clock. Defaults to the
-    /// system clock.
-    pub fn with_refresh_rotation_clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.refresh_rotation_clock = clock;
+    /// It stamps login, refresh, step-up and verified-session issuance, decides
+    /// refresh-token expiry, the absolute session lifetime and the reuse grace,
+    /// stamps logout and user revocation, and checks expiry when this service
+    /// validates its own access, purpose and password-reset tokens. Defaults to
+    /// the system clock. Rate-limit and login-challenge time keep their own
+    /// clocks; [`Self::with_clock`] sets this one and the challenge clock.
+    pub fn with_session_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.session_clock = clock;
+        self
+    }
+
+    /// Former name of [`Self::with_session_clock`]. Since 0.27 the clock also
+    /// covers issuance, logout and service-side validation, not only rotation.
+    pub fn with_refresh_rotation_clock(self, clock: Arc<dyn Clock>) -> Self {
+        self.with_session_clock(clock)
+    }
+
+    /// Uses one trusted clock for tokens and sessions
+    /// ([`Self::with_session_clock`]) and login challenges
+    /// ([`Self::with_login_challenge_clock`]).
+    ///
+    /// Abuse-control time is not changed: it must agree with the rate-limit
+    /// store's own expiry clock, so it is chosen together with the store in
+    /// [`Self::new_with_rate_limit_store_and_clock`].
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.login_challenge_clock = clock.clone();
+        self.session_clock = clock;
         self
     }
 
@@ -663,7 +684,7 @@ where
         metadata: ClientMetadata,
         assurance_override: Option<SessionAssurance>,
     ) -> AuthResult<AuthPayload> {
-        let now = self.refresh_rotation_clock.now();
+        let now = self.session_clock.now();
         let token_hash = hash_refresh_token(refresh_token);
         let existing = self
             .refresh_store
@@ -775,7 +796,7 @@ where
         };
 
         for _ in 0..MAX_REFRESH_REUSE_GRACE_RETRIES {
-            let now = self.refresh_rotation_clock.now();
+            let now = self.session_clock.now();
             if !superseded_within(presented, now, window) {
                 return Ok(None);
             }
@@ -986,7 +1007,7 @@ where
         reason: RefreshTokenRevocationReason,
     ) -> AuthResult<u64> {
         self.refresh_store
-            .revoke_refresh_tokens_for_user(user_id, OffsetDateTime::now_utc(), reason)
+            .revoke_refresh_tokens_for_user(user_id, self.session_clock.now(), reason)
             .await
     }
 
@@ -1003,7 +1024,7 @@ where
     /// superseded. Either way no token of the family stays live. A token
     /// revoked for another reason, or an unknown token, changes nothing.
     pub async fn logout(&self, refresh_token: &str, revoke_family: bool) -> AuthResult<()> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let token_hash = hash_refresh_token(refresh_token);
         let Some(existing) = self
             .refresh_store
@@ -1141,7 +1162,7 @@ where
         {
             return Err(AuthError::Forbidden);
         }
-        let issued_at = OffsetDateTime::now_utc();
+        let issued_at = self.session_clock.now();
         let expires_at =
             crate::util::checked_jwt_expiry(issued_at, request.ttl, "purpose-token ttl")?;
         let token_id = Uuid::new_v4();
@@ -1194,7 +1215,7 @@ where
         let token_data = decode::<PurposeTokenClaims>(token, decoding_key, &validation)
             .map_err(map_purpose_token_decode_error)?;
         let claims = token_data.claims;
-        if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
+        if claims.exp <= self.session_clock.now().unix_timestamp() {
             return Err(AuthError::PurposeTokenExpired);
         }
         if claims.typ != PURPOSE_TOKEN_TYPE
@@ -1476,7 +1497,7 @@ where
         request: AccessTokenOnlyRequest,
     ) -> AuthResult<AccessTokenOnlyGrant> {
         validate_access_token_only_request(&request, &self.config)?;
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
         if ttl <= Duration::ZERO {
             return Err(AuthError::InvalidConfiguration(
@@ -1643,7 +1664,7 @@ where
         self.require_enabled_delegation_parent(&current.user_id)
             .await?;
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
         let requested_expires_at = now.checked_add(ttl).ok_or_else(|| {
             AuthError::InvalidConfiguration(
@@ -1800,7 +1821,7 @@ where
         metadata: ClientMetadata,
         grant_source: crate::RefreshGrantSource,
     ) -> AuthResult<AuthPayload> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let session_expires_at = self
             .config
             .max_session_lifetime
@@ -2027,16 +2048,20 @@ where
     ) -> AuthResult<AccessTokenDecodeConfig> {
         // The key was selected by kid above, so the decode core does not pin
         // one kid again.
-        Ok(AccessTokenDecodeConfig::for_service(
+        let mut config = AccessTokenDecodeConfig::for_service(
             self.local_jwt_decoding_key(token)?.clone(),
             self.validation.clone(),
             None,
             self.config.legacy_scope_claims,
-        ))
+        );
+        config.clock = self.session_clock.clone();
+        Ok(config)
     }
 
     fn validation_for_audience(&self, audience: &str) -> Validation {
         let mut validation = Validation::new(self.signing_algorithm);
+        // Expiry is checked against the session clock by each caller.
+        validation.validate_exp = false;
         validation.set_issuer(std::slice::from_ref(&self.config.issuer));
         validation.set_audience(&[audience]);
         validation.required_spec_claims.extend(
@@ -3028,6 +3053,8 @@ impl JwtKeyMaterial {
         };
 
         let mut validation = Validation::new(algorithm);
+        // Expiry is checked against the service's session clock by each caller.
+        validation.validate_exp = false;
         validation.set_issuer(std::slice::from_ref(&config.issuer));
         validation.set_audience(std::slice::from_ref(&config.audience));
         validation.required_spec_claims.extend(

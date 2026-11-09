@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use async_graphql::Request;
 use async_trait::async_trait;
-use time::{Duration, OffsetDateTime};
+use time::Duration;
 use uuid::Uuid;
 
+use crate::clock::{Clock, SystemClock};
 use crate::config::ClientMetadata;
 use crate::models::{ApiTokenIssueRequest, AuthPrincipal, IssuedApiToken, StoredApiToken};
 use crate::stores::ApiTokenStore;
@@ -42,6 +43,7 @@ pub struct ApiTokenService<S> {
     expected_audience: Option<String>,
     expected_resource: Option<(String, String)>,
     touch_observer: Option<Arc<dyn ApiTokenTouchObserver>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl<S> fmt::Debug for ApiTokenService<S> {
@@ -67,6 +69,7 @@ where
             expected_audience: None,
             expected_resource: None,
             touch_observer: None,
+            clock: Arc::new(SystemClock),
         }
     }
 
@@ -123,6 +126,13 @@ where
         Ok(self)
     }
 
+    /// Uses `clock` for issuance, expiry checks, last-used stamps and
+    /// revocation times instead of the system clock.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Reports failed last-used updates to `observer`.
     pub fn with_touch_observer<O>(mut self, observer: Arc<O>) -> Self
     where
@@ -141,7 +151,7 @@ where
     pub async fn issue_token(&self, request: ApiTokenIssueRequest) -> AuthResult<IssuedApiToken> {
         validate_issue_request(&request)?;
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.clock.now();
         let expires_at = crate::util::checked_expiry(now, request.ttl, "API-token ttl")?;
         let token_id = Uuid::new_v4();
         let raw_token = format!("{}{}", self.token_prefix, generate_opaque_token());
@@ -224,11 +234,11 @@ where
             return Err(AuthError::ApiTokenRevoked);
         }
 
-        if stored.is_expired(OffsetDateTime::now_utc()) {
+        if stored.is_expired(self.clock.now()) {
             return Err(AuthError::ApiTokenExpired);
         }
 
-        let used_at = OffsetDateTime::now_utc();
+        let used_at = self.clock.now();
         if let Err(error) = self
             .store
             .touch_api_token(stored.id, used_at, metadata.ip_address, metadata.user_agent)
@@ -264,7 +274,7 @@ where
         reason: crate::ApiTokenRevocationReason,
     ) -> AuthResult<()> {
         self.store
-            .revoke_api_token(token_id, OffsetDateTime::now_utc(), reason)
+            .revoke_api_token(token_id, self.clock.now(), reason)
             .await
     }
 
