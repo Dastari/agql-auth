@@ -196,8 +196,13 @@ pub use crate::memory_rate_limit::MemoryAuthRateLimitStore;
 
 #[async_trait]
 /// Persists one-time password-reset token IDs.
+///
+/// Every reset token the crate issues has a record here; a token without one
+/// can never be consumed.
 pub trait PasswordResetTokenStore: Send + Sync {
-    /// Inserts a password-reset token ID with its expiry.
+    /// Inserts a password-reset token ID with its owning user and expiry.
+    ///
+    /// Persist `user_id` with the record; sibling invalidation selects by it.
     async fn insert_password_reset_token(
         &self,
         token_id: Uuid,
@@ -207,12 +212,42 @@ pub trait PasswordResetTokenStore: Send + Sync {
 
     /// Consumes a password-reset token exactly once.
     ///
-    /// Return `true` only for the first successful consume operation.
+    /// Must atomically require an existing record that is neither consumed nor
+    /// invalidated, then mark it consumed. Return `true` only for the first
+    /// successful consume operation, and `false` for a missing, consumed or
+    /// invalidated record, for example:
+    ///
+    /// ```sql
+    /// UPDATE password_reset_tokens SET consumed_at = ?
+    /// WHERE id = ? AND consumed_at IS NULL AND invalidated_at IS NULL;
+    /// -- true exactly when one row changed
+    /// ```
     async fn consume_password_reset_token(
         &self,
         token_id: Uuid,
         consumed_at: OffsetDateTime,
     ) -> AuthResult<bool>;
+
+    /// Invalidates every unconsumed reset token of `user_id`, except
+    /// `keep_token_id` when given, and returns how many it changed.
+    ///
+    /// Called after issuing a new token (keeping that one) and after a token is
+    /// consumed (keeping none). Afterwards
+    /// [`Self::consume_password_reset_token`] must return `false` for every
+    /// invalidated token. Return `Err` if this cannot be done; never succeed
+    /// without invalidating. One statement is enough:
+    ///
+    /// ```sql
+    /// UPDATE password_reset_tokens SET invalidated_at = ?
+    /// WHERE user_id = ? AND (? IS NULL OR id <> ?) AND consumed_at IS NULL
+    ///   AND invalidated_at IS NULL;
+    /// ```
+    async fn invalidate_password_reset_tokens_for_user(
+        &self,
+        user_id: &str,
+        keep_token_id: Option<Uuid>,
+        invalidated_at: OffsetDateTime,
+    ) -> AuthResult<u64>;
 }
 
 #[async_trait]
@@ -306,11 +341,26 @@ pub trait OAuthStateStore: Send + Sync {
 ///
 /// Production MFA flows should prefer
 /// [`AuthService::verify_totp_code_with_replay_store`](crate::AuthService::verify_totp_code_with_replay_store)
-/// over stateless verification. Implementations should atomically insert the
-/// `(principal_id, factor_id, step)` tuple and return `Ok(true)` only for the
-/// first successful consume operation.
+/// over stateless verification.
 pub trait TotpReplayStore: Send + Sync {
     /// Consumes a valid TOTP time step once for a principal/factor.
+    ///
+    /// Must insert the `(principal_id, factor_id, step)` tuple in one atomic
+    /// operation backed by a uniqueness constraint, and return `Ok(true)` only
+    /// when this call inserted it. Concurrent calls for the same tuple, from
+    /// any process, must see exactly one `Ok(true)`. A read followed by a
+    /// separate insert is not atomic. Treat `factor_id = None` as one value
+    /// (for example store `''`), because SQL `NULL`s do not collide in a
+    /// unique index:
+    ///
+    /// ```sql
+    /// INSERT INTO totp_steps (principal_id, factor_id, step, consumed_at)
+    /// VALUES (?, COALESCE(?, ''), ?, ?)
+    /// ON CONFLICT (principal_id, factor_id, step) DO NOTHING;
+    /// -- Ok(true) exactly when one row was inserted
+    /// ```
+    ///
+    /// Return `Err` when the outcome is unknown; never `Ok(true)`.
     async fn consume_totp_step(
         &self,
         principal_id: &str,
@@ -331,6 +381,18 @@ pub trait ExternalIdentityStore: Send + Sync {
     ) -> AuthResult<Option<ExternalIdentity>>;
 
     /// Links an external identity to a local user.
+    ///
+    /// Must be atomic on `(provider_name, external_subject)`: a unique
+    /// constraint makes a concurrent second link for the same pair fail with
+    /// `Err`, and an existing link must never be silently re-pointed to
+    /// another user. Check-then-insert without the constraint is not enough:
+    ///
+    /// ```sql
+    /// -- UNIQUE (provider_name, external_subject)
+    /// INSERT INTO external_identities (provider_name, external_subject, user_id, ...)
+    /// VALUES (?, ?, ?, ...);
+    /// -- a unique violation is returned as Err
+    /// ```
     async fn link_external_identity(&self, identity: ExternalIdentity) -> AuthResult<()>;
 
     /// Updates the stored claims snapshot for an existing external identity.
@@ -366,6 +428,8 @@ pub trait OAuthTokenStore: Send + Sync {
 ///
 /// Implementations should store only token hashes. The raw token is returned
 /// once by [`crate::ApiTokenService`] and should not be persisted by hosts.
+/// Persist `audience`, `resource_type` and `resource_id` exactly: the service
+/// refuses tokens whose binding does not match its configuration.
 pub trait ApiTokenStore: Send + Sync {
     /// Stores a newly issued API token record.
     async fn insert_api_token(&self, token: StoredApiToken) -> AuthResult<()>;
@@ -377,6 +441,9 @@ pub trait ApiTokenStore: Send + Sync {
     async fn find_api_token_by_hash(&self, token_hash: &str) -> AuthResult<Option<StoredApiToken>>;
 
     /// Records metadata for a successful API-token use.
+    ///
+    /// Best effort: an error here does not fail authentication and is passed
+    /// to the service's [`crate::ApiTokenTouchObserver`], if any.
     async fn touch_api_token(
         &self,
         token_id: Uuid,
@@ -393,13 +460,15 @@ pub trait ApiTokenStore: Send + Sync {
         reason: ApiTokenRevocationReason,
     ) -> AuthResult<()>;
 
-    /// Optional bulk API-token revocation; the default is a no-op returning zero.
+    /// Optional bulk revocation of every active token of one principal.
     ///
-    /// `Ok(0)` alone does not prove the adapter supports bulk revocation or that
-    /// no active tokens remain. Hosts relying on this must require and test an
-    /// override, or use a known-supported per-token revocation workflow. It does
-    /// not revoke user sessions/JWTs or invalidate already accepted principals;
-    /// those require their own authoritative status/revalidation boundary.
+    /// The default returns [`AuthError::InvalidConfiguration`](crate::AuthError::InvalidConfiguration)
+    /// and changes nothing, so an adapter without it can never report a
+    /// revocation that did not happen. An override must revoke every matching
+    /// unrevoked token durably before returning `Ok(count)`; `Ok(0)` then means
+    /// no active token matched. It does not revoke user sessions/JWTs or
+    /// invalidate already accepted principals; those require their own
+    /// authoritative status/revalidation boundary.
     async fn revoke_api_tokens_for_principal(
         &self,
         _subject: &str,
@@ -407,15 +476,16 @@ pub trait ApiTokenStore: Send + Sync {
         _revoked_at: OffsetDateTime,
         _reason: ApiTokenRevocationReason,
     ) -> AuthResult<u64> {
-        Ok(0)
+        Err(crate::AuthError::InvalidConfiguration(
+            "api token store does not support bulk revocation by principal".to_string(),
+        ))
     }
 
-    /// Optional resource bulk revocation; the default is a no-op returning zero.
+    /// Optional bulk revocation of every active token bound to one resource.
     ///
-    /// Shares the capability/zero-result contract of
+    /// Shares the default-error and override contract of
     /// [`Self::revoke_api_tokens_for_principal`]. The host authorizes the exact
-    /// resource and must know the adapter implements this operation before
-    /// presenting it as a security guarantee.
+    /// resource.
     async fn revoke_api_tokens_for_resource(
         &self,
         _resource_type: &str,
@@ -423,6 +493,8 @@ pub trait ApiTokenStore: Send + Sync {
         _revoked_at: OffsetDateTime,
         _reason: ApiTokenRevocationReason,
     ) -> AuthResult<u64> {
-        Ok(0)
+        Err(crate::AuthError::InvalidConfiguration(
+            "api token store does not support bulk revocation by resource".to_string(),
+        ))
     }
 }

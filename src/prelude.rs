@@ -3,7 +3,7 @@
 //! Import this module when you want the primary service, models, stores,
 //! guards, OIDC helpers, and session types in one place.
 
-pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use crate::api_tokens::{ApiTokenService, ApiTokenTouchObserver, DEFAULT_API_TOKEN_PREFIX};
 pub use crate::assurance::{
     AssuranceDenial, AssuranceDenialCode, AssuranceEvaluation, AssuranceEvaluationState,
     AssuranceInputError, AssuranceMatchMode, AssurancePolicyId, AssurancePolicyIdError,
@@ -55,11 +55,11 @@ pub use crate::models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
     AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
     AuthRateLimitSnapshot, AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken,
-    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims,
-    OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult,
-    OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
-    RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
-    StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
+    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeExpectation, LoginChallengeOptions,
+    MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
+    OidcLoginResult, OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest,
+    PurposeTokenValidation, RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge,
+    StoredRefreshToken, StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use crate::oauth2::{
@@ -80,8 +80,8 @@ pub use crate::oidc_authorization::{
     OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use crate::principal_reference::{
-    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
-    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    CurrentPrincipalResolver, DelegationGrantCeiling, MAX_SESSION_VERSION_LENGTH,
+    PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
     VerifiedActiveUserSessionResolver,
 };
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};

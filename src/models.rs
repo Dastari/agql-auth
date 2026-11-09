@@ -528,8 +528,8 @@ pub enum ApiTokenRevocationReason {
 /// Host-persisted API token record.
 ///
 /// Stores should persist only `token_hash`; the raw token is returned once in
-/// [`IssuedApiToken`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// [`IssuedApiToken`]. `Debug` redacts `token_hash`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredApiToken {
     /// API token ID.
     pub id: Uuid,
@@ -561,6 +561,28 @@ pub struct StoredApiToken {
     pub user_agent: Option<String>,
     /// Last recorded IP metadata.
     pub ip_address: Option<String>,
+}
+
+impl fmt::Debug for StoredApiToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredApiToken")
+            .field("id", &self.id)
+            .field("token_hash", &"[redacted]")
+            .field("display_name", &self.display_name)
+            .field("subject", &self.subject)
+            .field("principal_kind", &self.principal_kind)
+            .field("scopes", &self.scopes)
+            .field("audience", &self.audience)
+            .field("resource_type", &self.resource_type)
+            .field("resource_id", &self.resource_id)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("last_used_at", &self.last_used_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("user_agent", &self.user_agent)
+            .field("ip_address", &self.ip_address)
+            .finish()
+    }
 }
 
 impl StoredApiToken {
@@ -713,7 +735,9 @@ impl ApiTokenIssueRequest {
 }
 
 /// User record returned by the host's [`crate::UserStore`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` redacts `password_hash`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredUser {
     /// Stable local user ID.
     pub id: String,
@@ -728,6 +752,19 @@ pub struct StoredUser {
     pub scopes: Vec<String>,
     /// Whether login and refresh should be rejected.
     pub disabled: bool,
+}
+
+impl fmt::Debug for StoredUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredUser")
+            .field("id", &self.id)
+            .field("principal", &self.principal)
+            .field("password_hash", &"[redacted]")
+            .field("roles", &self.roles)
+            .field("scopes", &self.scopes)
+            .field("disabled", &self.disabled)
+            .finish()
+    }
 }
 
 /// Reason a refresh token was revoked.
@@ -748,8 +785,8 @@ pub enum RefreshTokenRevocationReason {
 /// Host-persisted refresh-token record.
 ///
 /// The raw refresh token is returned only once in [`AuthPayload`]. Stores should
-/// persist `token_hash`, not the raw token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// persist `token_hash`, not the raw token. `Debug` redacts `token_hash`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredRefreshToken {
     /// Refresh-token record ID.
     pub id: Uuid,
@@ -793,6 +830,31 @@ pub struct StoredRefreshToken {
     pub user_agent: Option<String>,
     /// Last recorded IP metadata.
     pub ip_address: Option<String>,
+}
+
+impl fmt::Debug for StoredRefreshToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredRefreshToken")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("session_id", &self.session_id)
+            .field("session_family_id", &self.session_family_id)
+            .field("grant_source", &self.grant_source)
+            .field("authorization_roles", &self.authorization_roles)
+            .field("roles", &self.roles)
+            .field("scopes", &self.scopes)
+            .field("session", &self.session)
+            .field("refreshable_metadata", &self.refreshable_metadata)
+            .field("token_hash", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("last_used_at", &self.last_used_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("replaced_by_token_id", &self.replaced_by_token_id)
+            .field("user_agent", &self.user_agent)
+            .field("ip_address", &self.ip_address)
+            .finish()
+    }
 }
 
 impl StoredRefreshToken {
@@ -1011,7 +1073,9 @@ pub struct VerifiedPasswordResetToken {
 }
 
 /// Host-persisted one-time login challenge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` redacts `code_hash`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredLoginChallenge {
     /// Challenge ID.
     pub id: Uuid,
@@ -1032,6 +1096,22 @@ pub struct StoredLoginChallenge {
     pub consumed_at: Option<OffsetDateTime>,
     /// Optional delivery channel label.
     pub channel: Option<String>,
+}
+
+impl fmt::Debug for StoredLoginChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredLoginChallenge")
+            .field("id", &self.id)
+            .field("principal", &self.principal)
+            .field("code_hash", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("attempts", &self.attempts)
+            .field("max_attempts", &self.max_attempts)
+            .field("consumed_at", &self.consumed_at)
+            .field("channel", &self.channel)
+            .finish()
+    }
 }
 
 impl StoredLoginChallenge {
@@ -1076,8 +1156,76 @@ impl Default for LoginChallengeOptions {
     }
 }
 
+/// Principal and delivery channel a login-challenge verification requires.
+///
+/// Pass this to [`crate::AuthService::verify_login_challenge_for`] when the
+/// host already knows who is completing the challenge, such as a second factor
+/// after a password or a step-up for the current session, or when the flow
+/// accepts only one delivery channel. Values are compared exactly with the
+/// stored challenge, so normalize them the same way as at creation. Every
+/// constructor sets at least one value; an unset value is not checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginChallengeExpectation {
+    principal: Option<String>,
+    channel: Option<String>,
+}
+
+impl LoginChallengeExpectation {
+    /// Requires the challenge to have been created for exactly this principal.
+    pub fn for_principal(principal: impl Into<String>) -> Self {
+        Self {
+            principal: Some(principal.into()),
+            channel: None,
+        }
+    }
+
+    /// Requires the challenge to carry exactly this delivery channel label.
+    pub fn for_channel(channel: impl Into<String>) -> Self {
+        Self {
+            principal: None,
+            channel: Some(channel.into()),
+        }
+    }
+
+    /// Also requires exactly this principal.
+    pub fn with_principal(mut self, principal: impl Into<String>) -> Self {
+        self.principal = Some(principal.into());
+        self
+    }
+
+    /// Also requires exactly this delivery channel label. A challenge created
+    /// without a channel never matches.
+    pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
+        self.channel = Some(channel.into());
+        self
+    }
+
+    /// Returns the required principal, if any.
+    pub fn principal(&self) -> Option<&str> {
+        self.principal.as_deref()
+    }
+
+    /// Returns the required channel label, if any.
+    pub fn channel(&self) -> Option<&str> {
+        self.channel.as_deref()
+    }
+
+    /// Returns whether a stored challenge satisfies every set value.
+    pub(crate) fn matches(&self, challenge: &StoredLoginChallenge) -> bool {
+        self.principal
+            .as_ref()
+            .is_none_or(|principal| principal == &challenge.principal)
+            && self
+                .channel
+                .as_ref()
+                .is_none_or(|channel| challenge.channel.as_ref() == Some(channel))
+    }
+}
+
 /// One-time login challenge returned to the host for delivery.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `Debug` redacts the raw `code`; serialization still contains it.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssuedLoginChallenge {
     /// Challenge ID.
     pub challenge_id: Uuid,
@@ -1091,6 +1239,19 @@ pub struct IssuedLoginChallenge {
     pub max_attempts: u32,
     /// Optional delivery channel label.
     pub channel: Option<String>,
+}
+
+impl fmt::Debug for IssuedLoginChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuedLoginChallenge")
+            .field("challenge_id", &self.challenge_id)
+            .field("principal", &self.principal)
+            .field("code", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .field("max_attempts", &self.max_attempts)
+            .field("channel", &self.channel)
+            .finish()
+    }
 }
 
 /// Result of a successfully verified login challenge.

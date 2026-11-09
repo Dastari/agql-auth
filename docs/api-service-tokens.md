@@ -33,7 +33,7 @@ Implement `ApiTokenStore` in the host application. The stored record includes:
 - principal kind
 - scopes
 - optional audience
-- optional generic resource type and ID
+- optional generic resource type and ID (set together or not at all)
 - creation, expiry, last-used, and revocation timestamps
 - optional IP address and user-agent metadata
 
@@ -51,7 +51,9 @@ use agql_auth::{
 };
 use time::Duration;
 
-let api_tokens = ApiTokenService::new(Arc::new(api_token_store));
+// The service authenticates only tokens issued for this audience.
+let api_tokens = ApiTokenService::new(Arc::new(api_token_store))
+    .with_expected_audience("graphql-api")?;
 
 let issued = api_tokens
     .issue_token(
@@ -96,6 +98,30 @@ assert!(principal.has_scope("inventory.read"));
 `authenticate_bearer` accepts values with or without the `Bearer ` prefix,
 rejects unknown, expired, and revoked tokens, and updates last-used metadata
 after successful authentication.
+
+## Audience And Resource Binding
+
+Authentication enforces the stored audience and resource binding against the
+service's configuration. A refused token fails as `InvalidApiToken`, like an
+unknown token, whatever its revocation or expiry state.
+
+| Service configuration | Accepted tokens |
+| --- | --- |
+| no `with_expected_audience` | tokens without an audience |
+| `with_expected_audience(a)` | tokens issued with exactly audience `a` |
+| no `with_expected_resource` | any resource binding; the principal carries it for the host to enforce |
+| `with_expected_resource(t, id)` | tokens bound to exactly `(t, id)` |
+
+A service that has not declared its audience cannot show it is the audience a
+token was issued for, so it refuses audience-bound tokens. Issuance refuses a
+blank audience and a resource type without an ID, or the reverse.
+
+## Last-Used Metadata
+
+Recording last-used metadata is best effort. If `ApiTokenStore::touch_api_token`
+fails, authentication still succeeds, and the error goes to an
+`ApiTokenTouchObserver` configured with `with_touch_observer`, if any. Use it to
+alert on a degraded store; do not rely on `last_used_at` as an audit record.
 
 ## async-graphql Integration
 
@@ -187,15 +213,17 @@ as user sessions but no refresh-token session.
 
 ## Authorization Policy
 
-`agql-auth` stores and exposes generic scopes, optional audience, and optional
-resource binding. It does not decide what those values mean. Host applications
+`agql-auth` stores generic scopes, an optional audience and an optional
+resource binding, and enforces the audience and resource against the service's
+configuration as above. It does not decide what scopes mean. Host applications
 own concrete authorization policy, resource lookup, rate limiting, audit
 logging, and token lifecycle workflows.
 
 ## Optional bulk revocation
 
 `ApiTokenStore::revoke_api_tokens_for_principal` and
-`revoke_api_tokens_for_resource` default to `Ok(0)` without changing anything.
-Require a known supported, tested store override before promising bulk revocation;
-zero alone is not capability evidence. Already accepted principals require online
-status checks. See the [complete adapter-bound workflow](secure-primitive-flows.md#bulk-revocation-with-an-explicit-adapter-capability).
+`revoke_api_tokens_for_resource` default to `AuthError::InvalidConfiguration`
+without changing anything, so a store without them cannot report a revocation
+that did not happen. A store that overrides them returns the number of tokens
+it revoked; `Ok(0)` from an override means no active token matched. Already
+accepted principals require online status checks. See the [complete adapter-bound workflow](secure-primitive-flows.md#bulk-revocation-with-an-explicit-adapter-capability).

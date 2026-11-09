@@ -33,7 +33,9 @@ fn issue_request() -> ApiTokenIssueRequest {
 #[tokio::test]
 async fn issuing_api_token_stores_hash_and_returns_raw_token_once() {
     let store = MemoryApiTokenStore::default();
-    let service = ApiTokenService::new(Arc::new(store.clone()));
+    let service = ApiTokenService::new(Arc::new(store.clone()))
+        .with_expected_audience("graphql-api")
+        .unwrap();
 
     let issued = service.issue_token(issue_request()).await.unwrap();
 
@@ -64,7 +66,9 @@ async fn issuing_api_token_stores_hash_and_returns_raw_token_once() {
 #[tokio::test]
 async fn authenticating_api_token_returns_principal_and_updates_last_used() {
     let store = MemoryApiTokenStore::default();
-    let service = ApiTokenService::new(Arc::new(store.clone()));
+    let service = ApiTokenService::new(Arc::new(store.clone()))
+        .with_expected_audience("graphql-api")
+        .unwrap();
     let issued = service.issue_token(issue_request()).await.unwrap();
 
     let principal = service
@@ -98,7 +102,9 @@ async fn authenticating_api_token_returns_principal_and_updates_last_used() {
 #[tokio::test]
 async fn expired_api_token_is_rejected() {
     let store = MemoryApiTokenStore::default();
-    let service = ApiTokenService::new(Arc::new(store.clone()));
+    let service = ApiTokenService::new(Arc::new(store.clone()))
+        .with_expected_audience("graphql-api")
+        .unwrap();
     let issued = service.issue_token(issue_request()).await.unwrap();
     store
         .tokens_by_id
@@ -118,7 +124,9 @@ async fn expired_api_token_is_rejected() {
 #[tokio::test]
 async fn revoked_api_token_is_rejected() {
     let store = MemoryApiTokenStore::default();
-    let service = ApiTokenService::new(Arc::new(store));
+    let service = ApiTokenService::new(Arc::new(store))
+        .with_expected_audience("graphql-api")
+        .unwrap();
     let issued = service.issue_token(issue_request()).await.unwrap();
 
     service
@@ -168,7 +176,9 @@ async fn auth_principal_helpers_support_user_and_api_token_principals() {
 #[tokio::test]
 async fn api_token_service_can_inject_principal_for_graphql_guards() {
     let store = MemoryApiTokenStore::default();
-    let service = ApiTokenService::new(Arc::new(store));
+    let service = ApiTokenService::new(Arc::new(store))
+        .with_expected_audience("graphql-api")
+        .unwrap();
     let issued = service.issue_token(issue_request()).await.unwrap();
     let schema = Schema::build(PrincipalQuery, EmptyMutation, EmptySubscription).finish();
     let request = service

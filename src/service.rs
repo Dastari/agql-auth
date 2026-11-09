@@ -548,7 +548,9 @@ where
     /// The injected clock supplies the genuine step-up time. Only the session
     /// identified by `refresh_token` is changed; unrelated sessions and token
     /// families are untouched. Calling this method is the host's assertion that
-    /// the supplied methods/ACR satisfy its MFA policy.
+    /// the supplied methods/ACR satisfy its MFA policy. A step-up without at
+    /// least one method is refused with [`AuthError::InvalidConfiguration`] and
+    /// rotates nothing.
     pub async fn step_up_session(
         &self,
         refresh_token: &str,
@@ -556,6 +558,11 @@ where
         metadata: ClientMetadata,
         clock: &dyn Clock,
     ) -> AuthResult<AuthPayload> {
+        if step_up.methods.is_empty() {
+            return Err(AuthError::InvalidConfiguration(
+                "step-up requires at least one authentication method".to_string(),
+            ));
+        }
         let assurance = SessionAssurance::new(
             clock.now(),
             step_up.methods,
@@ -1322,6 +1329,9 @@ where
     /// and stamps the request with the authoritative session/security version.
     /// The issuance method performs a second read, so revocation, expiry,
     /// identity, version, or authority changes after preparation fail closed.
+    /// Both reads also require a current, enabled parent user in the
+    /// [`UserStore`]: a missing user fails with [`AuthError::Forbidden`] and a
+    /// disabled one with [`AuthError::UserDisabled`].
     /// Legacy source access tokens may omit a session version because this
     /// method obtains it from the authoritative record.
     pub async fn prepare_session_bound_access_token_only(
@@ -1377,6 +1387,8 @@ where
         );
         validate_session_bound_access_token_only_request(&request, &self.config)?;
         self.validate_session_bound_current_authority(verified.user(), &request)?;
+        self.require_enabled_delegation_parent(&request.reference.subject)
+            .await?;
         Ok(request)
     }
 
@@ -1386,7 +1398,8 @@ where
     /// resolver after request construction, preserves its exact
     /// subject/session/version, and validates current role and scope authority.
     /// The resolver contract is read-only: issuance must not extend idle expiry
-    /// or last-active state.
+    /// or last-active state. The parent user must still exist and be enabled in
+    /// the [`UserStore`].
     /// No refresh token, refresh-store row, session family, or new login session
     /// is created. A request prepared by a [`FixedAudienceDelegation`] is refused.
     pub async fn issue_session_bound_access_token_only(
@@ -1419,10 +1432,8 @@ where
         }
         let current = verified.user();
         self.validate_session_bound_current_authority(current, &request)?;
-        if request.fixed_audience.is_some() {
-            self.require_enabled_delegation_parent(&current.user_id)
-                .await?;
-        }
+        self.require_enabled_delegation_parent(&current.user_id)
+            .await?;
 
         let now = OffsetDateTime::now_utc();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);

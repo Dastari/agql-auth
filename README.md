@@ -293,7 +293,9 @@ use agql_auth::{
 };
 use time::Duration;
 
-let api_tokens = ApiTokenService::new(Arc::new(api_token_store));
+// Authentication accepts only tokens issued for this audience.
+let api_tokens = ApiTokenService::new(Arc::new(api_token_store))
+    .with_expected_audience("graphql-api")?;
 
 let issued = api_tokens
     .issue_token(

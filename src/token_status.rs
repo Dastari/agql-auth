@@ -185,8 +185,10 @@ impl ReauthorizationPolicy {
 /// the exact original reference and independent current expiry. The legacy
 /// [`crate::ResolvedPrincipal::new`] path still requires exact token identity.
 /// Session-bound delegation is the explicit exception: the resolver supplies
-/// its authoritative parent session using the existing reference contract, while
-/// the checker must independently check the original delegated token's status.
+/// its authoritative parent session using the existing reference contract,
+/// which [`crate::ResolvedPrincipal::new`] narrows to the delegated token's
+/// persisted grant ceiling and bindings, while the checker must independently
+/// check the original delegated token's status.
 ///
 /// The decision observes authoritative state at evaluation. Hosts needing an
 /// atomic relationship to a subsequent write must supply transaction/version

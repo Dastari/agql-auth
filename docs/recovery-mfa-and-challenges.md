@@ -7,8 +7,11 @@ using a helper as an application security boundary.
 
 ## Password Reset
 
-Password reset tokens are signed local JWTs with a `password_reset` purpose and
-a token ID. To make them one-time use, pair them with `PasswordResetTokenStore`.
+Password reset tokens are signed local JWTs with a `password_reset` type and
+purpose and a token ID. Every token is recorded in a `PasswordResetTokenStore`
+at issuance; the crate does not issue an unrecorded token, because one could
+only pass validation, which repeats until expiry. A token without the
+`password_reset` type is refused.
 
 ```rust
 use time::Duration;
@@ -24,6 +27,10 @@ let issued = auth
 send_reset_email(&issued.token).await?;
 ```
 
+Issuing a token invalidates the user's other outstanding reset tokens, so only
+the newest link works. `issue_password_reset_token(&reset_store, user_id)` does
+the same with a one-hour TTL.
+
 When the token is submitted:
 
 ```rust
@@ -35,6 +42,9 @@ let verified = auth
     )
     .await?;
 ```
+
+Consumption also invalidates the user's other outstanding reset tokens. If
+that store call fails, the token stays consumed and an error is returned.
 
 `authenticate_password_reset_token` only validates claims and does not consult
 or consume a stored token ID, check revocation, or count attempts. It cannot by
@@ -87,6 +97,31 @@ let verified = auth
     )
     .await?;
 ```
+
+This form checks no expectation: the challenge itself fixes the principal and
+channel, so use `verified.principal` and never a separately submitted one. When
+the host already knows who is completing the challenge (a second factor after a
+password, or step-up for the current session), or accepts only one delivery
+channel, bind the verification:
+
+```rust
+use agql_auth::LoginChallengeExpectation;
+
+let verified = auth
+    .verify_login_challenge_for(
+        &challenge_store,
+        challenge_id,
+        submitted_code,
+        &LoginChallengeExpectation::for_principal(&session_principal).with_channel("sms"),
+        client_metadata,
+    )
+    .await?;
+```
+
+A challenge created for another principal or channel fails with
+`InvalidLoginChallenge`, the error for an unknown challenge ID, before any
+attempt is admitted or the code is hashed. Values compare exactly, so normalize
+them as at creation.
 
 The host decides what verified challenges can do. For example, the host can
 issue a local session with `AuthMethod::EmailCode`:
@@ -198,7 +233,10 @@ backoff and `AuthError::AuthLocked` during temporary lockout. Password-reset
 and login-code request helpers suppress those errors and return `Ok(false)` so
 the host can avoid revealing whether the principal exists.
 
-`Debug` output for issued reset tokens, TOTP secrets/provisioning URIs, local
-auth payloads, OIDC token responses, and issued API tokens redacts raw secret
-material. Serialization still contains the actual values when those structs are
-intentionally returned by the host.
+`Debug` output for issued reset tokens, issued login codes, TOTP
+secrets/provisioning URIs, local auth payloads, refresh-cookie directives, OIDC
+token responses and issued API tokens redacts raw secret material. Stored
+records (`StoredUser`, `StoredLoginChallenge`, `StoredRefreshToken`,
+`StoredApiToken`) redact their password, code and token hashes. Serialization
+still contains the actual values when those structs are intentionally returned
+or persisted by the host.

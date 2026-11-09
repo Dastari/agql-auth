@@ -276,7 +276,8 @@ pub struct RefreshableTokenMetadata {
 /// Input for a successful, host-verified step-up event.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StepUpAuthentication {
-    /// Authentication methods used by the successful step-up.
+    /// Authentication methods used by the successful step-up. At least one is
+    /// required.
     pub methods: Vec<String>,
     /// Host-accepted ACR for the step-up.
     pub acr: Option<String>,
@@ -498,21 +499,48 @@ impl fmt::Display for AssuranceDenial {
 impl std::error::Error for AssuranceDenial {}
 
 /// Opt-in resource policy requiring current host-accepted MFA assurance.
+///
+/// Accepted MFA that records no authentication method never satisfies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentMfaPolicy {
     /// Maximum authentication age (inclusive).
     pub maximum_age: Duration,
     /// Allowed future clock skew (inclusive).
     pub clock_skew: Duration,
-    /// Allowed AMR values. Empty means no AMR allowlist requirement.
+    /// Allowed AMR values, any one of which matches. Empty means no AMR
+    /// allowlist requirement. Values are trimmed and ASCII-lowercased like
+    /// session methods, so `"TOTP"` matches `totp`.
     pub allowed_amr: Vec<String>,
-    /// Allowed ACR values. Empty means no ACR allowlist requirement.
+    /// Allowed ACR values, compared exactly. Empty means no ACR allowlist
+    /// requirement.
     pub allowed_acr: Vec<String>,
     /// Whether AMR and ACR allowlists combine with AND or OR semantics.
     pub match_mode: AssuranceMatchMode,
+    /// AMR values that must all be present, normalized like `allowed_amr`.
+    /// Always required, independent of `match_mode`. Empty means none.
+    pub required_amr: Vec<String>,
+    /// Assurance context that must equal the session's exactly when set.
+    ///
+    /// AMR/ACR strings have no universal meaning; set this so values asserted
+    /// in another provider's or policy's namespace never satisfy the policy.
+    pub required_context: Option<String>,
 }
 
 impl RecentMfaPolicy {
+    /// Creates a policy with the given maximum age, no clock skew, no
+    /// allowlists, and no required methods or context.
+    pub fn new(maximum_age: Duration) -> Self {
+        Self {
+            maximum_age,
+            clock_skew: Duration::ZERO,
+            allowed_amr: Vec::new(),
+            allowed_acr: Vec::new(),
+            match_mode: AssuranceMatchMode::All,
+            required_amr: Vec::new(),
+            required_context: None,
+        }
+    }
+
     /// Evaluates a signed, decoded user with an injected clock.
     pub fn evaluate(&self, user: &AuthUser, clock: &dyn Clock) -> Result<(), AssuranceDenial> {
         self.evaluate_at(user, clock.now()).map(|_| ())
@@ -587,12 +615,39 @@ impl RecentMfaPolicy {
                 "host MFA acceptance is unsatisfied",
             ));
         }
-        let amr_configured = !self.allowed_amr.is_empty();
+        if assurance.methods.is_empty() {
+            return Err(AssuranceDenial::new(
+                AssuranceDenialCode::AssuranceMethodNotAllowed,
+                "accepted MFA records no authentication method",
+            ));
+        }
+        let allowed_amr = normalize_policy_methods(&self.allowed_amr)?;
+        let required_amr = normalize_policy_methods(&self.required_amr)?;
+        if self
+            .required_context
+            .as_ref()
+            .is_some_and(|context| assurance.context.as_ref() != Some(context))
+        {
+            return Err(AssuranceDenial::new(
+                AssuranceDenialCode::AssuranceMethodNotAllowed,
+                "session assurance context does not match the policy context",
+            ));
+        }
+        if !required_amr
+            .iter()
+            .all(|required| assurance.methods.contains(required))
+        {
+            return Err(AssuranceDenial::new(
+                AssuranceDenialCode::AssuranceMethodNotAllowed,
+                "session AMR lacks a method the policy requires",
+            ));
+        }
+        let amr_configured = !allowed_amr.is_empty();
         let acr_configured = !self.allowed_acr.is_empty();
         let amr_matches = assurance
             .methods
             .iter()
-            .any(|method| self.allowed_amr.iter().any(|allowed| allowed == method));
+            .any(|method| allowed_amr.contains(method));
         let acr_matches = assurance
             .acr
             .as_ref()
@@ -671,6 +726,24 @@ impl RecentMfaPolicy {
             })?;
         Ok((token_authenticated_at, satisfied_until))
     }
+}
+
+/// Normalizes policy AMR values like [`SessionAssurance::new`]; an empty or
+/// oversized entry is a policy error rather than a value that never matches.
+fn normalize_policy_methods(methods: &[String]) -> Result<Vec<String>, AssuranceDenial> {
+    methods
+        .iter()
+        .map(|method| {
+            let method = method.trim().to_ascii_lowercase();
+            if method.is_empty() || method.len() > MAX_ASSURANCE_METHOD_LENGTH {
+                return Err(AssuranceDenial::new(
+                    AssuranceDenialCode::AssurancePolicyError,
+                    "policy AMR values must be non-empty and bounded",
+                ));
+            }
+            Ok(method)
+        })
+        .collect()
 }
 
 /// Host-configured mapping from stable policy IDs to recent-MFA policies.

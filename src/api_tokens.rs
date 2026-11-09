@@ -1,6 +1,8 @@
+use std::fmt;
 use std::sync::Arc;
 
 use async_graphql::Request;
+use async_trait::async_trait;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -16,13 +18,41 @@ use crate::{AuthError, AuthResult};
 /// period separators.
 pub const DEFAULT_API_TOKEN_PREFIX: &str = "agql_api_";
 
+/// Receives API-token last-used updates that failed, for host monitoring.
+///
+/// Recording last-used metadata is best effort: a failed
+/// [`ApiTokenStore::touch_api_token`] does not fail authentication. Without an
+/// observer the failure is dropped.
+#[async_trait]
+pub trait ApiTokenTouchObserver: Send + Sync {
+    /// Called once, after authentication succeeded, when the touch failed.
+    async fn api_token_touch_failed(&self, token_id: Uuid, error: &AuthError);
+}
+
 /// Service for issuing and authenticating long-lived opaque API tokens.
 ///
 /// This service is independent of [`crate::AuthService`] and does not require
 /// `UserStore` or `RefreshTokenStore`.
+///
+/// Authentication refuses a token issued for another audience or resource; see
+/// [`Self::with_expected_audience`] and [`Self::with_expected_resource`].
 pub struct ApiTokenService<S> {
     store: Arc<S>,
     token_prefix: String,
+    expected_audience: Option<String>,
+    expected_resource: Option<(String, String)>,
+    touch_observer: Option<Arc<dyn ApiTokenTouchObserver>>,
+}
+
+impl<S> fmt::Debug for ApiTokenService<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiTokenService")
+            .field("token_prefix", &self.token_prefix)
+            .field("expected_audience", &self.expected_audience)
+            .field("expected_resource", &self.expected_resource)
+            .field("touch_observer", &self.touch_observer.is_some())
+            .finish()
+    }
 }
 
 impl<S> ApiTokenService<S>
@@ -34,6 +64,9 @@ where
         Self {
             store,
             token_prefix: DEFAULT_API_TOKEN_PREFIX.to_string(),
+            expected_audience: None,
+            expected_resource: None,
+            touch_observer: None,
         }
     }
 
@@ -42,9 +75,61 @@ where
         let token_prefix = token_prefix.into();
         validate_token_prefix(&token_prefix)?;
         Ok(Self {
-            store,
             token_prefix,
+            ..Self::new(store)
         })
+    }
+
+    /// Declares the audience this service authenticates for.
+    ///
+    /// Authentication then accepts only tokens issued with exactly this
+    /// audience. Without it, a token issued with any audience is refused, since
+    /// this service cannot show it is that audience; tokens without an audience
+    /// are accepted. A refused token fails as [`AuthError::InvalidApiToken`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfiguration`] for an empty value or one
+    /// with surrounding whitespace or control characters.
+    pub fn with_expected_audience(mut self, audience: impl Into<String>) -> AuthResult<Self> {
+        let audience = audience.into();
+        validate_binding_value("api token expected audience", &audience)?;
+        self.expected_audience = Some(audience);
+        Ok(self)
+    }
+
+    /// Declares the one resource this service authenticates for.
+    ///
+    /// Authentication then accepts only tokens bound to exactly this resource
+    /// type and ID; unbound tokens and tokens for another resource fail as
+    /// [`AuthError::InvalidApiToken`]. Without it, resource-bound tokens are
+    /// accepted and carry their binding on [`crate::ApiTokenPrincipal`], which
+    /// the host must enforce for each request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfiguration`] for an invalid value, as for
+    /// [`Self::with_expected_audience`].
+    pub fn with_expected_resource(
+        mut self,
+        resource_type: impl Into<String>,
+        resource_id: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let resource_type = resource_type.into();
+        let resource_id = resource_id.into();
+        validate_binding_value("api token expected resource type", &resource_type)?;
+        validate_binding_value("api token expected resource id", &resource_id)?;
+        self.expected_resource = Some((resource_type, resource_id));
+        Ok(self)
+    }
+
+    /// Reports failed last-used updates to `observer`.
+    pub fn with_touch_observer<O>(mut self, observer: Arc<O>) -> Self
+    where
+        O: ApiTokenTouchObserver + 'static,
+    {
+        self.touch_observer = Some(observer);
+        self
     }
 
     /// Returns the configured token prefix.
@@ -107,6 +192,12 @@ where
     }
 
     /// Authenticates a raw API token.
+    ///
+    /// Unknown tokens and tokens issued for another audience or resource fail
+    /// as [`AuthError::InvalidApiToken`]; revoked and expired tokens then fail
+    /// with their own errors. Last-used metadata is recorded best effort: a
+    /// store error there does not fail authentication and goes to the
+    /// [`ApiTokenTouchObserver`], if one is configured.
     pub async fn authenticate_token(
         &self,
         token: &str,
@@ -123,6 +214,12 @@ where
             .await?
             .ok_or(AuthError::InvalidApiToken)?;
 
+        // A token for another audience or resource is unknown here, whatever
+        // its status.
+        if !self.accepts_binding(&stored) {
+            return Err(AuthError::InvalidApiToken);
+        }
+
         if stored.is_revoked() {
             return Err(AuthError::ApiTokenRevoked);
         }
@@ -132,11 +229,32 @@ where
         }
 
         let used_at = OffsetDateTime::now_utc();
-        self.store
+        if let Err(error) = self
+            .store
             .touch_api_token(stored.id, used_at, metadata.ip_address, metadata.user_agent)
-            .await?;
+            .await
+            && let Some(observer) = &self.touch_observer
+        {
+            observer.api_token_touch_failed(stored.id, &error).await;
+        }
 
         Ok(stored.to_principal())
+    }
+
+    fn accepts_binding(&self, stored: &StoredApiToken) -> bool {
+        let audience = match (&self.expected_audience, &stored.audience) {
+            (Some(expected), Some(audience)) => expected == audience,
+            (None, None) => true,
+            _ => false,
+        };
+        let resource =
+            self.expected_resource
+                .as_ref()
+                .is_none_or(|(resource_type, resource_id)| {
+                    stored.resource_type.as_ref() == Some(resource_type)
+                        && stored.resource_id.as_ref() == Some(resource_id)
+                });
+        audience && resource
     }
 
     /// Revokes a single API token.
@@ -192,6 +310,15 @@ fn validate_token_prefix(token_prefix: &str) -> AuthResult<()> {
     Ok(())
 }
 
+fn validate_binding_value(field: &str, value: &str) -> AuthResult<()> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(AuthError::InvalidConfiguration(format!(
+            "{field} must be non-empty without surrounding whitespace or control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_issue_request(request: &ApiTokenIssueRequest) -> AuthResult<()> {
     if request.display_name.trim().is_empty() {
         return Err(AuthError::InvalidConfiguration(
@@ -209,6 +336,23 @@ fn validate_issue_request(request: &ApiTokenIssueRequest) -> AuthResult<()> {
         return Err(AuthError::InvalidConfiguration(
             "api token principal_kind must not be empty".to_string(),
         ));
+    }
+
+    if let Some(audience) = &request.audience {
+        validate_binding_value("api token audience", audience)?;
+    }
+
+    match (&request.resource_type, &request.resource_id) {
+        (Some(resource_type), Some(resource_id)) => {
+            validate_binding_value("api token resource type", resource_type)?;
+            validate_binding_value("api token resource id", resource_id)?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(AuthError::InvalidConfiguration(
+                "api token resource type and id must be set together".to_string(),
+            ));
+        }
     }
 
     if request.ttl <= Duration::ZERO {

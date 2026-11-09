@@ -9,8 +9,10 @@ only one is allowed to retain an existing user session ID.
   an active login session.
 - `issue_session_bound_access_token_only` is a tightly bound delegation from
   an existing active user session. It re-reads that session inside the service,
-  preserves its exact subject and `sid`, and is appropriate for short-lived
-  registered application-tool execution.
+  requires the parent to be a current, enabled user in the `UserStore` at both
+  preparation and issuance (`Forbidden` when missing, `UserDisabled` when
+  disabled), preserves its exact subject and `sid`, and is appropriate for
+  short-lived registered application-tool execution.
 
 ## When To Use
 
@@ -184,10 +186,9 @@ let grant = receiver.issue_session_bound_access_token_only(request).await?;
 The facade is a weak pointer to the owner plus the audience, so only `aud`
 differs. Signing, key identity, configuration, stores, resolver, scope matching,
 abuse state and clocks are the owner's, and both reads, the authority checks,
-expiry caps and every guarantee in the previous section still apply. The facade
-adds one check normal delegated issuance does not make: at both reads the parent
-must be a current, enabled user in the owner's `UserStore`. A missing user is
-refused with `Forbidden` and a disabled one with `UserDisabled`.
+expiry caps and every guarantee in the previous section still apply, including
+the check that at both reads the parent is a current, enabled user in the
+owner's `UserStore`.
 
 - **Audience selection.** The constructor takes the service by value, so code
   sharing an `Arc<AuthService>` cannot select an audience. A sole holder could

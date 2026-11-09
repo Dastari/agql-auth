@@ -144,7 +144,13 @@ The store must support:
 - revoking a token
 
 Optional trait methods support revoking all tokens for a principal or all
-tokens bound to a generic resource.
+tokens bound to a generic resource. Their defaults return
+`AuthError::InvalidConfiguration` and change nothing; an override must revoke
+every matching active token durably before returning the count.
+
+Persist the audience and resource binding exactly: the service refuses tokens
+whose binding does not match its configuration. A `touch_api_token` error does
+not fail authentication.
 
 Store only `StoredApiToken.token_hash`, never the raw token returned in
 `IssuedApiToken`. Use a unique index on `token_hash`; revoked records should
@@ -169,7 +175,20 @@ let verified = auth
 ```
 
 `consume_password_reset_token` must be atomic. If two requests try to consume
-the same token ID, exactly one should return `true`.
+the same token ID, exactly one may return `true`. It must return `false` for a
+missing, consumed or invalidated record.
+
+Persist the `user_id` passed to `insert_password_reset_token`.
+`invalidate_password_reset_tokens_for_user` is required: the service calls it
+after issuing a token (keeping the new one) and after consuming one (keeping
+none). It must mark every other unconsumed token of that user invalidated, or
+return `Err`; it must never succeed without doing so.
+
+```sql
+UPDATE password_reset_tokens SET invalidated_at = ?
+WHERE user_id = ? AND (? IS NULL OR id <> ?)
+  AND consumed_at IS NULL AND invalidated_at IS NULL;
+```
 
 ## Login Challenges
 
@@ -268,8 +287,18 @@ Recommended database constraints:
 
 `TotpReplayStore` is optional but recommended for production MFA. Stateless
 TOTP verification can accept the same valid code more than once within the skew
-window. `consume_totp_step` should atomically insert or mark
-`(principal_id, factor_id, step)` and return `true` only for the first consume.
+window. `consume_totp_step` must insert `(principal_id, factor_id, step)` in one
+atomic operation backed by a uniqueness constraint and return `true` only when
+that call inserted it, across all processes. A read followed by a separate
+insert is not atomic. Store a missing `factor_id` as one value such as `''`,
+since SQL `NULL`s do not collide in a unique index:
+
+```sql
+INSERT INTO totp_steps (principal_id, factor_id, step, consumed_at)
+VALUES (?, COALESCE(?, ''), ?, ?)
+ON CONFLICT (principal_id, factor_id, step) DO NOTHING;
+-- true exactly when one row was inserted
+```
 
 ## External Identities
 
@@ -278,7 +307,11 @@ window. `consume_totp_step` should atomically insert or mark
 For Microsoft Entra work/school accounts, `agql-auth` prefers `tid + oid` as
 the stable external subject. For generic OIDC it falls back to `iss + sub`.
 
-The store should treat `(provider_name, external_subject)` as unique. Do not use
+`link_external_identity` must enforce `(provider_name, external_subject)`
+uniqueness atomically, with a unique constraint: a concurrent second link for
+the same pair returns `Err`, and an existing link is never re-pointed to another
+user. The OIDC callback links only when no link was found, so a concurrent
+first login fails closed rather than creating two links. Do not use
 email, UPN, display name, or preferred username as authorization identifiers;
 those fields can change and are not stable identity keys.
 

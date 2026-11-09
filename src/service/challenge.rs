@@ -4,7 +4,8 @@ use super::AuthService;
 use crate::config::ClientMetadata;
 use crate::models::AuthRateLimitFlow;
 use crate::models::{
-    IssuedLoginChallenge, LoginChallengeOptions, StoredLoginChallenge, VerifiedLoginChallenge,
+    IssuedLoginChallenge, LoginChallengeExpectation, LoginChallengeOptions, StoredLoginChallenge,
+    VerifiedLoginChallenge,
 };
 use crate::stores::{LoginChallengeStore, RefreshTokenStore, UserStore};
 use crate::util::{generate_numeric_code, validate_login_challenge_options};
@@ -53,6 +54,11 @@ where
     }
 
     /// Verifies and consumes a one-time login challenge.
+    ///
+    /// The challenge alone fixes the principal and channel: this method checks
+    /// no expectation. Use the returned principal as the identity, never a
+    /// separately submitted one. When the host already knows the principal or
+    /// requires a delivery channel, use [`Self::verify_login_challenge_for`].
     pub async fn verify_login_challenge<S>(
         &self,
         store: &S,
@@ -72,11 +78,53 @@ where
     }
 
     /// Verifies and consumes a one-time login challenge with abuse protection.
+    ///
+    /// Checks no principal or channel expectation; see
+    /// [`Self::verify_login_challenge`].
     pub async fn verify_login_challenge_with_metadata<S>(
         &self,
         store: &S,
         challenge_id: Uuid,
         code: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedLoginChallenge>
+    where
+        S: LoginChallengeStore,
+    {
+        self.verify_login_challenge_checked(store, challenge_id, code, None, metadata)
+            .await
+    }
+
+    /// Verifies and consumes a login challenge that must belong to the expected
+    /// principal and/or channel, with abuse protection.
+    ///
+    /// A challenge created for another principal or channel is refused with
+    /// [`AuthError::InvalidLoginChallenge`], the error for an unknown challenge
+    /// ID, before any attempt is admitted or password work runs. The mismatch
+    /// therefore reveals nothing about the challenge and cannot spend the
+    /// legitimate holder's attempts. Use this for second factors and step-up,
+    /// where the principal comes from the current session or first factor.
+    pub async fn verify_login_challenge_for<S>(
+        &self,
+        store: &S,
+        challenge_id: Uuid,
+        code: &str,
+        expected: &LoginChallengeExpectation,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedLoginChallenge>
+    where
+        S: LoginChallengeStore,
+    {
+        self.verify_login_challenge_checked(store, challenge_id, code, Some(expected), metadata)
+            .await
+    }
+
+    async fn verify_login_challenge_checked<S>(
+        &self,
+        store: &S,
+        challenge_id: Uuid,
+        code: &str,
+        expected: Option<&LoginChallengeExpectation>,
         metadata: ClientMetadata,
     ) -> AuthResult<VerifiedLoginChallenge>
     where
@@ -91,6 +139,11 @@ where
             .find_login_challenge(challenge_id)
             .await?
             .ok_or(AuthError::InvalidLoginChallenge)?;
+        // Same error and side effects as an unknown ID. The reserved record is
+        // later compared with this snapshot, so it carries the same binding.
+        if expected.is_some_and(|expected| !expected.matches(&challenge)) {
+            return Err(AuthError::InvalidLoginChallenge);
+        }
         let rate_limit_keys = self.rate_limit_keys(
             AuthRateLimitFlow::LoginCodeVerification,
             Some(&challenge.principal),

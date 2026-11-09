@@ -24,11 +24,30 @@ use agql_auth::{TokenStatus, TokenStatusChecker, TokenStatusRequest};
 #[async_trait::async_trait]
 impl TokenStatusChecker for MyRevocationStore {
     async fn check(&self, request: TokenStatusRequest<'_>) -> agql_auth::AuthResult<TokenStatus> {
-        // Look up jti / session_id / principal against your revocation store.
-        Ok(TokenStatus::Active)
+        // An authoritative online read; store errors propagate (fail closed).
+        let record = self
+            .find_status(
+                request.principal.subject(),
+                request.token_id,
+                request.session_id,
+                request.session_family_id,
+            )
+            .await?;
+        Ok(match record {
+            Some(status) if status.revoked => TokenStatus::Revoked,
+            Some(status) if status.expired => TokenStatus::Expired,
+            Some(_) => TokenStatus::Active,
+            // An unknown account, session or family is not active.
+            None => TokenStatus::Revoked,
+        })
     }
 }
 ```
+
+`find_status` stands for the host's own lookup of account, session, family and,
+where applicable, per-token revocation. A checker that always returns
+`TokenStatus::Active` establishes nothing; see
+[principal lifecycle](principal-lifecycle.md).
 
 Use `ReauthorizationPolicy` to derive the next check deadline from token expiry:
 
