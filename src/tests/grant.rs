@@ -13,6 +13,7 @@ use super::validator::rs256_config;
 use super::{MemoryRefreshTokenStore, MemoryUserStore};
 use crate::prelude::*;
 
+mod enabled_parent;
 mod fixed_audience;
 
 #[tokio::test]
@@ -106,7 +107,7 @@ async fn session_bound_grant_preserves_active_session_and_current_assurance_with
     let refresh_store = MemoryRefreshTokenStore::default();
     let auth = AuthService::new(
         rs256_config(),
-        Arc::new(MemoryUserStore::default()),
+        Arc::new(users_with_enabled_parent()),
         Arc::new(refresh_store.clone()),
     )
     .unwrap();
@@ -980,10 +981,24 @@ fn test_auth_service_with_config(
 ) -> AuthService<MemoryUserStore, MemoryRefreshTokenStore> {
     AuthService::new(
         config,
-        Arc::new(MemoryUserStore::default()),
+        Arc::new(users_with_enabled_parent()),
         Arc::new(MemoryRefreshTokenStore::default()),
     )
     .unwrap()
+}
+
+/// Session-bound delegation requires the parent to exist and be enabled.
+fn users_with_enabled_parent() -> MemoryUserStore {
+    let users = MemoryUserStore::default();
+    users.insert(StoredUser {
+        id: verified_user().user_id,
+        principal: "user-1@example.test".to_string(),
+        password_hash: "unused".to_string(),
+        roles: verified_user().roles,
+        scopes: verified_user().scopes,
+        disabled: false,
+    });
+    users
 }
 
 fn test_auth_service_with_resolver(
