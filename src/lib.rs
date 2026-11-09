@@ -176,7 +176,7 @@ pub use decision::{
     AuthorizationOutcome, AuthorizationReasonCode, LinkedAuthorizationDecision,
     NoopAuthorizationDecisionHook, emit_decision,
 };
-pub use errors::AuthError;
+pub use errors::{AuthError, AuthErrorDiagnostic};
 pub use grant::{
     AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
     SessionBoundDelegationBinding,

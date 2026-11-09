@@ -5,13 +5,29 @@
 | Layer | API | Audience |
 |-------|-----|----------|
 | Stable public code | `AuthError::public_code()` | Clients, GraphQL extensions |
-| Safe public message | `AuthError::public_message()` | Clients |
-| Internal detail | `AuthError::internal_detail()` / `Display` | Server logs and tracing |
+| Safe public message | `AuthError::public_message()` / `Display` | Clients |
+| Internal detail | `AuthError::diagnostic()` / `internal_detail()` / `Debug` | Server logs and tracing |
 
-GraphQL `ErrorExtensions` exposes only the safe public message and code (plus
+`Display` (`to_string()`) is the safe public message. A resolver that returns
+an `AuthError` through a plain `?` therefore sends only that message; it carries
+no `extensions.code`, so prefer `.extend()` (`ErrorExtensions`) or
+`map_err(|err| err.extend())` to attach the stable code. GraphQL
+`ErrorExtensions` exposes only the safe public message and code (plus
 `retryAfterSeconds` for rate-limit errors). OIDC discovery strings, store
-messages, HTTP bodies, configuration dumps, and stack traces are never sent to
-clients by default.
+messages, hashing errors, HTTP bodies, configuration text and stack traces are
+never sent to clients.
+
+Log the detail explicitly:
+
+```rust
+match auth.login(principal, password, metadata).await {
+    Ok(payload) => Ok(payload),
+    Err(err) => {
+        tracing::warn!(error = %err.diagnostic(), code = err.public_code(), "login failed");
+        Err(err.extend())
+    }
+}
+```
 
 ## Stable Public Codes
 
@@ -77,10 +93,14 @@ message: "authentication service unavailable"
 extensions.code: AUTH_SERVICE_UNAVAILABLE
 ```
 
-Server diagnostics still use `err.to_string()` / `internal_detail()` in logs.
+Server diagnostics use `err.diagnostic()` or `internal_detail()` in logs.
 
 ## Migration
 
 This is a deliberate hardening change in `0.7`. Callers that asserted on full
 `Display` strings inside GraphQL responses must switch to `extensions.code` or
 `public_code()`.
+
+Since `0.27`, `Display` itself is the safe public message. Logging that used
+`err.to_string()` or `{err}` to capture internal detail must switch to
+`err.diagnostic()` (or `{err:?}`); the old diagnostic text is unchanged there.
