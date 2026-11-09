@@ -183,6 +183,14 @@ pub(crate) fn generate_opaque_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Whether `value` has the shape of [`generate_opaque_token`] output.
+pub(crate) fn is_opaque_token_shape(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 pub(crate) fn hash_refresh_token(token: &str) -> String {
     hash_opaque_token(token)
 }

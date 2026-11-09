@@ -193,9 +193,19 @@ if let Some(directive) =
 }
 ```
 
-The helper extracts `refreshToken` and `refreshTokenExpiresAt`, optionally
-blanks `refreshToken` in the GraphQL response, and leaves cookie name/path,
-SameSite, Secure, and Max-Age formatting to the host.
+The helper extracts `session.refreshToken` and `session.refreshTokenExpiresAt`
+and leaves cookie name/path, SameSite, Secure, and Max-Age formatting to the host.
+It returns `Set` only when both fields are selected under their schema names, also
+when another field of the request failed, and `Clear` only for a response without
+errors.
+
+Whenever an issuing field is selected, the helper also removes raw refresh tokens
+from the body, whatever the response shape: aliased fields, nested selections, an
+omitted expiry and partial errors included. Run it on every response, including
+error responses. `sanitize_response = false` turns this off for clients that must
+read the token from the body. To keep the token out of the body by construction,
+leave `refreshToken` out of the schema and set the cookie from the resolver, for
+example with `async_graphql::Context::insert_http_header`.
 
 ## Issuing Sessions For Verified Users
 

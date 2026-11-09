@@ -11,6 +11,7 @@ mod consumer_refresh_store;
 mod consumer_store;
 mod current_authority;
 mod grant;
+mod graphql_refresh_cookie;
 mod graphql_transport;
 mod jwt_signing;
 mod oauth2;
