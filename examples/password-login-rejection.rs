@@ -46,6 +46,14 @@ impl RefreshTokenStore for NoSessions {
     ) -> AuthResult<()> {
         panic!("unexpected family revocation")
     }
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        _: &str,
+        _: OffsetDateTime,
+        _: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        panic!("unexpected user revocation")
+    }
     async fn touch_refresh_token(
         &self,
         _: Uuid,

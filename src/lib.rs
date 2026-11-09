@@ -168,8 +168,9 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
-    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    ClientMetadata, DEFAULT_MAX_SESSION_LIFETIME, JwtSigningConfig, LegacyScopeClaims,
+    MicrosoftEntraConfig, MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig,
+    OidcProviderKind,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,

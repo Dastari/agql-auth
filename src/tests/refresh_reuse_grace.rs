@@ -41,6 +41,7 @@ pub(super) fn seed_record(
         token_hash: hash_refresh_token(raw),
         created_at: now,
         expires_at: now + Duration::days(30),
+        session_expires_at: None,
         last_used_at: None,
         revoked_at: None,
         replaced_by_token_id: None,
@@ -738,6 +739,17 @@ impl<S: RefreshTokenStore + 'static> RefreshTokenStore for RotateBeforeRevoke<S>
             .await
     }
 
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        self.inner
+            .revoke_refresh_tokens_for_user(user_id, revoked_at, reason)
+            .await
+    }
+
     async fn touch_refresh_token(
         &self,
         token_id: Uuid,
@@ -1298,6 +1310,17 @@ impl RefreshTokenStore for ScriptedStore {
     ) -> crate::AuthResult<()> {
         self.inner
             .revoke_refresh_token_family(session_family_id, revoked_at, reason)
+            .await
+    }
+
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        self.inner
+            .revoke_refresh_tokens_for_user(user_id, revoked_at, reason)
             .await
     }
 

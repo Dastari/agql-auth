@@ -99,6 +99,29 @@ pub trait RefreshTokenStore: Send + Sync {
         reason: RefreshTokenRevocationReason,
     ) -> AuthResult<()>;
 
+    /// Revokes every unrevoked refresh token of a user, in all session
+    /// families, and returns how many were revoked.
+    ///
+    /// [`AuthService::revoke_user_sessions`](crate::AuthService::revoke_user_sessions)
+    /// calls this when a host disables a user, changes or resets a password,
+    /// or ends every session. Leave already revoked records unchanged.
+    ///
+    /// Like family revocation, it must not miss a replacement that a
+    /// concurrent [`Self::rotate_refresh_token`] commits while it runs. At
+    /// `READ COMMITTED` either serialize it with rotation, for example with a
+    /// per-user lock that rotation also takes, or repeat the update in the same
+    /// transaction until a fresh statement finds no unrevoked token of the
+    /// user. SQLite's `BEGIN IMMEDIATE` serializes writers on its own.
+    ///
+    /// This method has no default: a store that cannot do it must not appear
+    /// to succeed. Index `user_id` to keep it efficient.
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64>;
+
     /// Records metadata for a refresh-token use outside the rotation path.
     ///
     /// [`RefreshTokenStore::rotate_refresh_token`] handles use metadata during

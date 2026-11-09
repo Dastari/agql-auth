@@ -853,6 +853,11 @@ where
             },
         };
 
+        let session_expires_at = [Some(source), newest]
+            .into_iter()
+            .flatten()
+            .filter_map(|record| self.session_deadline(record))
+            .min();
         self.issue_tokens_only(
             auth_user,
             source.session_family_id,
@@ -860,8 +865,37 @@ where
             now,
             source.grant_source,
             Some(&authorization_role_ceiling),
+            session_expires_at,
         )
         .await
+    }
+
+    /// The absolute deadline a replacement for `record` inherits.
+    ///
+    /// A record without one, from before the setting or from a store that does
+    /// not persist it, is not extended past its own expiry while a maximum
+    /// lifetime is configured.
+    fn session_deadline(&self, record: &StoredRefreshToken) -> Option<OffsetDateTime> {
+        record
+            .session_expires_at
+            .or(self.config.max_session_lifetime.map(|_| record.expires_at))
+    }
+
+    /// Revokes every refresh token of a user, in every session family.
+    ///
+    /// Call this when disabling a user, after a password change or reset, and
+    /// for "sign out everywhere". Returns the number of tokens revoked. Access
+    /// tokens already issued stay valid until they expire, so pair it with
+    /// short access-token lifetimes or a status check. Store errors are
+    /// returned; nothing is reported as revoked unless the store did it.
+    pub async fn revoke_user_sessions(
+        &self,
+        user_id: &str,
+        reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        self.refresh_store
+            .revoke_refresh_tokens_for_user(user_id, OffsetDateTime::now_utc(), reason)
+            .await
     }
 
     /// Ends the session that `refresh_token` belongs to.
@@ -1619,6 +1653,11 @@ where
         grant_source: crate::RefreshGrantSource,
     ) -> AuthResult<AuthPayload> {
         let now = OffsetDateTime::now_utc();
+        let session_expires_at = self
+            .config
+            .max_session_lifetime
+            .map(|lifetime| crate::util::checked_expiry(now, lifetime, "maximum session lifetime"))
+            .transpose()?;
         let (refresh_token, record, access_token, access_token_expires_at, user) = self
             .issue_tokens_only(
                 auth_user,
@@ -1627,6 +1666,7 @@ where
                 now,
                 grant_source,
                 None,
+                session_expires_at,
             )
             .await?;
 
@@ -1643,6 +1683,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn issue_tokens_only(
         &self,
         mut auth_user: AuthUser,
@@ -1651,6 +1692,7 @@ where
         now: OffsetDateTime,
         grant_source: crate::RefreshGrantSource,
         authorization_role_ceiling: Option<&[String]>,
+        session_expires_at: Option<OffsetDateTime>,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         #[cfg(test)]
         self.token_work
@@ -1674,6 +1716,11 @@ where
         let raw_refresh_token = generate_opaque_token();
         let refresh_token_expires_at =
             crate::util::checked_expiry(now, self.config.refresh_token_ttl, "refresh-token ttl")?;
+        // Rotation never extends a session past its absolute deadline.
+        let refresh_token_expires_at = session_expires_at
+            .map_or(refresh_token_expires_at, |deadline| {
+                refresh_token_expires_at.min(deadline)
+            });
         let refreshable_metadata = RefreshableTokenMetadata {
             tenant_id: user.token_claims.tenant_id.clone(),
             organization_id: user.token_claims.organization_id.clone(),
@@ -1696,6 +1743,7 @@ where
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
             expires_at: refresh_token_expires_at,
+            session_expires_at,
             last_used_at: None,
             revoked_at: None,
             replaced_by_token_id: None,

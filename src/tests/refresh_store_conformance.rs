@@ -130,6 +130,101 @@ pub(super) async fn racing_rotations_contract<S: RefreshTokenStore + 'static>(st
     }
 }
 
+/// User-wide revocation revokes every family of one user, leaves other users
+/// alone, and reports what it revoked; a rotation racing it leaves no live
+/// token of the user.
+pub(super) async fn user_revocation_contract<S: RefreshTokenStore + 'static>(store: Arc<S>) {
+    for round in 0..ROUNDS {
+        let now = OffsetDateTime::now_utc();
+        let tag = Uuid::new_v4();
+        let user = format!("user-{tag}");
+        let mut other = seed_record(&format!("other-{tag}"), Uuid::new_v4(), Uuid::new_v4(), now);
+        other.user_id = format!("other-user-{tag}");
+        store.insert_refresh_token(other).await.unwrap();
+        let mut idle = seed_record(&format!("idle-{tag}"), Uuid::new_v4(), Uuid::new_v4(), now);
+        idle.user_id = user.clone();
+        store.insert_refresh_token(idle).await.unwrap();
+        let family = Uuid::new_v4();
+        let mut current = seed_record(&format!("current-{tag}"), family, Uuid::new_v4(), now);
+        current.user_id = user.clone();
+        store.insert_refresh_token(current.clone()).await.unwrap();
+        let mut replacement = seed_record(
+            &format!("replacement-{tag}"),
+            family,
+            current.session_id,
+            now,
+        );
+        replacement.user_id = user.clone();
+
+        let rotation = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .rotate_refresh_token(current.id, replacement, now, None, None)
+                    .await
+            }
+        });
+        let revocation = tokio::spawn({
+            let store = store.clone();
+            let user = user.clone();
+            async move {
+                store
+                    .revoke_refresh_tokens_for_user(
+                        &user,
+                        now,
+                        RefreshTokenRevocationReason::AdminRevoked,
+                    )
+                    .await
+            }
+        });
+        let rotated = rotation.await.unwrap().unwrap();
+        let revoked = revocation.await.unwrap().unwrap();
+
+        for raw in ["idle", "current"] {
+            assert!(
+                find(&*store, &format!("{raw}-{tag}"))
+                    .await
+                    .unwrap()
+                    .is_revoked(),
+                "round {round}: {raw} survived"
+            );
+        }
+        match find(&*store, &format!("replacement-{tag}")).await {
+            Some(replacement) => {
+                assert!(rotated);
+                assert!(
+                    replacement.is_revoked(),
+                    "round {round}: the replacement survived the user revocation"
+                );
+            }
+            None => assert!(!rotated),
+        }
+        assert_eq!(
+            revoked, 2,
+            "round {round}: two tokens were live when it ended"
+        );
+        assert!(
+            !find(&*store, &format!("other-{tag}"))
+                .await
+                .unwrap()
+                .is_revoked(),
+            "round {round}: another user's session was revoked"
+        );
+        assert_eq!(
+            store
+                .revoke_refresh_tokens_for_user(
+                    &user,
+                    now,
+                    RefreshTokenRevocationReason::AdminRevoked
+                )
+                .await
+                .unwrap(),
+            0,
+            "round {round}: revoked records are left alone"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn memory_store_rotation_racing_family_revocation_leaves_no_live_token() {
     rotation_racing_family_revocation_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
@@ -138,4 +233,9 @@ async fn memory_store_rotation_racing_family_revocation_leaves_no_live_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn memory_store_racing_rotations_have_one_winner() {
     racing_rotations_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_store_user_revocation_ends_every_family_of_the_user() {
+    user_revocation_contract(Arc::new(MemoryRefreshTokenStore::default())).await;
 }

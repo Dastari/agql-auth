@@ -25,6 +25,7 @@ mod refresh_reuse_grace;
 mod refresh_store_conformance;
 mod scope_match;
 mod scopes;
+mod session_lifetime;
 mod time_invariants;
 mod totp;
 mod validator;
@@ -162,6 +163,22 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
             }
         }
         Ok(())
+    }
+
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        _reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        let mut revoked = 0;
+        for token in self.tokens_by_id.lock().unwrap().values_mut() {
+            if token.user_id == user_id && token.revoked_at.is_none() {
+                token.revoked_at = Some(revoked_at);
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
     }
 
     async fn touch_refresh_token(

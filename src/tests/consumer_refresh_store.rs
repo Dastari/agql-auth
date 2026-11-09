@@ -18,7 +18,7 @@ use super::refresh_reuse_grace::{
     racing_different_tokens_contract, racing_reuses_contract, seed_record, sequential_contract,
 };
 use super::refresh_store_conformance::{
-    racing_rotations_contract, rotation_racing_family_revocation_contract,
+    racing_rotations_contract, rotation_racing_family_revocation_contract, user_revocation_contract,
 };
 use crate::prelude::*;
 
@@ -30,6 +30,8 @@ struct ConsumerRefreshStore {
     pause_next_rotation: Mutex<Option<PathBuf>>,
     /// Holds the next family revocation open the same way.
     pause_next_family_revocation: Mutex<Option<PathBuf>>,
+    /// Holds the next user revocation open the same way.
+    pause_next_user_revocation: Mutex<Option<PathBuf>>,
 }
 
 impl ConsumerRefreshStore {
@@ -40,6 +42,7 @@ impl ConsumerRefreshStore {
             table: format!("agql_refresh_conformance_{}", Uuid::new_v4().simple()),
             pause_next_rotation: Mutex::default(),
             pause_next_family_revocation: Mutex::default(),
+            pause_next_user_revocation: Mutex::default(),
         });
         store.call(json!({"op": "init"})).await.unwrap();
         store
@@ -146,6 +149,25 @@ impl RefreshTokenStore for ConsumerRefreshStore {
         }))
         .await?;
         Ok(())
+    }
+
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        let pause = self.pause_next_user_revocation.lock().unwrap().take();
+        self.call(json!({
+            "op": "revoke_user",
+            "user_id": user_id,
+            "revoked_at": revoked_at,
+            "reason": reason_text(&reason),
+            "pause_dir": pause,
+        }))
+        .await?
+        .as_u64()
+        .ok_or_else(|| AuthError::Store("revoke_user returned no count".to_string()))
     }
 
     async fn touch_refresh_token(
@@ -344,6 +366,70 @@ async fn rotation_during_family_revocation_contract(store: Arc<ConsumerRefreshSt
     );
 }
 
+/// User-wide revocation that starts while a rotation is uncommitted.
+///
+/// As for family revocation: the rotation is held before COMMIT, the
+/// revocation is shown to be blocked, then the rotation is released. The
+/// replacement it commits must not survive.
+async fn user_revocation_during_rotation_contract(store: Arc<ConsumerRefreshStore>) {
+    let now = OffsetDateTime::now_utc();
+    let family = Uuid::new_v4();
+    let current = seed_record(SEED_TOKEN, family, Uuid::new_v4(), now);
+    let user = current.user_id.clone();
+    store.insert_refresh_token(current.clone()).await.unwrap();
+    let replacement = seed_record("replacement", family, current.session_id, now);
+
+    let pause = std::env::temp_dir().join(format!("agql-refresh-pause-{}", Uuid::new_v4()));
+    std::fs::create_dir(&pause).unwrap();
+    *store.pause_next_rotation.lock().unwrap() = Some(pause.clone());
+
+    let rotation = tokio::spawn({
+        let store = store.clone();
+        let id = current.id;
+        async move {
+            store
+                .rotate_refresh_token(id, replacement, now, None, None)
+                .await
+        }
+    });
+    let paused = pause.join("paused");
+    wait_for("the rotation to hold", async || Path::new(&paused).exists()).await;
+
+    let revocation = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .revoke_refresh_tokens_for_user(
+                    &user,
+                    now,
+                    RefreshTokenRevocationReason::AdminRevoked,
+                )
+                .await
+        }
+    });
+    wait_for_blocked(&store).await;
+    assert!(
+        !revocation.is_finished(),
+        "the revocation must wait for the rotation"
+    );
+
+    std::fs::write(pause.join("release"), b"").unwrap();
+    assert!(rotation.await.unwrap().unwrap());
+    assert_eq!(revocation.await.unwrap().unwrap(), 1);
+    let _ = std::fs::remove_dir_all(&pause);
+
+    let live = store
+        .find_live_refresh_tokens_in_family(family)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        live.is_empty(),
+        "a replacement committed during user revocation must not survive it: {} live",
+        live.len()
+    );
+}
+
 /// Waits until a second writer is blocked behind a held transaction.
 async fn wait_for_blocked(store: &ConsumerRefreshStore) {
     let blocked = store
@@ -370,11 +456,11 @@ async fn wait_for_blocked(store: &ConsumerRefreshStore) {
 const RACE_ROUNDS: usize = 8;
 
 async fn contract(backend: &'static str, database: &str) {
-    for contract in 0..9 {
+    for contract in 0..11 {
         let rounds = match contract {
             0 => 1,
             // These repeat internally.
-            7 | 8 => 2,
+            7..=9 => 2,
             _ => RACE_ROUNDS,
         };
         for _ in 0..rounds {
@@ -400,7 +486,9 @@ async fn contract(backend: &'static str, database: &str) {
                 5 => family_revocation_during_rotation_contract(store.clone()).await,
                 6 => rotation_during_family_revocation_contract(store.clone()).await,
                 7 => rotation_racing_family_revocation_contract(store.clone()).await,
-                _ => racing_rotations_contract(store.clone()).await,
+                8 => racing_rotations_contract(store.clone()).await,
+                9 => user_revocation_contract(store.clone()).await,
+                _ => user_revocation_during_rotation_contract(store.clone()).await,
             }
             store.cleanup().await;
         }

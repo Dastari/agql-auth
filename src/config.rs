@@ -8,6 +8,9 @@ use crate::client_auth::{
 };
 use crate::errors::AuthError;
 
+/// Default absolute session lifetime: [`AuthConfig::max_session_lifetime`].
+pub const DEFAULT_MAX_SESSION_LIFETIME: Duration = Duration::days(90);
+
 /// Runtime configuration for [`crate::AuthService`].
 ///
 /// `AuthConfig::new(secret)` and [`AuthConfig::with_hs256_secret`] preserve the
@@ -44,6 +47,15 @@ pub struct AuthConfig {
     pub max_session_bound_delegation_ttl: Duration,
     /// Refresh-token lifetime.
     pub refresh_token_ttl: Duration,
+    /// Absolute session lifetime, measured from the session's first issuance.
+    ///
+    /// Refresh rotation never extends a session family past it: each
+    /// replacement expires at the earlier of `refresh_token_ttl` from rotation
+    /// and the deadline recorded at issuance in
+    /// [`StoredRefreshToken::session_expires_at`](crate::StoredRefreshToken::session_expires_at).
+    /// A record without a recorded deadline is never extended past its own
+    /// expiry. `None` lets rotation slide indefinitely. Defaults to 90 days.
+    pub max_session_lifetime: Option<Duration>,
     /// Claim shape used for newly issued access-token scopes.
     ///
     /// Version 0.14 defaults to [`AccessTokenScopeClaimFormat::Standard`]. Use
@@ -75,6 +87,7 @@ impl fmt::Debug for AuthConfig {
                 &self.max_session_bound_delegation_ttl,
             )
             .field("refresh_token_ttl", &self.refresh_token_ttl)
+            .field("max_session_lifetime", &self.max_session_lifetime)
             .field(
                 "access_token_scope_claim_format",
                 &self.access_token_scope_claim_format,
@@ -109,6 +122,7 @@ impl AuthConfig {
             max_access_token_ttl: Duration::hours(24),
             max_session_bound_delegation_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
+            max_session_lifetime: Some(DEFAULT_MAX_SESSION_LIFETIME),
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
             legacy_scope_claims: LegacyScopeClaims::Accept,
             rate_limits: AuthRateLimitConfig::default(),
@@ -137,6 +151,7 @@ impl AuthConfig {
             max_access_token_ttl: Duration::hours(24),
             max_session_bound_delegation_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::days(30),
+            max_session_lifetime: Some(DEFAULT_MAX_SESSION_LIFETIME),
             access_token_scope_claim_format: AccessTokenScopeClaimFormat::Standard,
             legacy_scope_claims: LegacyScopeClaims::Accept,
             rate_limits: AuthRateLimitConfig::default(),
@@ -189,6 +204,9 @@ impl AuthConfig {
         crate::util::checked_expiry(now, self.access_token_ttl, "access-token ttl")?;
         crate::util::checked_expiry(now, self.max_access_token_ttl, "access-token maximum ttl")?;
         crate::util::checked_expiry(now, self.refresh_token_ttl, "refresh-token ttl")?;
+        if let Some(lifetime) = self.max_session_lifetime {
+            crate::util::checked_expiry(now, lifetime, "maximum session lifetime")?;
+        }
 
         if self.max_session_bound_delegation_ttl <= Duration::ZERO
             || self.max_session_bound_delegation_ttl > self.max_access_token_ttl

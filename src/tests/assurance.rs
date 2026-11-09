@@ -142,6 +142,7 @@ fn legacy_refresh_record_deserializes_without_assurance_and_recent_mfa_fails_clo
         token_hash: "hash-only".to_string(),
         created_at: OffsetDateTime::UNIX_EPOCH,
         expires_at: OffsetDateTime::UNIX_EPOCH + Duration::days(1),
+        session_expires_at: None,
         last_used_at: None,
         revoked_at: None,
         replaced_by_token_id: None,

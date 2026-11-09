@@ -30,6 +30,10 @@ Important refresh-token behavior:
   be detected.
 - `revoke_refresh_token` is used during logout and expiry.
 - `revoke_refresh_token_family` is used for sign-out and after replay detection.
+- `revoke_refresh_tokens_for_user` revokes every unrevoked token of one user,
+  for `AuthService::revoke_user_sessions`. It is required and has no default, so
+  a store cannot appear to support it without doing it. Return the number of
+  tokens revoked and index `user_id`.
 - `touch_refresh_token` records use metadata outside refresh rotation.
 - `rotate_refresh_token` atomically revokes the current token and inserts the
   replacement during refresh.
@@ -40,6 +44,14 @@ organization, actor, and correlation values. Persist both unchanged in the
 replacement row. Missing values from pre-0.8 rows deserialize as `None`; never
 backfill `auth_time` with refresh or migration time. See
 [session assurance](session-assurance.md) and [MIGRATION.md](../MIGRATION.md).
+
+Since `0.27`, `session_expires_at` holds the session family's absolute deadline,
+set at issuance from `AuthConfig::max_session_lifetime` and copied to every
+replacement. Persist it in a nullable column, or keep it in a serialized record.
+Rows written before the column existed, and a store that drops it, read as `None`;
+while a maximum lifetime is configured the service then never extends that session
+past the row's own `expires_at`. Dropping the field therefore shortens sessions,
+never lengthens them. Do not backfill it from migration time.
 
 `rotate_refresh_token` is required in `0.6.0`. It must return `Ok(true)` only
 when the current token exists, is not revoked, is marked used/revoked for
@@ -143,6 +155,26 @@ ALTER TABLE refresh_tokens
 
 The index needs the update-first order: the current row must be revoked before the
 replacement row is inserted in the same transaction.
+
+User-wide revocation has the same hazard as family revocation, across every family
+of the user. Either serialize it with rotation (a per-user lock that rotation also
+takes, before its family lock) or, at `READ COMMITTED`, repeat the update inside the
+transaction until a fresh statement finds no unrevoked token of the user:
+
+```sql
+BEGIN;
+-- Repeat these two statements until the SELECT returns no row. At READ COMMITTED
+-- each statement reads what was committed before it started, so a replacement the
+-- previous UPDATE skipped is found by the next one.
+UPDATE refresh_tokens SET revoked_at = :now, revocation_reason = :reason
+WHERE user_id = :user_id AND revoked_at IS NULL;
+SELECT 1 FROM refresh_tokens
+WHERE user_id = :user_id AND revoked_at IS NULL
+LIMIT 1;
+COMMIT;
+```
+
+SQLite's `BEGIN IMMEDIATE` needs neither.
 
 Use a unique index on the refresh-token hash and indexes on session-family IDs
 to make revocation efficient.

@@ -115,6 +115,24 @@ family's live token. A token that rotation already superseded, or supersedes
 during the call, is treated as a reuse signal and revokes the whole family, so a
 successor held by someone else cannot outlive the sign-out.
 
+Rotation never extends a session past `AuthConfig::max_session_lifetime`, measured
+from the session's first issuance (90 days by default; `None` lets rotation slide
+indefinitely). Each replacement expires at the earlier of `refresh_token_ttl` from
+rotation and that deadline, which the record carries in `session_expires_at`.
+
+When you disable a user, change or reset a password, or offer "sign out everywhere",
+revoke every refresh family of the user:
+
+```rust
+use agql_auth::RefreshTokenRevocationReason;
+
+auth.revoke_user_sessions(&user_id, RefreshTokenRevocationReason::AdminRevoked)
+    .await?;
+```
+
+Refresh already refuses a disabled user, but without this a re-enabled user's old
+sessions would work again, and a password change would leave other sessions alive.
+
 Logout does not revoke already-issued stateless access tokens. They remain
 valid until `exp`, so keep access-token lifetimes short and add host-side
 session checks for high-risk operations if immediate revocation is required.

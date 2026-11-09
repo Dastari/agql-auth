@@ -80,6 +80,7 @@ def insert_values(token):
         stamp(token.get("revoked_at")), token.get("replaced_by_token_id"),
         stamp(token.get("last_used_at")), token.get("ip_address"),
         token.get("user_agent"), None, json.dumps(token, separators=(",", ":")),
+        token["user_id"],
     ))
 
 
@@ -114,7 +115,8 @@ result = None
 if op == "init":
     create = (f"CREATE TABLE {table} (id TEXT PRIMARY KEY, family TEXT NOT NULL, "
               "token_hash TEXT NOT NULL UNIQUE, revoked_at TEXT, replaced_by TEXT, last_used_at TEXT, "
-              "ip_address TEXT, user_agent TEXT, reason TEXT, record TEXT NOT NULL)")
+              "ip_address TEXT, user_agent TEXT, reason TEXT, record TEXT NOT NULL, "
+              "user_id TEXT NOT NULL)")
     # At most one live token per family: a broken rotation or a branch fails
     # loudly instead of leaving two live tokens.
     one_live = (f"CREATE UNIQUE INDEX {table}_one_live ON {table} (family) "
@@ -173,6 +175,32 @@ elif op == "revoke_family":
     else:
         psql(f"BEGIN; {family_lock(family)} {sql};{psql_hold(pause)}COMMIT;")
     result = True
+elif op == "revoke_user":
+    user = literal(request["user_id"])
+    live = f"user_id = {user} AND revoked_at IS NULL"
+    sql = (f"UPDATE {table} SET revoked_at = {literal(stamp(request['revoked_at']))}, "
+           f"reason = {literal(request['reason'])} WHERE {live}")
+    pause = pause_dir()
+    if backend == "sqlite":
+        # BEGIN IMMEDIATE serializes this with every rotation.
+        with sqlite_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = connection.execute(sql).rowcount
+            sqlite_hold(pause)
+            connection.execute("COMMIT")
+    else:
+        # At READ COMMITTED one UPDATE can skip a row that a rotation is
+        # revoking and miss the replacement it commits. Each statement in the
+        # loop takes a fresh snapshot, so repeat until none is left.
+        rows = psql(
+            f"BEGIN; CREATE TEMP TABLE revoked_count (n bigint) ON COMMIT DROP; "
+            f"DO $$ DECLARE total bigint := 0; changed bigint; BEGIN LOOP {sql}; "
+            f"GET DIAGNOSTICS changed = ROW_COUNT; total := total + changed; "
+            f"EXIT WHEN NOT EXISTS (SELECT 1 FROM {table} WHERE {live}); END LOOP; "
+            f"INSERT INTO revoked_count VALUES (total); END $$; "
+            f"SELECT n FROM revoked_count;{psql_hold(pause)}COMMIT;"
+        )
+        result = int(rows[0])
 elif op == "touch":
     sql = (f"UPDATE {table} SET last_used_at = {literal(stamp(request['used_at']))}, "
            f"ip_address = {literal(request.get('ip_address'))}, user_agent = {literal(request.get('user_agent'))} "
