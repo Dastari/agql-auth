@@ -33,6 +33,7 @@ subtle = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

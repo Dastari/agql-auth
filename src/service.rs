@@ -1,4 +1,5 @@
 mod challenge;
+mod external_login;
 mod fixed_audience;
 mod password_reset;
 mod totp;
@@ -369,7 +370,7 @@ where
     }
 
     pub(super) async fn hash_password_async(&self, password: &str) -> AuthResult<String> {
-        let password = password.to_owned();
+        let password = zeroize::Zeroizing::new(password.to_owned());
         let argon2 = self.argon2.clone();
         self.password_executor
             .execute(move || {
@@ -397,7 +398,7 @@ where
         password_hash: &str,
         deadline: Option<(Arc<dyn Clock>, OffsetDateTime)>,
     ) -> AuthResult<()> {
-        let password = password.to_owned();
+        let password = zeroize::Zeroizing::new(password.to_owned());
         let password_hash = password_hash.to_owned();
         let argon2 = self.argon2.clone();
         #[cfg(test)]

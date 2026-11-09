@@ -62,15 +62,28 @@ fn provider_with(config: OAuth2ProviderConfig, client: &RecordingHttpClient) -> 
     OAuth2Provider::new(config, Arc::new(client.clone())).unwrap()
 }
 
-async fn start(provider: &OAuth2Provider, store: &MemoryOAuthStateStore) -> String {
-    provider
-        .create_authorization_request(store)
-        .await
-        .unwrap()
-        .state
+async fn start(
+    provider: &OAuth2Provider,
+    store: &MemoryOAuthStateStore,
+) -> OAuth2AuthorizationRequest {
+    provider.create_authorization_request(store).await.unwrap()
+}
+
+/// Callback input from the browser that started `request`.
+fn callback(request: &OAuth2AuthorizationRequest) -> OidcCallbackInput {
+    OidcCallbackInput::code_and_state("auth-code", &request.state)
+        .with_browser_binding(request.browser_binding.clone().unwrap())
 }
 
 async fn complete(
+    provider: &OAuth2Provider,
+    store: &MemoryOAuthStateStore,
+    request: &OAuth2AuthorizationRequest,
+) -> crate::AuthResult<OAuth2CallbackOutcome> {
+    provider.handle_callback(store, callback(request)).await
+}
+
+async fn complete_state(
     provider: &OAuth2Provider,
     store: &MemoryOAuthStateStore,
     state: &str,
@@ -92,8 +105,8 @@ async fn profile_for(
     }
     let provider = provider_with(config, &client);
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
-    let result = complete(&provider, &store, &state)
+    let request = start(&provider, &store).await;
+    let result = complete(&provider, &store, &request)
         .await
         .map(|outcome| outcome.profile);
     (result, client)
@@ -126,7 +139,7 @@ async fn github_authorization_request_uses_pkce_and_no_oidc_parameters() {
     assert_eq!(value("code_challenge_method"), Some("S256"));
     assert_eq!(
         value("code_challenge"),
-        Some(pkce_s256_challenge(&request.code_verifier).as_str())
+        Some(request.code_challenge.as_str())
     );
     assert_eq!(value("nonce"), None);
     assert_eq!(value("response_mode"), None);
@@ -141,13 +154,23 @@ async fn github_authorization_request_uses_pkce_and_no_oidc_parameters() {
         .unwrap()
         .unwrap();
     assert!(stored.nonce.is_empty());
-    assert_eq!(stored.code_verifier, request.code_verifier);
+    assert_eq!(
+        pkce_s256_challenge(&stored.code_verifier),
+        request.code_challenge
+    );
+    assert_eq!(
+        stored.browser_binding_hash,
+        Some(hash_oauth_state(
+            request.browser_binding.as_deref().unwrap()
+        ))
+    );
     assert_eq!(stored.response_mode, OAuthResponseMode::Query);
     assert!(client.requests().is_empty());
 
     let debug = format!("{request:?}");
     assert!(!debug.contains(&request.state));
-    assert!(!debug.contains(&request.code_verifier));
+    assert!(!debug.contains(&stored.code_verifier));
+    assert!(!debug.contains(request.browser_binding.as_deref().unwrap()));
 }
 
 #[tokio::test]
@@ -157,7 +180,7 @@ async fn github_callback_exchanges_code_and_selects_primary_verified_email() {
     let store = MemoryOAuthStateStore::default();
     let request = provider.create_authorization_request(&store).await.unwrap();
 
-    let outcome = complete(&provider, &store, &request.state).await.unwrap();
+    let outcome = complete(&provider, &store, &request).await.unwrap();
 
     let posts = client.posts();
     assert_eq!(posts.len(), 1);
@@ -170,7 +193,7 @@ async fn github_callback_exchanges_code_and_selects_primary_verified_email() {
     assert_eq!(token.form_value("redirect_uri"), Some(REDIRECT));
     assert_eq!(
         token.form_value("code_verifier"),
-        Some(request.code_verifier.as_str())
+        Some(outcome.state.code_verifier.as_str())
     );
     assert_eq!(token.form_value("client_id"), Some("client id"));
     assert_eq!(token.form_value("client_secret"), Some("s:cret/+"));
@@ -202,7 +225,7 @@ async fn github_callback_exchanges_code_and_selects_primary_verified_email() {
 
     let debug = format!("{outcome:?}");
     assert!(!debug.contains(PROVIDER_ACCESS_TOKEN));
-    assert!(!debug.contains(&request.code_verifier));
+    assert!(!debug.contains(&outcome.state.code_verifier));
     assert!(!format!("{:?}", provider.config()).contains("s:cret"));
 }
 
@@ -211,12 +234,12 @@ async fn replayed_unknown_and_missing_state_are_refused_without_token_requests()
     let client = github_client();
     let provider = provider_with(github_config(), &client);
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
-    complete(&provider, &store, &state).await.unwrap();
+    let request = start(&provider, &store).await;
+    complete(&provider, &store, &request).await.unwrap();
 
-    let replay = complete(&provider, &store, &state).await.unwrap_err();
+    let replay = complete(&provider, &store, &request).await.unwrap_err();
     assert!(matches!(replay, AuthError::InvalidOAuthState));
-    let unknown = complete(&provider, &store, "unknown-state")
+    let unknown = complete_state(&provider, &store, "unknown-state")
         .await
         .unwrap_err();
     assert!(matches!(unknown, AuthError::InvalidOAuthState));
@@ -226,6 +249,8 @@ async fn replayed_unknown_and_missing_state_are_refused_without_token_requests()
             OidcCallbackInput {
                 code: Some("auth-code".to_string()),
                 state: None,
+                iss: None,
+                browser_binding: request.browser_binding.clone(),
                 error: None,
                 error_description: None,
             },
@@ -248,13 +273,13 @@ async fn expired_state_is_refused_and_consumed() {
     )
     .unwrap();
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
+    let request = start(&provider, &store).await;
     clock.advance_seconds(Duration::minutes(10).whole_seconds());
 
-    let expired = complete(&provider, &store, &state).await.unwrap_err();
+    let expired = complete(&provider, &store, &request).await.unwrap_err();
     assert!(matches!(expired, AuthError::OAuthStateExpired));
     clock.advance_seconds(-60);
-    let after = complete(&provider, &store, &state).await.unwrap_err();
+    let after = complete(&provider, &store, &request).await.unwrap_err();
     assert!(matches!(after, AuthError::InvalidOAuthState));
     assert!(client.posts().is_empty());
 }
@@ -264,14 +289,16 @@ async fn provider_error_and_missing_code_do_not_consume_state() {
     let client = github_client();
     let provider = provider_with(github_config(), &client);
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
+    let request = start(&provider, &store).await;
 
     let denied = provider
         .handle_callback(
             &store,
             OidcCallbackInput {
                 code: None,
-                state: Some(state.clone()),
+                state: Some(request.state.clone()),
+                iss: None,
+                browser_binding: request.browser_binding.clone(),
                 error: Some("access_denied".to_string()),
                 error_description: Some("provider text secret-detail".to_string()),
             },
@@ -288,7 +315,9 @@ async fn provider_error_and_missing_code_do_not_consume_state() {
                 &store,
                 OidcCallbackInput {
                     code,
-                    state: Some(state.clone()),
+                    state: Some(request.state.clone()),
+                    iss: None,
+                    browser_binding: request.browser_binding.clone(),
                     error: None,
                     error_description: None,
                 },
@@ -299,7 +328,7 @@ async fn provider_error_and_missing_code_do_not_consume_state() {
         assert_eq!(missing.public_code(), "UNAUTHENTICATED");
     }
     assert!(client.posts().is_empty());
-    complete(&provider, &store, &state).await.unwrap();
+    complete(&provider, &store, &request).await.unwrap();
 }
 
 #[tokio::test]
@@ -322,9 +351,9 @@ async fn token_endpoint_failures_are_typed_and_never_echo_provider_text() {
         client.set_post(response.clone());
         let provider = provider_with(github_config(), &client);
         let store = MemoryOAuthStateStore::default();
-        let state = start(&provider, &store).await;
+        let request = start(&provider, &store).await;
 
-        let error = complete(&provider, &store, &state).await.unwrap_err();
+        let error = complete(&provider, &store, &request).await.unwrap_err();
         assert!(
             matches!(error, AuthError::OAuthTokenExchange(_)),
             "{response:?}: {error:?}"
@@ -332,7 +361,7 @@ async fn token_endpoint_failures_are_typed_and_never_echo_provider_text() {
         assert_eq!(error.public_code(), "AUTH_SERVICE_UNAVAILABLE");
         assert!(!error.to_string().contains("provider-secret-text"));
         assert!(client.gets_to(GITHUB_USER).is_empty());
-        let replay = complete(&provider, &store, &state).await.unwrap_err();
+        let replay = complete(&provider, &store, &request).await.unwrap_err();
         assert!(matches!(replay, AuthError::InvalidOAuthState));
     }
 }
@@ -346,8 +375,8 @@ async fn userinfo_failures_and_unusable_subjects_are_refused() {
     client.set_get(GITHUB_USER, Err(()));
     let provider = provider_with(github_config(), &client);
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
-    let error = complete(&provider, &store, &state).await.unwrap_err();
+    let request = start(&provider, &store).await;
+    let error = complete(&provider, &store, &request).await.unwrap_err();
     assert!(matches!(error, AuthError::OAuthUserInfo(_)));
     assert_eq!(error.public_code(), "AUTH_SERVICE_UNAVAILABLE");
 
@@ -513,8 +542,8 @@ async fn client_secret_basic_encodes_credentials_in_the_authorization_header() {
     config.token_endpoint_auth_method = TokenEndpointAuthMethod::ClientSecretBasic;
     let provider = provider_with(config, &client);
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
-    complete(&provider, &store, &state).await.unwrap();
+    let request = start(&provider, &store).await;
+    complete(&provider, &store, &request).await.unwrap();
 
     let token = &client.posts()[0];
     assert_eq!(
@@ -545,8 +574,8 @@ async fn private_key_jwt_assertion_targets_the_token_endpoint() {
     let provider =
         OAuth2Provider::new_with_clock(config, Arc::new(client.clone()), Arc::new(clock)).unwrap();
     let store = MemoryOAuthStateStore::default();
-    let state = start(&provider, &store).await;
-    complete(&provider, &store, &state).await.unwrap();
+    let request = start(&provider, &store).await;
+    complete(&provider, &store, &request).await.unwrap();
 
     let token = &client.posts()[0];
     assert_eq!(token.form_value("client_secret"), None);
@@ -683,12 +712,15 @@ async fn oidc_and_oauth2_states_cannot_be_crossed() {
         scopes: Vec::new(),
         authorization_policy: None,
         response_mode: OAuthResponseMode::Query,
+        browser_binding_hash: None,
         created_at: OffsetDateTime::now_utc(),
         expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
         consumed_at: None,
     };
     store.insert_oauth_state(oidc_state.clone()).await.unwrap();
-    let crossed = complete(&oauth, &store, "oidc-state").await.unwrap_err();
+    let crossed = complete_state(&oauth, &store, "oidc-state")
+        .await
+        .unwrap_err();
     assert!(matches!(crossed, AuthError::InvalidOAuthState));
 
     let mut form_post = oidc_state;
@@ -696,7 +728,7 @@ async fn oidc_and_oauth2_states_cannot_be_crossed() {
     form_post.state_hash = hash_oauth_state("form-post-state");
     form_post.response_mode = OAuthResponseMode::FormPost;
     store.insert_oauth_state(form_post).await.unwrap();
-    let crossed = complete(&oauth, &store, "form-post-state")
+    let crossed = complete_state(&oauth, &store, "form-post-state")
         .await
         .unwrap_err();
     assert!(matches!(crossed, AuthError::InvalidOAuthState));

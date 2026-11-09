@@ -3,10 +3,16 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use time::Duration;
 
+use std::str::FromStr;
+
+use jsonwebtoken::{Algorithm, AlgorithmFamily};
+use zeroize::Zeroize;
+
 use crate::client_auth::{
     ClientJwtSigner, TokenEndpointAuthMethod, validate_client_authentication,
 };
 use crate::errors::AuthError;
+use crate::oidc::{is_secure_endpoint_url, is_valid_redirect_uri};
 
 /// Runtime configuration for [`crate::AuthService`].
 ///
@@ -445,6 +451,36 @@ impl OAuthResponseMode {
     }
 }
 
+/// How a callback proves it returns to the browser that started the flow.
+///
+/// With [`Self::Required`] (the default) every authorization request returns a
+/// random `browser_binding` secret that the host stores in a cookie on the
+/// initiating browser. Only its SHA-256 hash is kept in the one-time state, and
+/// the callback must present the raw value. A callback without it, or with a
+/// different value, is refused with [`AuthError::InvalidOAuthState`] after the
+/// state is consumed. This stops login CSRF: an attacker cannot make a victim's
+/// browser complete a flow the attacker started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OAuthBrowserBinding {
+    /// Issue a per-request binding secret and require it at the callback.
+    #[default]
+    Required,
+    /// Opt out: no binding secret is issued or checked. Use this only when the
+    /// host already ties `state` to the initiating browser itself, for example
+    /// by keeping the raw state in its own server-side session and comparing it
+    /// before calling the provider.
+    NotRequiredHostBindsState,
+}
+
+impl OAuthBrowserBinding {
+    /// Whether the binding secret is issued and required.
+    pub fn is_required(&self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
 /// Provider-agnostic OIDC configuration.
 ///
 /// `Debug` redacts `client_secret` and `client_jwt`.
@@ -455,15 +491,28 @@ pub struct OidcProviderConfig {
     pub provider_name: String,
     /// Provider-specific validation behavior.
     pub provider_kind: OidcProviderKind,
-    /// URL of the provider's `.well-known/openid-configuration` document.
+    /// URL of the provider's `.well-known/openid-configuration` document. It
+    /// must be an `https://` URL (`http://` only for loopback hosts).
     pub discovery_url: String,
+    /// Expected issuer identifier. The discovery document's `issuer` must be
+    /// identical to it (OIDC Discovery section 4.3). `None` derives it from
+    /// `discovery_url`, which must then end in
+    /// `/.well-known/openid-configuration`: the expected issuer is the prefix,
+    /// with or without one trailing `/`. Microsoft Entra `common` and
+    /// `organizations` expect the literal `{tenantid}` template, which is
+    /// substituted only when validating ID tokens.
+    #[serde(default)]
+    pub issuer: Option<String>,
     /// OAuth2 client ID.
     pub client_id: String,
     /// Optional client secret for confidential clients. Deserialized but
     /// never serialized; `Debug` redacts it.
     #[serde(skip_serializing)]
     pub client_secret: Option<String>,
-    /// Redirect URI registered with the provider.
+    /// Redirect URI registered with the provider: an absolute `https://` URL
+    /// (`http://` only for loopback hosts) without a fragment. Give every
+    /// provider its own redirect URI, so a callback can only reach the
+    /// provider that started it.
     pub redirect_uri: String,
     /// Requested OAuth/OIDC scopes before optional `offline_access` is appended.
     pub requested_scopes: Vec<String>,
@@ -485,13 +534,20 @@ pub struct OidcProviderConfig {
     pub allowed_additional_audiences: Vec<String>,
     /// Permitted clock skew for token validation.
     pub clock_skew: Duration,
-    /// Lifetime for OAuth state records.
+    /// Lifetime for OAuth state records, at most
+    /// [`crate::MAX_OAUTH_STATE_TTL_SECONDS`].
     pub state_ttl: Duration,
-    /// Allowed ID-token signature algorithms.
+    /// Allowed ID-token signature algorithms. All must belong to one key
+    /// family (RSA `RS*`/`PS*`, EC `ES256`/`ES384`, or `EdDSA`); symmetric
+    /// `HS*` algorithms are refused.
     pub allowed_id_token_algs: Vec<String>,
     /// Authorization response mode. Defaults to [`OAuthResponseMode::Query`].
     #[serde(default)]
     pub response_mode: OAuthResponseMode,
+    /// Browser binding of the one-time state. Defaults to
+    /// [`OAuthBrowserBinding::Required`].
+    #[serde(default)]
+    pub browser_binding: OAuthBrowserBinding,
     /// Token-endpoint client authentication. Defaults to
     /// [`TokenEndpointAuthMethod::ClientSecretPost`].
     #[serde(default)]
@@ -509,6 +565,7 @@ impl fmt::Debug for OidcProviderConfig {
             .field("provider_name", &self.provider_name)
             .field("provider_kind", &self.provider_kind)
             .field("discovery_url", &self.discovery_url)
+            .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
             .field(
                 "client_secret",
@@ -534,12 +591,19 @@ impl fmt::Debug for OidcProviderConfig {
             .field("state_ttl", &self.state_ttl)
             .field("allowed_id_token_algs", &self.allowed_id_token_algs)
             .field("response_mode", &self.response_mode)
+            .field("browser_binding", &self.browser_binding)
             .field(
                 "token_endpoint_auth_method",
                 &self.token_endpoint_auth_method,
             )
             .field("client_jwt", &self.client_jwt)
             .finish()
+    }
+}
+
+impl Drop for OidcProviderConfig {
+    fn drop(&mut self) {
+        zeroize_secret(&mut self.client_secret);
     }
 }
 
@@ -555,6 +619,7 @@ impl OidcProviderConfig {
             provider_name: provider_name.into(),
             provider_kind: OidcProviderKind::Generic,
             discovery_url: discovery_url.into(),
+            issuer: None,
             client_id: client_id.into(),
             client_secret: None,
             redirect_uri: redirect_uri.into(),
@@ -575,6 +640,7 @@ impl OidcProviderConfig {
             state_ttl: Duration::minutes(10),
             allowed_id_token_algs: vec!["RS256".to_string()],
             response_mode: OAuthResponseMode::Query,
+            browser_binding: OAuthBrowserBinding::Required,
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretPost,
             client_jwt: None,
         }
@@ -588,9 +654,27 @@ impl OidcProviderConfig {
             ));
         }
 
-        if self.discovery_url.trim().is_empty() {
+        if !is_secure_endpoint_url(&self.discovery_url) {
             return Err(AuthError::InvalidConfiguration(
-                "OIDC discovery_url must not be empty".to_string(),
+                "OIDC discovery_url must be an https URL (http only for loopback hosts)"
+                    .to_string(),
+            ));
+        }
+
+        if self
+            .issuer
+            .as_deref()
+            .is_some_and(|issuer| !is_secure_endpoint_url(issuer))
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "OIDC issuer must be an https URL (http only for loopback hosts)".to_string(),
+            ));
+        }
+
+        if self.expected_discovery_issuers().is_empty() {
+            return Err(AuthError::InvalidConfiguration(
+                "OIDC issuer must be set when discovery_url does not end in /.well-known/openid-configuration"
+                    .to_string(),
             ));
         }
 
@@ -600,9 +684,10 @@ impl OidcProviderConfig {
             ));
         }
 
-        if self.redirect_uri.trim().is_empty() {
+        if !is_valid_redirect_uri(&self.redirect_uri) {
             return Err(AuthError::InvalidConfiguration(
-                "OIDC redirect_uri must not be empty".to_string(),
+                "OIDC redirect_uri must be an absolute https URL without a fragment (http only for loopback hosts)"
+                    .to_string(),
             ));
         }
 
@@ -646,26 +731,91 @@ impl OidcProviderConfig {
             ));
         }
 
-        if self.state_ttl <= Duration::ZERO {
+        if self.state_ttl <= Duration::ZERO
+            || self.state_ttl > Duration::seconds(crate::MAX_OAUTH_STATE_TTL_SECONDS)
+        {
             return Err(AuthError::InvalidConfiguration(
-                "OIDC state_ttl must be greater than zero".to_string(),
+                "OIDC state_ttl must be greater than zero and at most the supported maximum"
+                    .to_string(),
             ));
         }
 
-        if self.allowed_id_token_algs.is_empty() {
-            return Err(AuthError::InvalidConfiguration(
-                "OIDC allowed_id_token_algs must not be empty".to_string(),
-            ));
-        }
+        self.id_token_algorithms()?;
 
         validate_client_authentication(
             "OIDC",
             self.token_endpoint_auth_method,
+            &self.client_id,
             self.client_secret.as_deref(),
             self.client_jwt.as_ref(),
         )?;
 
         Ok(())
+    }
+
+    /// Parses `allowed_id_token_algs`, requiring one asymmetric key family.
+    pub(crate) fn id_token_algorithms(&self) -> crate::AuthResult<Vec<Algorithm>> {
+        let invalid = |message: &str| AuthError::InvalidConfiguration(message.to_string());
+        let mut family = None;
+        let mut algorithms = Vec::with_capacity(self.allowed_id_token_algs.len());
+        for name in &self.allowed_id_token_algs {
+            let algorithm = Algorithm::from_str(name).map_err(|_| {
+                invalid("OIDC allowed_id_token_algs contains an unsupported algorithm")
+            })?;
+            let algorithm_family = algorithm.family();
+            if algorithm_family == AlgorithmFamily::Hmac {
+                return Err(invalid(
+                    "OIDC allowed_id_token_algs must not contain symmetric HS algorithms",
+                ));
+            }
+            if family.is_some_and(|family| family != algorithm_family) {
+                return Err(invalid(
+                    "OIDC allowed_id_token_algs must all belong to one key family",
+                ));
+            }
+            family = Some(algorithm_family);
+            if !algorithms.contains(&algorithm) {
+                algorithms.push(algorithm);
+            }
+        }
+        if algorithms.is_empty() {
+            return Err(invalid("OIDC allowed_id_token_algs must not be empty"));
+        }
+        Ok(algorithms)
+    }
+
+    /// Issuer values the discovery document may state, compared exactly.
+    ///
+    /// Empty when no issuer is configured and none can be derived.
+    pub(crate) fn expected_discovery_issuers(&self) -> Vec<String> {
+        if let Some(issuer) = &self.issuer {
+            return vec![issuer.clone()];
+        }
+        let Some(prefix) = self
+            .discovery_url
+            .strip_suffix("/.well-known/openid-configuration")
+            .filter(|prefix| is_secure_endpoint_url(prefix))
+        else {
+            return Vec::new();
+        };
+        if self.provider_kind == OidcProviderKind::MicrosoftEntra
+            && let Some(tenant) = prefix
+                .strip_prefix(MICROSOFT_LOGIN_ORIGIN)
+                .and_then(|path| path.strip_suffix("/v2.0"))
+        {
+            match tenant {
+                "common" | "organizations" => {
+                    return vec![microsoft_v2_issuer(MICROSOFT_TENANT_TEMPLATE)];
+                }
+                "consumers" => {
+                    return vec![microsoft_v2_issuer(
+                        crate::oidc::MICROSOFT_CONSUMER_TENANT_ID,
+                    )];
+                }
+                _ => {}
+            }
+        }
+        vec![prefix.to_string(), format!("{prefix}/")]
     }
 
     /// Returns requested scopes with `offline_access` appended when configured.
@@ -776,6 +926,12 @@ impl fmt::Debug for MicrosoftEntraConfig {
     }
 }
 
+impl Drop for MicrosoftEntraConfig {
+    fn drop(&mut self) {
+        zeroize_secret(&mut self.client_secret);
+    }
+}
+
 impl MicrosoftEntraConfig {
     /// Creates a single-tenant Microsoft Entra configuration.
     pub fn single_tenant(
@@ -838,7 +994,7 @@ impl MicrosoftEntraConfig {
             client_secret: None,
             redirect_uri: redirect_uri.into(),
             allowed_tenants: Vec::new(),
-            allowed_issuers: vec!["https://login.microsoftonline.com/{tenantid}/v2.0".to_string()],
+            allowed_issuers: vec![microsoft_v2_issuer(MICROSOFT_TENANT_TEMPLATE)],
             requested_scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -856,33 +1012,48 @@ impl MicrosoftEntraConfig {
     }
 
     /// Converts the Microsoft helper into provider-agnostic OIDC configuration.
-    pub fn into_oidc_provider_config(self) -> crate::AuthResult<OidcProviderConfig> {
+    ///
+    /// The expected discovery issuer is the tenant's v2.0 issuer, the
+    /// `{tenantid}` template for `organizations` and `common`, or the Microsoft
+    /// consumer tenant's issuer for `consumers`.
+    pub fn into_oidc_provider_config(mut self) -> crate::AuthResult<OidcProviderConfig> {
         if matches!(self.tenant, MicrosoftEntraTenant::Consumers) && !self.allow_consumers {
             return Err(AuthError::InvalidConfiguration(
                 "Microsoft consumers tenant mode must be explicitly enabled".to_string(),
             ));
         }
 
+        let issuer = match &self.tenant {
+            MicrosoftEntraTenant::TenantId(tenant_id) => microsoft_v2_issuer(tenant_id),
+            MicrosoftEntraTenant::Organizations | MicrosoftEntraTenant::Common => {
+                microsoft_v2_issuer(MICROSOFT_TENANT_TEMPLATE)
+            }
+            MicrosoftEntraTenant::Consumers => {
+                microsoft_v2_issuer(crate::oidc::MICROSOFT_CONSUMER_TENANT_ID)
+            }
+        };
         let mut config = OidcProviderConfig::new(
-            self.provider_name,
+            std::mem::take(&mut self.provider_name),
             format!(
-                "https://login.microsoftonline.com/{}/v2.0/.well-known/openid-configuration",
+                "{MICROSOFT_LOGIN_ORIGIN}{}/v2.0/.well-known/openid-configuration",
                 self.tenant.as_path_segment()
             ),
-            self.client_id,
-            self.redirect_uri,
+            std::mem::take(&mut self.client_id),
+            std::mem::take(&mut self.redirect_uri),
         );
         config.provider_kind = OidcProviderKind::MicrosoftEntra;
-        config.client_secret = self.client_secret;
-        config.allowed_tenants = self.allowed_tenants;
-        config.allowed_issuers = self.allowed_issuers;
+        config.issuer = Some(issuer);
+        config.client_secret = self.client_secret.take();
+        config.allowed_tenants = std::mem::take(&mut self.allowed_tenants);
+        config.allowed_issuers = std::mem::take(&mut self.allowed_issuers);
         config.allow_consumer_accounts = self.allow_consumers;
-        config.requested_scopes = self.requested_scopes;
+        config.requested_scopes = std::mem::take(&mut self.requested_scopes);
         config.request_offline_access = self.request_offline_access;
         config.jwks_cache_ttl = self.jwks_cache_ttl;
         config.discovery_cache_ttl = self.discovery_cache_ttl;
         config.jwks_forced_refresh_cooldown = self.jwks_forced_refresh_cooldown;
-        config.allowed_additional_audiences = self.allowed_additional_audiences;
+        config.allowed_additional_audiences =
+            std::mem::take(&mut self.allowed_additional_audiences);
         config.clock_skew = self.clock_skew;
         config.state_ttl = self.state_ttl;
         config.validate()?;
@@ -890,6 +1061,16 @@ impl MicrosoftEntraConfig {
     }
 }
 
+const MICROSOFT_LOGIN_ORIGIN: &str = "https://login.microsoftonline.com/";
+const MICROSOFT_TENANT_TEMPLATE: &str = "{tenantid}";
+
 fn microsoft_v2_issuer(tenant_id: &str) -> String {
-    format!("https://login.microsoftonline.com/{tenant_id}/v2.0")
+    format!("{MICROSOFT_LOGIN_ORIGIN}{tenant_id}/v2.0")
+}
+
+/// Overwrites a secret's bytes before its allocation is released.
+pub(crate) fn zeroize_secret(secret: &mut Option<String>) {
+    if let Some(secret) = secret.as_mut() {
+        secret.zeroize();
+    }
 }

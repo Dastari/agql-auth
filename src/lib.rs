@@ -162,14 +162,15 @@ pub use claims::{
 pub use client_auth::{
     CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner,
     DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS, MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS,
-    MAX_CLIENT_JWT_LIFETIME_SECONDS, TokenEndpointAuthMethod,
+    MAX_CLIENT_JWT_LIFETIME_SECONDS, MAX_PRIVATE_KEY_JWT_LIFETIME_SECONDS, TokenEndpointAuthMethod,
 };
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
     ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    MicrosoftEntraTenant, OAuthBrowserBinding, OAuthResponseMode, OidcProviderConfig,
+    OidcProviderKind,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -208,16 +209,18 @@ pub use models::{
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use oauth2::{
+    MAX_OAUTH2_EMAIL_LENGTH, MAX_OAUTH2_NAME_LENGTH, MAX_OAUTH2_PICTURE_LENGTH,
     MAX_OAUTH2_SUBJECT_LENGTH, MAX_OAUTH2_VERIFIED_EMAIL_ENTRIES, OAuth2AuthorizationRequest,
-    OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2ProfileMapping, OAuth2Provider,
-    OAuth2ProviderConfig, OAuth2TokenResponse, OAuth2UserProfile, OAuth2VerifiedEmailList,
-    OAuth2VerifiedEmailSelection,
+    OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2LoginResult, OAuth2ProfileMapping,
+    OAuth2Provider, OAuth2ProviderConfig, OAuth2TokenResponse, OAuth2UserProfile,
+    OAuth2UserProvisioner, OAuth2VerifiedEmailList, OAuth2VerifiedEmailSelection,
 };
 pub use oidc::{
-    ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,
-    OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
-    ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
-    hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+    ClaimsMapper, ExternalUserProvisioner, MAX_OAUTH_STATE_TTL_SECONDS, MappedClaims,
+    MicrosoftClaimsMapper, NoopClaimsMapper, OidcCallbackOutcome, OidcDiscoveryDocument,
+    OidcHttpClient, OidcProvider, PkcePair, ProvisionedExternalUser, generate_oauth_state,
+    generate_oidc_nonce, generate_pkce_pair, hash_oauth_state, pkce_s256_challenge,
+    stable_external_subject,
 };
 pub use oidc_authorization::{
     MAX_OIDC_AUTHORIZATION_TOTAL_VALUE_LENGTH, MAX_OIDC_AUTHORIZATION_VALUE_LENGTH,

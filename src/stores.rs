@@ -264,6 +264,10 @@ pub trait LoginChallengeStore: Send + Sync {
 /// Persists OIDC authorization state for one-time callback validation.
 pub trait OAuthStateStore: Send + Sync {
     /// Inserts an OAuth login state record.
+    ///
+    /// Persist every field and return it unchanged, including
+    /// `browser_binding_hash` and `response_mode`. A record reloaded without
+    /// its browser-binding hash is refused at the callback.
     async fn insert_oauth_state(&self, state: OAuthLoginState) -> AuthResult<()>;
 
     /// Consumes an OAuth state record exactly once.
