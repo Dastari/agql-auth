@@ -82,25 +82,60 @@ The generated authorization URL includes:
 The host owns the route and redirect response:
 
 ```rust
-async fn microsoft_start(state: AppState) -> Result<Redirect, AppError> {
+async fn microsoft_start(state: AppState) -> Result<(CookieJar, Redirect), AppError> {
     let request = state
         .microsoft
         .create_authorization_request(&state.oauth_state_store)
         .await?;
 
-    Ok(Redirect::to(&request.authorization_url))
+    // Bind the flow to this browser (login CSRF protection).
+    let binding = request.browser_binding.expect("browser binding is required by default");
+    let cookie = Cookie::build(("__Host-oidc_binding", binding))
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::minutes(10)); // at most state_ttl
+
+    Ok((CookieJar::new().add(cookie), Redirect::to(&request.authorization_url)))
 }
 ```
 
-`create_authorization_request` stores hashed state, nonce, and PKCE verifier
-through `OAuthStateStore`. The store must consume state exactly once during the
-callback and return the pre-consumption snapshot. A callback using an already
-consumed state is rejected.
+`create_authorization_request` stores hashed state, nonce, PKCE verifier and
+the hash of a random browser-binding secret through `OAuthStateStore`, and
+returns the raw secret in `request.browser_binding`. The PKCE verifier is not
+returned. The store must persist every field, consume state exactly once during
+the callback and return the pre-consumption snapshot. A callback using an
+already consumed state is rejected.
+
+### Browser binding
+
+Set `request.browser_binding` as a cookie before redirecting, and read it back
+at the callback:
+
+- `HttpOnly` and `Secure`, ideally with the `__Host-` prefix and `Path=/`.
+- `SameSite=Lax` for the default query response mode: the provider's redirect
+  is a top-level `GET`, which carries `Lax` cookies.
+- `Max-Age` no longer than `state_ttl`; clear it after the callback.
+- With `response_mode=form_post` the provider `POST`s cross-site, and a `Lax`
+  or `Strict` cookie is not sent. Use `SameSite=None; Secure` for this cookie,
+  or bind the flow another way (see
+  [form_post](oidc-form-post-and-client-credentials.md#browser-binding-for-form_post)).
+- One cookie per provider name; a second login started in another tab replaces
+  it and fails the first flow closed.
+
+A callback without the value, or with a different one, fails with
+`InvalidOAuthState` (`INVALID_OAUTH_STATE`) after its state is consumed. Hosts
+that already bind `state` to the browser themselves can set
+`OidcProviderConfig::browser_binding = OAuthBrowserBinding::NotRequiredHostBindsState`;
+states created that way carry no hash, and states without a hash are refused
+while binding is required.
 
 ## Callback Route
 
-The callback should pass only the authorization code and state from the query
-string. Do not accept frontend-provided ID tokens as proof of login.
+The callback should pass only the authorization code, state and `iss` from the
+query string, plus the binding cookie. Do not accept frontend-provided ID tokens
+or provider access tokens as proof of login.
 
 ```rust
 use agql_auth::{ClientMetadata, OidcCallbackInput};
@@ -117,7 +152,14 @@ async fn microsoft_callback(
             &state.external_identity_store,
             &state.external_user_provisioner,
             &state.claims_mapper,
-            OidcCallbackInput::code_and_state(query.code, query.state),
+            OidcCallbackInput {
+                code: query.code,
+                state: query.state,
+                iss: query.iss,
+                browser_binding: cookies.get("__Host-oidc_binding").map(|c| c.value().to_string()),
+                error: query.error,
+                error_description: None,
+            },
             ClientMetadata {
                 ip_address: query.ip_address,
                 user_agent: query.user_agent,
@@ -129,9 +171,19 @@ async fn microsoft_callback(
 }
 ```
 
-`login_with_callback` performs discovery, token exchange, JWKS lookup, ID-token
-validation, state validation, nonce validation, tenant validation, external
-identity lookup/linking, claims mapping, and local session issuance.
+`login_with_callback` performs discovery, state validation, browser-binding
+and `iss` checks, token exchange, JWKS lookup, ID-token validation, nonce
+validation, tenant validation, external identity lookup, claims mapping,
+provisioning, a local account check, identity linking, and local session
+issuance.
+
+Register one redirect URI per provider and route it to that provider only. With
+a shared callback URL a response could be handed to the wrong provider.
+When the callback carries the RFC 9207 `iss` parameter, it must match the
+provider issuer before the code is exchanged; for `organizations` and `common`
+it must match the `{tenantid}` template and then equal the ID token `iss`. When
+the discovery document sets `authorization_response_iss_parameter_supported`, a
+callback without `iss` is refused.
 
 ## User Provisioning
 
@@ -145,7 +197,12 @@ external identity means locally:
 - assign local scopes
 
 The provisioner receives validated claims, any existing external identity, and
-the output from the claims mapper.
+the output from the claims mapper. After it returns, `login_with_callback`
+re-reads that user from the `AuthService` user store: a disabled user fails with
+`UserDisabled` (`USER_DISABLED`) and a missing user with
+`ExternalLoginRejected` (`FORBIDDEN`), before any identity is linked or updated
+and before a session is issued. The provisioner remains responsible for any
+other account policy.
 
 ## Claims Mapping
 
@@ -200,6 +257,10 @@ Microsoft ID-token validation covers:
 - expiry
 - not-before, when the provider supplies `nbf`
 - issued-at
+- the signing key's JWKS `issuer` metadata, when present: the token `iss` must
+  equal it with `{tenantid}` replaced by the token `tid` (Microsoft's
+  multi-tenant guidance; keys without `issuer` metadata rely on the issuer
+  template check alone)
 - nonce
 - tenant ID
 - object ID or subject-derived fallback
@@ -210,7 +271,25 @@ unknown key IDs, invalid nonce, invalid issuer, invalid audience, expired
 tokens, and replayed states are rejected.
 
 For generic OIDC providers, `nbf` is optional. If present, it is validated with
-the configured clock skew. If an ID token has multiple audiences, `azp` must be
+the configured clock skew. `exp`, `nbf`, `iat` and `auth_time` are compared with
+the provider's clock (`OidcProvider::new_with_clock`; the system clock by
+default).
+
+## Discovery
+
+`discovery_url` must be `https://` (`http://` only for loopback hosts). The
+discovery document's `issuer` must equal the expected issuer exactly
+(OIDC Discovery section 4.3): `MicrosoftEntraConfig` sets it to
+`https://login.microsoftonline.com/{tenant}/v2.0` for a tenant, the literal
+`https://login.microsoftonline.com/{tenantid}/v2.0` template for
+`organizations` and `common`, and the consumer tenant's issuer for `consumers`.
+Every discovered endpoint (authorization, token, JWKS and, when present,
+userinfo) must be `https://` as well. A failing document is
+`OidcDiscovery` (`AUTH_SERVICE_UNAVAILABLE`) and is not cached.
+
+`allowed_id_token_algs` must name algorithms of one key family (Entra uses
+`RS256`); `HS*` is refused at configuration time. `redirect_uri` must be an
+absolute `https://` URL without a fragment, and `state_ttl` at most one hour. If an ID token has multiple audiences, `azp` must be
 present and equal to the configured `client_id`; additional audiences must be
 listed in `allowed_additional_audiences`.
 

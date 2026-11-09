@@ -35,10 +35,18 @@ detail:
 |---------|------|
 | `InvalidOAuthState` / `OAuthStateExpired` / `OAuthStateReplayed` | `INVALID_OAUTH_STATE` / `OAUTH_STATE_EXPIRED` / `OAUTH_STATE_REPLAYED` |
 | `OAuthProviderError` (error callback, e.g. cancelled) | `UNAUTHENTICATED` |
-| `OAuthCallback` (malformed callback, missing code) | `UNAUTHENTICATED` |
+| `OAuthCallback` (malformed callback, missing code, `iss` mismatch) | `UNAUTHENTICATED` |
 | `OAuthTokenExchange` | `AUTH_SERVICE_UNAVAILABLE` |
 | `OAuthUserInfo` (userinfo or verified-email list) | `AUTH_SERVICE_UNAVAILABLE` |
 | `OAuthMissingSubject` | `UNAUTHENTICATED` |
+
+Both `OidcProvider` and `OAuth2Provider` report a missing or wrong browser
+binding as `InvalidOAuthState` (`INVALID_OAUTH_STATE`). Their
+`login_with_callback` methods report a disabled local user as `UserDisabled`
+(`USER_DISABLED`) and a missing one as `ExternalLoginRejected` (`FORBIDDEN`).
+An OIDC `iss` mismatch is `OidcCallback` (`UNAUTHENTICATED`); a discovery
+document with another issuer or a non-https endpoint is `OidcDiscovery`
+(`AUTH_SERVICE_UNAVAILABLE`).
 
 Their internal detail is a fixed diagnostic string; provider response bodies,
 `error_description` text and tokens are never copied into an `AuthError`.
