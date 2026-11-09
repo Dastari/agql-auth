@@ -34,6 +34,11 @@ let payload = auth.issue_verified_user_session_with_scopes(
 ).await?;
 ```
 
+When the principal is already known, as for a second factor or step-up, use
+`verify_login_challenge_for` with a `LoginChallengeExpectation` instead, so a
+challenge issued to another principal or channel is refused before any attempt
+is spent.
+
 Before issuing/delivering the challenge, the host applies request admission,
 normalization, delivery and anti-enumeration policy. Configure
 `with_refresh_grant_authority` before using host-issued refreshable sessions;

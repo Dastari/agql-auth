@@ -200,11 +200,11 @@ pub use models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
     AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
     AuthRateLimitSnapshot, AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken,
-    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims,
-    OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult,
-    OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
-    RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
-    StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
+    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeExpectation, LoginChallengeOptions,
+    MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
+    OidcLoginResult, OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest,
+    PurposeTokenValidation, RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge,
+    StoredRefreshToken, StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use oauth2::{

@@ -81,6 +81,31 @@ let verified = auth
     .await?;
 ```
 
+This form checks no expectation: the challenge itself fixes the principal and
+channel, so use `verified.principal` and never a separately submitted one. When
+the host already knows who is completing the challenge (a second factor after a
+password, or step-up for the current session), or accepts only one delivery
+channel, bind the verification:
+
+```rust
+use agql_auth::LoginChallengeExpectation;
+
+let verified = auth
+    .verify_login_challenge_for(
+        &challenge_store,
+        challenge_id,
+        submitted_code,
+        &LoginChallengeExpectation::for_principal(&session_principal).with_channel("sms"),
+        client_metadata,
+    )
+    .await?;
+```
+
+A challenge created for another principal or channel fails with
+`InvalidLoginChallenge`, the error for an unknown challenge ID, before any
+attempt is admitted or the code is hashed. Values compare exactly, so normalize
+them as at creation.
+
 The host decides what verified challenges can do. For example, the host can
 issue a local session with `AuthMethod::EmailCode`:
 

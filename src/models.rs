@@ -1155,6 +1155,72 @@ impl Default for LoginChallengeOptions {
     }
 }
 
+/// Principal and delivery channel a login-challenge verification requires.
+///
+/// Pass this to [`crate::AuthService::verify_login_challenge_for`] when the
+/// host already knows who is completing the challenge, such as a second factor
+/// after a password or a step-up for the current session, or when the flow
+/// accepts only one delivery channel. Values are compared exactly with the
+/// stored challenge, so normalize them the same way as at creation. Every
+/// constructor sets at least one value; an unset value is not checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginChallengeExpectation {
+    principal: Option<String>,
+    channel: Option<String>,
+}
+
+impl LoginChallengeExpectation {
+    /// Requires the challenge to have been created for exactly this principal.
+    pub fn for_principal(principal: impl Into<String>) -> Self {
+        Self {
+            principal: Some(principal.into()),
+            channel: None,
+        }
+    }
+
+    /// Requires the challenge to carry exactly this delivery channel label.
+    pub fn for_channel(channel: impl Into<String>) -> Self {
+        Self {
+            principal: None,
+            channel: Some(channel.into()),
+        }
+    }
+
+    /// Also requires exactly this principal.
+    pub fn with_principal(mut self, principal: impl Into<String>) -> Self {
+        self.principal = Some(principal.into());
+        self
+    }
+
+    /// Also requires exactly this delivery channel label. A challenge created
+    /// without a channel never matches.
+    pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
+        self.channel = Some(channel.into());
+        self
+    }
+
+    /// Returns the required principal, if any.
+    pub fn principal(&self) -> Option<&str> {
+        self.principal.as_deref()
+    }
+
+    /// Returns the required channel label, if any.
+    pub fn channel(&self) -> Option<&str> {
+        self.channel.as_deref()
+    }
+
+    /// Returns whether a stored challenge satisfies every set value.
+    pub(crate) fn matches(&self, challenge: &StoredLoginChallenge) -> bool {
+        self.principal
+            .as_ref()
+            .is_none_or(|principal| principal == &challenge.principal)
+            && self
+                .channel
+                .as_ref()
+                .is_none_or(|channel| challenge.channel.as_ref() == Some(channel))
+    }
+}
+
 /// One-time login challenge returned to the host for delivery.
 ///
 /// `Debug` redacts the raw `code`; serialization still contains it.

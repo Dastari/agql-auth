@@ -3,6 +3,7 @@ mod assurance;
 mod auth_lifecycle;
 mod bounded_memory;
 mod challenge_admission;
+mod challenge_binding;
 mod challenges;
 mod channel;
 mod claims_and_status;
