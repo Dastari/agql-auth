@@ -388,6 +388,7 @@ client secrets (Sign in with Apple) are covered in
 - [Primitives and complete secure host flows](docs/secure-primitive-flows.md)
 - [Session assurance and recent MFA](docs/session-assurance.md)
 - [Atomic abuse protection](docs/abuse-protection.md)
+- [Dependency advisories](docs/dependency-advisories.md)
 - [Migration guide](MIGRATION.md)
 
 ## 0.19.0 Exact-Only Super-Scope Policy
