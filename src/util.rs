@@ -71,8 +71,9 @@ pub(crate) fn dedupe_stable(values: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Parses an `Authorization` value, which must use the `Bearer` scheme.
 pub(crate) fn strip_bearer_prefix(input: &str) -> AuthResult<&str> {
-    strip_bearer_prefix_with_mode(input, crate::token_decode::BearerParseMode::BearerOrRaw)
+    strip_bearer_prefix_with_mode(input, crate::token_decode::BearerParseMode::RequireBearer)
 }
 
 pub(crate) fn strip_bearer_prefix_with_mode(
@@ -109,19 +110,30 @@ pub(crate) fn strip_bearer_prefix_with_mode(
     Ok(token)
 }
 
-pub(crate) fn extract_connection_init_token(value: &JsonValue) -> AuthResult<String> {
+/// Returns the bare token from a connection-init payload. An `authorization`
+/// value must use `bearer_mode` (the `Bearer` scheme by default); the
+/// `access_token` / `accessToken` fields are token fields and carry the bare
+/// token, optionally with a `Bearer` prefix.
+pub(crate) fn extract_connection_init_token(
+    value: &JsonValue,
+    bearer_mode: crate::token_decode::BearerParseMode,
+) -> AuthResult<String> {
     let Some(object) = value.as_object() else {
         return Err(AuthError::MissingConnectionInitAuth);
     };
 
-    for key in [
-        "authorization",
-        "Authorization",
-        "access_token",
-        "accessToken",
-    ] {
+    for key in ["authorization", "Authorization"] {
         if let Some(raw) = object.get(key).and_then(JsonValue::as_str) {
-            return Ok(raw.to_string());
+            return strip_bearer_prefix_with_mode(raw, bearer_mode).map(str::to_string);
+        }
+    }
+    for key in ["access_token", "accessToken"] {
+        if let Some(raw) = object.get(key).and_then(JsonValue::as_str) {
+            return strip_bearer_prefix_with_mode(
+                raw,
+                crate::token_decode::BearerParseMode::BearerOrRaw,
+            )
+            .map(str::to_string);
         }
     }
 

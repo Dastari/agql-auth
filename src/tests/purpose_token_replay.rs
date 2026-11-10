@@ -43,7 +43,7 @@ fn payload(token: &str) -> JsonValue {
     .unwrap()
 }
 
-// AUTH-25: every purpose token carries a unique `jti`.
+// every purpose token carries a unique `jti`.
 #[test]
 fn purpose_tokens_carry_a_unique_jti() {
     let auth = service();

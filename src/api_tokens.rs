@@ -191,7 +191,8 @@ where
         })
     }
 
-    /// Authenticates a bearer value with or without the `Bearer ` prefix.
+    /// Authenticates an `Authorization` value, which must use the `Bearer`
+    /// scheme. Use [`Self::authenticate_token`] for a bare token.
     pub async fn authenticate_bearer(
         &self,
         bearer_or_token: &str,

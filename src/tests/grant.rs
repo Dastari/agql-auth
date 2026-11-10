@@ -679,7 +679,7 @@ async fn delegated_credentials_cannot_manage_or_chain_the_session() {
         Err(AuthError::Forbidden)
     ));
     assert!(matches!(
-        auth.authenticate_session_management_bearer(&grant.access_token),
+        auth.authenticate_session_management_bearer(&format!("Bearer {}", grant.access_token)),
         Err(AuthError::Forbidden)
     ));
     let delegated_principal = AuthPrincipal::User(delegated);
@@ -719,7 +719,10 @@ async fn delegated_credentials_cannot_manage_or_chain_the_session() {
         Err(AuthError::Forbidden)
     ));
     assert!(matches!(
-        auth.authenticate_session_management_bearer(&sessionless.access_token),
+        auth.authenticate_session_management_bearer(&format!(
+            "Bearer {}",
+            sessionless.access_token
+        )),
         Err(AuthError::Forbidden)
     ));
 }
@@ -743,7 +746,7 @@ async fn signed_delegation_passes_middleware_current_session_and_protected_resol
     let request = auth
         .inject_http_auth(
             async_graphql::Request::new("{ currentUserContext }"),
-            Some(&grant.access_token),
+            Some(&format!("Bearer {}", grant.access_token)),
         )
         .await
         .unwrap();
@@ -758,7 +761,7 @@ async fn signed_delegation_passes_middleware_current_session_and_protected_resol
     let revoked_request = auth
         .inject_http_auth(
             async_graphql::Request::new("{ currentUserContext }"),
-            Some(&grant.access_token),
+            Some(&format!("Bearer {}", grant.access_token)),
         )
         .await
         .unwrap();
@@ -774,7 +777,7 @@ async fn signed_delegation_passes_middleware_current_session_and_protected_resol
     let expired_request = auth
         .inject_http_auth(
             async_graphql::Request::new("{ currentUserContext }"),
-            Some(&grant.access_token),
+            Some(&format!("Bearer {}", grant.access_token)),
         )
         .await
         .unwrap();

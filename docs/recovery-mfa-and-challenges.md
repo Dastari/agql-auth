@@ -43,15 +43,16 @@ let verified = auth
     .await?;
 ```
 
-Consumption also invalidates the user's other outstanding reset tokens. If
-that store call fails, the token stays consumed and an error is returned.
+Consumption also invalidates the user's other outstanding reset tokens and
+revokes every refresh token of the user (`AuthService::revoke_user_sessions`).
+If either store call fails, the token stays consumed and an error is returned.
 
 `authenticate_password_reset_token` only validates claims and does not consult
 or consume a stored token ID, check revocation, or count attempts. It cannot by
 itself authorize a one-time reset. After consumption succeeds, the host checks
-current account/expiry, updates the password hash and implements required
-session/token revocation with transaction/fencing and recovery if a later write
-fails. See the [complete reset sequence](secure-primitive-flows.md#one-time-reset-through-password-update-and-revocation).
+current account/expiry, updates the password hash and implements any further
+revocation (API tokens, access-token status) with transaction/fencing and
+recovery if a later write fails. See the [complete reset sequence](secure-primitive-flows.md#one-time-reset-through-password-update-and-revocation).
 
 ## Login Challenges
 
@@ -226,7 +227,8 @@ enrollment records. Host services should:
 - keep challenge admission and one-time consume operations atomic
 - expire unused records
 - avoid logging reset tokens or login codes
-- revoke existing sessions when local policy requires it
+- call `revoke_user_sessions` when disabling a user or changing a password outside
+  the reset flow; reset consumption already does
 
 Credential throttling returns `AuthError::AuthThrottled` during exponential
 backoff and `AuthError::AuthLocked` during temporary lockout. Password-reset

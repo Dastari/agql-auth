@@ -115,7 +115,7 @@ async fn expired_api_token_is_rejected() {
         .expires_at = OffsetDateTime::now_utc() - Duration::seconds(1);
 
     let err = service
-        .authenticate_bearer(&issued.token, metadata())
+        .authenticate_bearer(&format!("Bearer {}", issued.token), metadata())
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::ApiTokenExpired));
@@ -135,7 +135,7 @@ async fn revoked_api_token_is_rejected() {
         .unwrap();
 
     let err = service
-        .authenticate_bearer(&issued.token, metadata())
+        .authenticate_bearer(&format!("Bearer {}", issued.token), metadata())
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::ApiTokenRevoked));

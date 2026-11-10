@@ -1110,7 +1110,8 @@ where
         access_token_claims_to_user(decode_access_token_claims(token, &config)?)
     }
 
-    /// Validates a bearer token with or without the `Bearer ` prefix.
+    /// Validates an `Authorization` value, which must use the `Bearer` scheme.
+    /// Use [`Self::authenticate_access_token`] for a bare token.
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
         self.authenticate_access_token(token)
@@ -1806,8 +1807,8 @@ where
 
     /// Authenticates an `async-graphql` WebSocket connection-init payload.
     pub async fn authenticate_connection_init_value(&self, value: JsonValue) -> AuthResult<Data> {
-        let token = extract_connection_init_token(&value)?;
-        let auth_user = self.authenticate_bearer(&token)?;
+        let token = extract_connection_init_token(&value, crate::BearerParseMode::RequireBearer)?;
+        let auth_user = self.authenticate_access_token(&token)?;
         let mut data = Data::default();
         data.insert(AuthRuntime::new(self.scope_matcher()));
         data.insert(auth_user);

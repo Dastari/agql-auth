@@ -55,7 +55,7 @@ fn validator(requirements: ClaimRequirements) -> AccessTokenValidator {
         .unwrap()
 }
 
-// AUTH-24: `require_cnf` proves possession, not mere presence of a claim.
+// `require_cnf` proves possession, not mere presence of a claim.
 #[test]
 fn tenant_jti_and_cnf_requires_the_presented_thumbprint() {
     let validator = validator(ClaimRequirements::tenant_jti_and_cnf());
@@ -253,7 +253,7 @@ impl DelegatedQuery {
     }
 }
 
-// AUTH-24: a guard may explicitly admit delegated tokens.
+// a guard may explicitly admit delegated tokens.
 #[tokio::test]
 async fn guards_admit_delegated_tokens_only_when_opted_in() {
     let schema = Schema::build(DelegatedQuery, EmptyMutation, EmptySubscription).finish();

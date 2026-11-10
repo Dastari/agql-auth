@@ -526,8 +526,14 @@ async fn bearer_and_connection_init_authentication_work() {
             .user_id,
         "user-1"
     );
+    // An Authorization value must carry the Bearer scheme; a bare token goes
+    // through authenticate_access_token.
+    assert!(matches!(
+        auth.authenticate_bearer(&payload.access_token),
+        Err(AuthError::InvalidBearerToken)
+    ));
     assert_eq!(
-        auth.authenticate_bearer(&payload.access_token)
+        auth.authenticate_access_token(&payload.access_token)
             .unwrap()
             .user_id,
         "user-1"

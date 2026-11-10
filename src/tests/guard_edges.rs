@@ -56,7 +56,7 @@ impl EmptyListQuery {
     }
 }
 
-// AUTH-26: an empty requirement list is a configuration mistake and must deny.
+// an empty requirement list is a configuration mistake and must deny.
 #[tokio::test]
 async fn guards_with_empty_requirement_lists_deny() {
     let schema = Schema::build(EmptyListQuery, EmptyMutation, EmptySubscription).finish();
@@ -101,7 +101,7 @@ fn all_scope_helpers_deny_an_empty_requirement_list() {
     assert!(!principal.has_all_scopes_with(&ExactScopeMatch, &none));
 }
 
-// AUTH-26: a trailing wildcard matches whole segments, never a raw prefix.
+// a trailing wildcard matches whole segments, never a raw prefix.
 #[test]
 fn trailing_wildcard_matches_whole_segments_only() {
     let multi = HierarchicalScopeMatch::with_defaults();
@@ -235,7 +235,7 @@ fn delegated_claims() -> Vec<(&'static str, AccessTokenMetadata)> {
     ]
 }
 
-// AUTH-24: delegated and actor tokens are not ordinary bearers.
+// delegated and actor tokens are not ordinary bearers.
 #[tokio::test]
 async fn default_guards_refuse_delegated_and_actor_tokens() {
     let schema = Schema::build(DefaultGuardQuery, EmptyMutation, EmptySubscription).finish();

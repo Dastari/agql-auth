@@ -439,6 +439,11 @@ impl AccessTokenValidator {
     }
 
     /// Authenticates a GraphQL WebSocket `connection_init` payload.
+    ///
+    /// With no `authorization_keys`, an `authorization` / `Authorization` value
+    /// follows the configured [`BearerParseMode`](crate::BearerParseMode) and an
+    /// `access_token` / `accessToken` value carries the bare token. Custom keys
+    /// follow the configured parse mode.
     pub fn authenticate_connection_init_value(
         &self,
         value: &JsonValue,
@@ -447,18 +452,12 @@ impl AccessTokenValidator {
         let object = value
             .as_object()
             .ok_or(AuthError::MissingConnectionInitAuth)?;
-        let keys: &[&str] = if authorization_keys.is_empty() {
-            &[
-                "authorization",
-                "Authorization",
-                "access_token",
-                "accessToken",
-            ]
-        } else {
-            authorization_keys
-        };
+        if authorization_keys.is_empty() {
+            let token = crate::util::extract_connection_init_token(value, self.bearer_parse_mode)?;
+            return self.authenticate_access_token(&token);
+        }
 
-        let token = keys
+        let token = authorization_keys
             .iter()
             .find_map(|key| object.get(*key).and_then(JsonValue::as_str))
             .ok_or(AuthError::MissingConnectionInitAuth)?;

@@ -95,9 +95,10 @@ let principal = api_tokens
 assert!(principal.has_scope("inventory.read"));
 ```
 
-`authenticate_bearer` accepts values with or without the `Bearer ` prefix,
-rejects unknown, expired, and revoked tokens, and updates last-used metadata
-after successful authentication.
+`authenticate_bearer` requires the `Bearer` scheme (case-insensitive); use
+`authenticate_token` for a bare token. It rejects unknown, expired, and revoked
+tokens, and records last-used metadata best effort after successful
+authentication.
 
 ## Audience And Resource Binding
 
@@ -170,9 +171,9 @@ unchanged.
 Use `CombinedAuth` when one GraphQL endpoint should accept either a user access
 JWT or an opaque API token:
 
-The user-token validator receives the original Authorization header. A validator
-configured with `BearerParseMode::RequireBearer` requires the scheme even through
-this injector; do not switch it to permissive parsing to accept valid headers.
+The Authorization header must use the `Bearer` scheme; `CombinedAuth` refuses a
+bare token even when the user-token validator opted into
+`BearerParseMode::BearerOrRaw`. The validator still receives the original header.
 
 ```rust
 use agql_auth::CombinedAuth;

@@ -89,7 +89,7 @@ fn header(alg: Algorithm, kid: Option<&str>) -> Header {
     header
 }
 
-// AUTH-16: following docs/key-rotation.md with the default policy must not fail
+// following docs/key-rotation.md with the default policy must not fail
 // every token once the cache TTL passes.
 #[test]
 fn rotating_jwks_default_policy_keeps_the_documented_example_working() {
@@ -104,7 +104,7 @@ fn rotating_jwks_default_policy_keeps_the_documented_example_working() {
     assert!(rotating.resolve(Some("auth-key-1")).is_ok());
 }
 
-// AUTH-18: a static JWKS with the outgoing and incoming keys must accept both
+// a static JWKS with the outgoing and incoming keys must accept both
 // during the overlap, selected by the token `kid`.
 #[tokio::test]
 async fn static_jwks_accepts_every_published_kid_during_rotation_overlap() {
@@ -133,7 +133,7 @@ async fn static_jwks_accepts_every_published_kid_during_rotation_overlap() {
     ));
 }
 
-// AUTH-18: docs say a one-key JWKS requires the token `kid` when the JWK has one.
+// docs say a one-key JWKS requires the token `kid` when the JWK has one.
 #[test]
 fn single_key_jwks_with_kid_requires_the_token_kid() {
     let auth = issuer(RSA_PRIVATE_KEY_A, RSA_PUBLIC_KEY_A, "auth-key-1");
@@ -151,7 +151,7 @@ fn single_key_jwks_with_kid_requires_the_token_kid() {
     ));
 }
 
-// AUTH-18: each JWK keeps its own algorithm instead of being labelled RS256.
+// each JWK keeps its own algorithm instead of being labelled RS256.
 #[test]
 fn static_jwks_labels_each_key_with_its_own_algorithm() {
     let jwks = json!({
@@ -224,7 +224,7 @@ impl AccessTokenKeyResolver for FixedResolver {
 
 use crate::AuthResult;
 
-// AUTH-17: a resolver returning an HMAC key must not bypass accept_hs256.
+// a resolver returning an HMAC key must not bypass accept_hs256.
 #[test]
 fn key_resolver_returning_hmac_keys_requires_accept_hs256() {
     let hs256 = Arc::new(StaticHs256Key::from_secret(TEST_HS256_SECRET, None).unwrap());
@@ -268,7 +268,7 @@ fn key_resolver_returning_hmac_keys_requires_accept_hs256() {
     );
 }
 
-// AUTH-17 sibling: a resolver that hands out an HMAC key for one kid at request
+// a resolver that hands out an HMAC key for one kid at request
 // time is refused even when the build-time probe saw an RSA key.
 #[test]
 fn key_resolver_switching_to_hmac_at_request_time_is_refused() {
@@ -302,7 +302,7 @@ fn key_resolver_switching_to_hmac_at_request_time_is_refused() {
     assert!(validator.authenticate_access_token(&token).is_err());
 }
 
-// AUTH-16: the stale window is bounded; a refresh restores service.
+// the stale window is bounded; a refresh restores service.
 #[test]
 fn rotating_jwks_default_stale_window_is_bounded_and_refresh_recovers() {
     let auth = issuer(RSA_PRIVATE_KEY_A, RSA_PUBLIC_KEY_A, "auth-key-1");
@@ -388,7 +388,7 @@ fn validator_key_ids_pin_a_set_of_kids() {
     ));
 }
 
-// AUTH-19: previous keys verify, are published, and never sign.
+// previous keys verify, are published, and never sign.
 #[tokio::test]
 async fn issuer_previous_verification_keys_allow_rotation_overlap() {
     let old = issuer(RSA_PRIVATE_KEY_A, RSA_PUBLIC_KEY_A, "auth-key-1");
