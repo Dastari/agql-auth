@@ -17,7 +17,7 @@ publish = false
 [dependencies]
 async-graphql = { version = "7", default-features = false }
 async-trait = "0.1"
-argon2 = "0.5"
+argon2 = "0.6"
 base64 = "0.22"
 data-encoding = "2"
 futures-channel = "0.3"
