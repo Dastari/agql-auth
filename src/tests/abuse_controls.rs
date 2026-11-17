@@ -724,6 +724,52 @@ async fn concurrent_password_burst_cannot_overrun_the_lockout_budget() {
     assert_eq!(auth.password_work.lock().unwrap().len(), 3);
 }
 
+#[tokio::test]
+async fn concurrent_correct_logins_behind_one_address_are_never_throttled() {
+    // Default thresholds: backoff after 3, lockout at 10 failures per client.
+    const USERS: usize = 12;
+    let (memory, clock) = memory_store(1024);
+    let users = MemoryUserStore::default();
+    let auth = Arc::new(service_with(
+        users.clone(),
+        Arc::new(YieldingStore(memory)),
+        clock,
+        AuthRateLimitConfig::default().credential,
+    ));
+    for n in 0..USERS {
+        users.insert(stored_user(
+            &auth,
+            &format!("user-{n}"),
+            &format!("nat-{n}@example.com"),
+            "password123",
+        ));
+    }
+    let mut tasks = Vec::new();
+    for n in 0..USERS {
+        let auth = auth.clone();
+        tasks.push(tokio::spawn(async move {
+            auth.login(&format!("nat-{n}@example.com"), "password123", metadata())
+                .await
+        }));
+    }
+    for task in tasks {
+        if let Err(error) = task.await.unwrap() {
+            panic!("a correct login behind a shared address failed: {error:?}");
+        }
+    }
+    // Failures from that address are still counted and still throttle it.
+    for n in 0..3 {
+        let _ = auth
+            .login(&format!("nat-{n}@example.com"), "wrong", metadata())
+            .await;
+    }
+    assert!(matches!(
+        auth.login("nat-5@example.com", "password123", metadata())
+            .await,
+        Err(AuthError::AuthThrottled { .. })
+    ));
+}
+
 // Principal counting binds to the resolved account.
 
 /// A host store whose lookup ignores `+tag` aliases.

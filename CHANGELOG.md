@@ -13,8 +13,11 @@ some error codes change. Read MIGRATION.md, including its upgrade order, first.
   Password login, TOTP and login codes reserve the attempt on every key before any
   secret is checked and fail closed with `AUTH_SERVICE_UNAVAILABLE`. Concurrent
   bursts can no longer verify more attempts than the lockout budget allows.
-- Success clears only the principal bucket and refunds only its own attempt from the
-  shared client bucket. Request flows record nothing when any key is throttled.
+- The shared client (IP) bucket is checked before every credential check but records
+  only failed checks, so concurrent correct logins behind one NAT never throttle each
+  other, and a success never clears failures recorded from that address. Success
+  clears only the principal bucket. Request flows record nothing when any key is
+  throttled.
   Known accounts are counted by local user ID, so aliases share one budget.
 - `USER_DISABLED` is returned only after the correct password. Unverifiable stored
   hashes do dummy Argon2 work and return `INVALID_CREDENTIALS`. Passwords over
@@ -26,14 +29,17 @@ some error codes change. Read MIGRATION.md, including its upgrade order, first.
   and `RecentMfaPolicy` rejects MFA that records no method (#34, #41).
 - `logout(token, false)` with a superseded refresh token revokes the family as
   `ReplayDetected`, and a rotation racing the call no longer survives it.
-- Rotation never extends a session past `max_session_lifetime` (default 90 days).
+- Neither rotation nor any access token extends a session past
+  `max_session_lifetime` (default 90 days): access-token expiry is capped at the
+  session's absolute deadline as well as the refresh token's.
   New `AuthService::revoke_user_sessions` ends all of a user's refresh sessions, and
   consuming a password-reset token now calls it (#33).
 - The `RefreshTokenStore` concurrency rules (rotation serialized with family
   revocation, update-first compare-and-swap, revoked rows unchanged) apply to every
   store, not only reuse-grace adopters.
 - `graphql_refresh_cookie_directive` blanks the refresh token in aliased, nested,
-  incomplete and partial-error responses.
+  incomplete and partial-error responses. It sanitizes the response in place, so
+  keys keep their selection order, and leaves hex digests alone.
 - `AuthError`'s `Display` is the public message; internal detail goes only through
   `diagnostic()`, `internal_detail()` and `Debug` (#28).
 - Access tokens need `typ`, `purpose` and the standard `scope` claim by default.
@@ -51,7 +57,8 @@ some error codes change. Read MIGRATION.md, including its upgrade order, first.
   `tenant.10.read`), and empty requirement lists deny (#35).
 - Purpose tokens carry a `jti` and can be consumed once (#34).
 - A resolved delegation reference never carries more than the delegated token's
-  grants, expiry and assurance. Every session-bound delegation needs an enabled parent.
+  grants, expiry and assurance; an expired reference, or one without an expiry, is
+  refused instead of inheriting the parent session's lifetime. Every session-bound delegation needs an enabled parent.
 - Reset tokens must carry the reset `typ` and are always recorded. Only a user's
   newest outstanding token can be consumed, and consuming it invalidates the rest.
 - API-token authentication enforces the stored audience and a configured resource.
@@ -88,8 +95,13 @@ some error codes change. Read MIGRATION.md, including its upgrade order, first.
   `INVALID_BEARER_TOKEN`; pass bare tokens to `authenticate_access_token` /
   `authenticate_token`.
 - Stricter defaults: `PurposePolicy`, `BearerParseMode`, `LegacyScopeClaims`,
-  `KeyRefreshPolicy`, `OAuthBrowserBinding`, a 90-day session lifetime and a
-  1024-byte password cap. Golden scope vectors move to version `2.0`.
+  `OAuthBrowserBinding`, a 90-day session lifetime and a 1024-byte password cap.
+  Golden scope vectors move to version `2.0`.
+- Looser default: `KeyRefreshPolicy::default()` is now `UseStale` with a one-hour
+  `max_stale` (it was `Reject`, contrary to the docs), so after a failed JWKS refresh
+  cached keys, including withdrawn ones, keep verifying for up to
+  `cache_ttl + max_stale` (about 65 minutes by default). Set
+  `stale_policy: StaleKeyPolicy::Reject` to keep failing closed (#29).
 - Error codes: disabled-with-wrong-password and unverifiable hashes give
   `INVALID_CREDENTIALS`; foreign-audience API tokens `INVALID_API_TOKEN`; pre-0.27
   delegation references and unprovisioned external users `FORBIDDEN`.
@@ -130,7 +142,8 @@ some error codes change. Read MIGRATION.md, including its upgrade order, first.
 
 - Service-side issuance, validation, logout and revocation time comes from the
   session clock; OIDC ID-token `exp`/`nbf` use the provider clock (#38).
-- `KeyRefreshPolicy::default()` matches the docs (#29). Static JWKS key handling
+- `KeyRefreshPolicy::default()` matches the docs (#29; see the looser default under
+  Breaking changes). Static JWKS key handling
   follows the docs, and multi-key rotation works without `key_id` (#30).
 - Key-refresh durations saturate; a failed API-token touch no longer fails
   authentication; mixed `allowed_id_token_algs` fail at configuration time.

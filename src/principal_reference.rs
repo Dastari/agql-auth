@@ -268,7 +268,9 @@ impl ResolvedPrincipal {
     /// - the reference's token ID, actor, resource, operation and correlation
     ///   replace the parent's, and the grant kind stays
     ///   [`AccessTokenGrantKind::SessionBoundDelegation`];
-    /// - expiry is the earlier of the delegated token's and the parent's;
+    /// - expiry is the earlier of the delegated token's and the parent's; a
+    ///   reference that has expired at `resolved_at`, or carries no expiry, is
+    ///   refused with [`AuthError::AccessTokenExpired`];
     /// - the parent's assurance is kept only while its `auth_time` equals the
     ///   delegated token's, and custom additional claims are dropped.
     ///
@@ -287,6 +289,14 @@ impl ResolvedPrincipal {
             else {
                 return Err(AuthError::Forbidden);
             };
+            // A delegation is bounded by its own expiry; without one it never
+            // resolves, and the parent session's lifetime is not inherited.
+            if reference
+                .expires_at
+                .is_none_or(|expiry| expiry <= resolved_at)
+            {
+                return Err(AuthError::AccessTokenExpired);
+            }
             let delegated = AuthPrincipal::User(delegated_view(&reference, ceiling, parent));
             return Ok(Self {
                 reference,
@@ -424,10 +434,11 @@ fn delegated_view(
     claims.resource_id = reference.resource_id.clone();
     claims.correlation_id = reference.correlation_id.clone();
     claims.operation = reference.operation.clone();
-    claims.expires_at = match (reference.expires_at, claims.expires_at) {
-        (Some(delegated), Some(parent)) => Some(delegated.min(parent)),
-        (delegated, parent) => delegated.or(parent),
-    };
+    claims.expires_at = reference.expires_at.map(|delegated| {
+        claims
+            .expires_at
+            .map_or(delegated, |parent| delegated.min(parent))
+    });
     claims.additional.clear();
     if claims.auth_time != ceiling.auth_time {
         claims.auth_time = None;

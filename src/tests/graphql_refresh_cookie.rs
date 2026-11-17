@@ -197,3 +197,46 @@ fn every_issued_refresh_token_has_the_scrubbed_shape() {
     }
     assert!(crate::util::is_opaque_token_shape(TOKEN));
 }
+
+#[test]
+fn sanitizing_keeps_selection_order_and_unrelated_digests() {
+    const DIGEST: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    // Built directly, so the order is the selection order, not alphabetical.
+    let mut response = Response::new(async_graphql::value!({
+        "zeta": {"digest": DIGEST},
+        "authLogin": {
+            "user": {"avatarSha256": DIGEST},
+            "session": {"refreshTokenExpiresAt": EXPIRES, "refreshToken": TOKEN},
+        },
+        "alpha": 1,
+    }));
+    let selected = [
+        GraphqlTopLevelField::new("zeta"),
+        GraphqlTopLevelField::new("authLogin"),
+        GraphqlTopLevelField::new("alpha"),
+    ];
+    let directive = graphql_refresh_cookie_directive(&mut response, &selected, &config());
+    assert_eq!(directive, set());
+
+    let Value::Object(top) = &response.data else {
+        panic!("object body");
+    };
+    let keys: Vec<&str> = top.keys().map(|key| key.as_str()).collect();
+    assert_eq!(keys, ["zeta", "authLogin", "alpha"], "selection order kept");
+    let Value::Object(login) = &top["authLogin"] else {
+        panic!("login object");
+    };
+    let Value::Object(session) = &login["session"] else {
+        panic!("session object");
+    };
+    let session_keys: Vec<&str> = session.keys().map(|key| key.as_str()).collect();
+    assert_eq!(session_keys, ["refreshTokenExpiresAt", "refreshToken"]);
+
+    let body = serde_json::to_string(&response.data.into_json().unwrap()).unwrap();
+    assert!(!body.contains(TOKEN), "refresh token left in body: {body}");
+    assert_eq!(
+        body.matches(DIGEST).count(),
+        2,
+        "hex digests are not refresh tokens: {body}"
+    );
+}

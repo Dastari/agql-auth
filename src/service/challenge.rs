@@ -183,7 +183,7 @@ where
         }
         // Count the guess against principal and client before any code work.
         let reservation = self
-            .reserve_rate_limit_attempt(policy, &rate_limit_keys)
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
         let verified = self
             .verify_password_async_before(
@@ -209,7 +209,7 @@ where
                     .await?;
                 return Err(error);
             }
-            // The reservation already counts this failure.
+            self.settle_rate_limit_failure(policy, reservation).await?;
             if reserved.attempts >= reserved.max_attempts {
                 return Err(AuthError::LoginChallengeAttemptsExhausted);
             }
@@ -225,6 +225,7 @@ where
             return Err(AuthError::LoginChallengeExpired);
         }
         if !consumed {
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::LoginChallengeReplayed);
         }
         self.settle_rate_limit_success(policy, reservation).await?;

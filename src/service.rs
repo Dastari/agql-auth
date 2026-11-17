@@ -527,13 +527,15 @@ where
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
     ///
-    /// Every admitted attempt is counted as a credential failure before any
-    /// password work. The principal bucket is the resolved local user ID when
-    /// the store finds an account, otherwise the normalized submitted
-    /// principal; the client bucket is the IP address. A store that cannot
-    /// record the attempt fails closed with `AuthServiceUnavailable` before
-    /// verification, so no outcome depends on the password. Success clears the
-    /// principal bucket and refunds only this attempt from the client bucket.
+    /// Every admitted attempt is counted against the principal bucket as a
+    /// credential failure before any password work. The principal bucket is the
+    /// resolved local user ID when the store finds an account, otherwise the
+    /// normalized submitted principal. A store that cannot record the attempt
+    /// fails closed with `AuthServiceUnavailable` before verification, so no
+    /// outcome depends on the password. The client bucket (the IP address) is
+    /// checked before the work and records only failed attempts, so concurrent
+    /// correct logins behind one address never throttle each other. Success
+    /// clears the principal bucket and leaves the client bucket unchanged.
     ///
     /// Unknown principals and stored hashes this crate cannot verify perform
     /// one dummy Argon2 verification and return
@@ -557,7 +559,7 @@ where
             &metadata,
         );
         let reservation = self
-            .reserve_rate_limit_attempt(policy, &rate_limit_keys)
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
 
         // Unknown accounts and unverifiable stored hashes use the same fixed
@@ -577,14 +579,18 @@ where
                     .await?;
                 return Err(AuthError::AuthServiceUnavailable);
             }
-            // The reservation already counts this failure.
-            Err(_) => return Err(AuthError::InvalidCredentials),
+            Err(_) => {
+                self.settle_rate_limit_failure(policy, reservation).await?;
+                return Err(AuthError::InvalidCredentials);
+            }
         }
         let Some(user) = user else {
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::InvalidCredentials);
         };
         if user.disabled {
             // Proven password, still a counted failure: never clear or issue.
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::UserDisabled);
         }
         self.settle_rate_limit_success(policy, reservation).await?;
@@ -1878,8 +1884,16 @@ where
                 .authorization_roles
                 .retain(|role| ceiling.contains(role));
         }
+        if session_expires_at.is_some_and(|deadline| deadline <= now) {
+            return Err(AuthError::RefreshTokenExpired);
+        }
         let access_token_expires_at =
             crate::util::checked_jwt_expiry(now, self.config.access_token_ttl, "access-token ttl")?;
+        // No token outlives the session's absolute deadline.
+        let access_token_expires_at = session_expires_at
+            .map_or(access_token_expires_at, |deadline| {
+                access_token_expires_at.min(deadline)
+            });
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
@@ -2261,6 +2275,30 @@ where
         policy: &AuthRateLimitPolicy,
         keys: &[AuthRateLimitKey],
     ) -> AuthResult<RateLimitReservation> {
+        self.reserve_rate_limit_keys(policy, keys, false).await
+    }
+
+    /// Reserves a credential check: the principal bucket is counted before
+    /// verification as [`Self::reserve_rate_limit_attempt`] does, while shared
+    /// client buckets are only checked for active backoff or lockout. They are
+    /// recorded by [`Self::settle_rate_limit_failure`], so concurrent correct
+    /// checks from one address (shared NAT) never throttle each other. The
+    /// principal reservation alone bounds guesses and fails closed when the
+    /// store cannot record.
+    pub(super) async fn reserve_credential_attempt(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<RateLimitReservation> {
+        self.reserve_rate_limit_keys(policy, keys, true).await
+    }
+
+    async fn reserve_rate_limit_keys(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+        defer_client: bool,
+    ) -> AuthResult<RateLimitReservation> {
         let mut reservation = RateLimitReservation::default();
         if !policy.enabled || keys.is_empty() {
             return Ok(reservation);
@@ -2269,6 +2307,10 @@ where
 
         let now = self.rate_limit_clock.now();
         for key in keys {
+            if defer_client && key.bucket == AuthRateLimitBucket::Client {
+                reservation.deferred_client_keys.push(key.clone());
+                continue;
+            }
             let denial = match self
                 .record_rate_limit_attempt_for_key(policy, key, now, true)
                 .await
@@ -2313,6 +2355,18 @@ where
             self.refund_rate_limit_record(policy, record).await?;
         }
         Ok(())
+    }
+
+    /// Completes a reserved credential check that failed: the principal
+    /// attempt stays counted and each deferred client bucket records one
+    /// failure. Call it on every failed check, before returning its error.
+    pub(super) async fn settle_rate_limit_failure(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        reservation: RateLimitReservation,
+    ) -> AuthResult<()> {
+        self.record_rate_limit_attempt(policy, &reservation.deferred_client_keys)
+            .await
     }
 
     /// Removes a reserved attempt that verified nothing, such as when password
@@ -2489,12 +2543,17 @@ struct RateLimitObservation {
     revision: Option<Uuid>,
 }
 
-/// Attempts counted before verification. Dropping it keeps them counted as
-/// failures; settle it on success or refund it when nothing was verified.
+/// Attempts counted before verification. Settle it on success, settle it as a
+/// failure when the check fails, or refund it when nothing was verified.
+/// Dropping it keeps the principal attempt counted but records nothing on the
+/// shared client bucket.
 #[derive(Default)]
 #[must_use = "a reservation is settled on success or refunded when nothing was verified"]
 pub(super) struct RateLimitReservation {
     records: Vec<RateLimitRecord>,
+    /// Shared client buckets of a credential check: checked before the work,
+    /// recorded only when the check fails (see [`AuthService::settle_rate_limit_failure`]).
+    deferred_client_keys: Vec<AuthRateLimitKey>,
 }
 
 struct RateLimitRecord {

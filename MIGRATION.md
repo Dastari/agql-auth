@@ -224,7 +224,7 @@ Do these in order. Steps 1 to 4 can be done before any 0.27 node runs.
 | `PurposePolicy::default()` | `RequireAccessToken`, which now also requires `typ = "access"`. |
 | `BearerParseMode::default()` | `RequireBearer` for `AccessTokenValidator`. |
 | `LegacyScopeClaims::default()` | `Reject`, for the enum, `AuthConfig` and the validator. |
-| `KeyRefreshPolicy` | `UseStale` with new `max_stale` (1 hour); keys fail after `cache_ttl + max_stale` without a successful refresh. |
+| `KeyRefreshPolicy` | **Looser:** `UseStale` with new `max_stale` (1 hour), previously `Reject`. After a failed refresh, cached keys (including withdrawn ones) verify until `cache_ttl + max_stale`. Set `stale_policy: StaleKeyPolicy::Reject` to keep failing closed. |
 | Static JWKS | Unique `kid` per key in multi-key documents, no `oct` keys, `alg` must match the key type; non-RS256 keys need `allowed_algorithms`. |
 | `LoginChallengeOptions` | `code_length` 6 to 12, `max_attempts` 1 to 10. |
 | `TotpOptions` | `period_seconds` 15 to 300, `allowed_skew` at most 2; `generate_totp_secret` 20 to 64 bytes. |
@@ -384,11 +384,16 @@ until they resolve, so three or more simultaneous attempts can see a transient
   `refreshTokenExpiresAt` under their schema names, or no cookie is set and the token
   is removed. `Set` is returned for partial errors when the session was issued;
   `Clear` still needs an error-free response. Any 64-character URL-safe base64 string
-  in an issuing entry is blanked.
+  in an issuing entry is blanked, except hex-only strings such as SHA-256 digests.
+  When `GraphqlTopLevelField::response_key` is unset, the issuing entry is found by
+  its schema field name, and every top-level entry is scanned only if that name is
+  absent.
 
 **Credentials and abuse controls**
 
-- Success no longer clears the client bucket; it refunds only its own attempt.
+- The client (IP) bucket is checked before each credential check but records only
+  failed checks; a success neither adds to nor clears it. Correct logins behind a
+  shared address no longer throttle each other, as they could while in flight.
 - Known-account password-login counters use a key derived from the user ID; old
   raw-principal counters are ignored and expire by TTL. Client and unknown-principal
   counters carry over. Request flows keep the submitted principal.

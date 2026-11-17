@@ -230,3 +230,25 @@ async fn revoking_a_users_sessions_ends_every_family_of_that_user_only() {
         0
     );
 }
+
+#[tokio::test]
+async fn access_tokens_never_outlive_the_absolute_deadline() {
+    let s = session(Some(Duration::days(2)), false);
+    // The seeded refresh token is valid for a day; its session ends sooner.
+    let deadline = s.login + Duration::hours(23);
+    s.seed("seed", Some(deadline)).await;
+    // One minute before the deadline the default 15-minute access token
+    // would otherwise run 14 minutes past it.
+    s.clock.set(deadline - Duration::minutes(1));
+    let payload = s.refresh("seed").await.unwrap();
+    assert_eq!(payload.access_token_expires_at, deadline);
+    assert!(s.record(&payload.refresh_token).expires_at <= deadline);
+    s.auth
+        .authenticate_access_token(&payload.access_token)
+        .unwrap();
+    s.clock.set(deadline);
+    assert!(matches!(
+        s.auth.authenticate_access_token(&payload.access_token),
+        Err(AuthError::AccessTokenExpired)
+    ));
+}

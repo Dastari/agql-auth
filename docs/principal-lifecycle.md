@@ -22,6 +22,12 @@ session-bound delegation carries a `grant_ceiling` recording the roles, scopes,
 authorization roles and `auth_time` of the delegated token, as an upper bound.
 It is not proof that the principal remains active or authorized.
 
+Store references where the job's submitter cannot edit them. Resolution trusts the
+stored `grant_ceiling` and expiry: an edited ceiling can widen plain resolution up
+to the parent's current authority (sensitive revalidation still narrows to the
+accepted token). A delegation reference that has expired, or carries no expiry, is
+refused with `AccessTokenExpired`.
+
 ## Rehydrate Current Authority
 
 Hosts implement `CurrentPrincipalResolver` against their authoritative stores:

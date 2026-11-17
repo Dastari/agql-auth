@@ -52,17 +52,25 @@ count an attempt before verifying anything:
 
 1. every principal and client key is evaluated; active backoff or lockout
    returns `AuthThrottled` or `AuthLocked` without recording;
-2. each key is then incremented by CAS exactly as a failure would be, and
-   every CAS rechecks backoff and lockout against the state it replaces;
-3. only then does the service verify the password, code or TOTP step.
+2. each principal key is then incremented by CAS exactly as a failure would
+   be, and every CAS rechecks backoff and lockout against the state it replaces;
+3. only then does the service verify the password, code or TOTP step;
+4. a failed check records one failure on each client key (the IP address).
 
-A failure needs no further write: it was already counted. Because the count
-is committed before verification, a burst of concurrent attempts cannot all
-observe a state below the lockout threshold. At most
-`max_attempts_before_lockout` attempts per window are verified for one
-principal, and the same bound applies per client. Until an attempt resolves it
-counts toward thresholds, so concurrent attempts on the same bucket can see a
-transient backoff that the attempt's success later removes.
+Because the principal count is committed before verification, a burst of
+concurrent attempts cannot all observe a state below the lockout threshold: at
+most `max_attempts_before_lockout` attempts per window are verified for one
+principal. Until an attempt resolves it counts toward its principal's
+thresholds, so concurrent attempts on the same account can see a transient
+backoff that the attempt's success later removes.
+
+The client bucket is shared by every user behind one address (office or
+carrier NAT, a proxy), so it is only checked before the work and records
+failures after it. Concurrent correct logins from one address never throttle
+each other, while failed guesses from it accumulate and throttle it as before.
+A concurrent spray across many accounts from one address can therefore have as
+many checks in flight as it has concurrent requests before the client bucket
+reacts; each account's own budget still bounds guesses against it.
 
 A store that cannot record the attempt (an error, or a full
 `MemoryAuthRateLimitStore`) fails the request with `AuthServiceUnavailable`
@@ -90,11 +98,11 @@ stored hash parameters.
 
 A success settles its reservation. The principal bucket is cleared if its
 revision is still the one the reservation wrote; otherwise only this attempt
-is refunded and newer failures survive. The client bucket is shared by every
-principal behind one address, so a success refunds only its own attempt.
-Failures other principals recorded from that address stay counted: logging in
-to one's own account does not reset an address used to spray other accounts,
-and successful logins never accumulate state for a shared address.
+is refunded and newer failures survive. A success records nothing on the
+client bucket and never clears it: failures other principals recorded from
+that address stay counted, so logging in to one's own account does not reset
+an address used to spray other accounts, and successful logins never
+accumulate state for a shared address.
 
 A refund restores the exact state the reservation replaced when nothing was
 recorded since. Otherwise it removes one attempt from the current window and

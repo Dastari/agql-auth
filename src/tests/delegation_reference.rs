@@ -248,3 +248,34 @@ async fn resolved_delegation_cannot_prepare_a_further_delegation() {
         Err(AuthError::Forbidden)
     ));
 }
+
+#[test]
+fn expired_or_expiry_less_delegation_references_are_refused() {
+    let accepted = AuthPrincipal::User(delegated());
+    let reference = accepted.reference();
+    // Two hours after the five-minute delegation, while the parent lives on.
+    let mut parent_session = parent();
+    parent_session.token_claims.expires_at = Some(OffsetDateTime::now_utc() + Duration::days(1));
+    assert!(matches!(
+        ResolvedPrincipal::new(
+            reference.clone(),
+            AuthPrincipal::User(parent_session.clone()),
+            OffsetDateTime::now_utc() + Duration::hours(2),
+        ),
+        Err(AuthError::AccessTokenExpired)
+    ));
+
+    // Removing the expiry from a stored reference must not inherit the
+    // parent's lifetime.
+    let mut stripped: serde_json::Value = serde_json::to_value(&reference).unwrap();
+    stripped["expires_at"] = serde_json::Value::Null;
+    let stripped: PrincipalReference = serde_json::from_value(stripped).unwrap();
+    assert!(matches!(
+        ResolvedPrincipal::new(
+            stripped,
+            AuthPrincipal::User(parent_session),
+            OffsetDateTime::now_utc(),
+        ),
+        Err(AuthError::AccessTokenExpired)
+    ));
+}

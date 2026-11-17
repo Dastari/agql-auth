@@ -122,13 +122,15 @@ where
             &metadata,
         );
         let reservation = self
-            .reserve_rate_limit_attempt(policy, &rate_limit_keys)
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
 
         match match_totp_code(&secret, code, &options, now) {
             Ok(_) => self.settle_rate_limit_success(policy, reservation).await,
-            // The reservation already counts this failure.
-            Err(AuthError::InvalidTotpCode) => Err(AuthError::InvalidTotpCode),
+            Err(AuthError::InvalidTotpCode) => {
+                self.settle_rate_limit_failure(policy, reservation).await?;
+                Err(AuthError::InvalidTotpCode)
+            }
             Err(err) => {
                 self.refund_rate_limit_reservation(policy, reservation)
                     .await?;
@@ -205,13 +207,15 @@ where
             &metadata,
         );
         let reservation = self
-            .reserve_rate_limit_attempt(policy, &rate_limit_keys)
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
 
         let step = match match_totp_code(&secret, code, &options, now) {
             Ok(step) => step,
-            // The reservation already counts this failure.
-            Err(AuthError::InvalidTotpCode) => return Err(AuthError::InvalidTotpCode),
+            Err(AuthError::InvalidTotpCode) => {
+                self.settle_rate_limit_failure(policy, reservation).await?;
+                return Err(AuthError::InvalidTotpCode);
+            }
             Err(err) => {
                 self.refund_rate_limit_reservation(policy, reservation)
                     .await?;
@@ -223,6 +227,7 @@ where
             .consume_totp_step(principal_id, factor_id, step, now)
             .await?
         {
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::TotpCodeReplayed);
         }
         self.settle_rate_limit_success(policy, reservation).await
