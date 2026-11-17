@@ -62,6 +62,40 @@ class ReleaseTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             release.check_policy()
 
+    def declare_release(self, version, breaking_section=True, migration=True):
+        self.write_package(version)
+        section = "### Breaking changes\n\n- Changed\n" if breaking_section else "### Fixed\n\n- Fixed\n"
+        (self.root / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n## {version}\n\n{section}\n## 0.19.0\n\n### Breaking changes\n")
+        if migration:
+            (self.root / "MIGRATION.md").write_text(f"# Migration\n\n## 0.19.0 to {version}: notes\n")
+
+    def test_declared_breaking_release_passes_the_gate(self):
+        self.declare_release("0.20.0")
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.check_breaking()
+
+    def test_declared_breaking_release_requires_the_next_breaking_version(self):
+        for version in ("0.19.1", "0.21.0", "0.20.1", "1.0.0"):
+            self.declare_release(version)
+            with self.assertRaisesRegex(ValueError, "next breaking version"):
+                release.check_breaking()
+
+    def test_declared_breaking_release_requires_changelog_and_migration(self):
+        self.declare_release("0.20.0", breaking_section=False)
+        with self.assertRaisesRegex(ValueError, "Breaking changes"):
+            release.check_breaking()
+        self.declare_release("0.20.0", migration=False)
+        (self.root / "MIGRATION.md").unlink(missing_ok=True)
+        with self.assertRaisesRegex(ValueError, "MIGRATION.md"):
+            release.check_breaking()
+
+    def test_breaking_bump_rule(self):
+        self.assertTrue(release.is_breaking_bump((0, 26, 0), (0, 27, 0)))
+        self.assertTrue(release.is_breaking_bump((1, 4, 2), (2, 0, 0)))
+        self.assertFalse(release.is_breaking_bump((1, 4, 2), (1, 5, 0)))
+        self.assertFalse(release.is_breaking_bump((0, 26, 0), (0, 26, 1)))
+
     def test_reject_registry_publication(self):
         self.write_package("0.19.0", publish="true")
         with self.assertRaisesRegex(ValueError, "publish must remain false"):

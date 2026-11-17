@@ -63,6 +63,29 @@ def check_policy(base=None):
     print(f"release-policy: {base} -> {version} passed")
 
 
+def is_breaking_bump(previous, current):
+    """SemVer breaking bump: next major, or next minor below 1.0, with lower parts reset."""
+    if previous[0] == 0:
+        return current == (0, previous[1] + 1, 0)
+    return current == (previous[0] + 1, 0, 0)
+
+
+def check_breaking(base=None):
+    """Gate a release that declares breaking changes instead of passing SemVer checks."""
+    version = check_state()
+    base = base or latest_tag()
+    previous = tomllib.loads(git("show", f"{base}:Cargo.toml").decode())["package"]["version"]
+    require(VERSION.fullmatch(previous), "baseline version is not a release SemVer")
+    require(is_breaking_bump(tuple(map(int, previous.split("."))), tuple(map(int, version.split(".")))),
+            f"a declared breaking release must be the next breaking version after {previous}")
+    entry = re.split(r"^## ", (ROOT / "CHANGELOG.md").read_text(), flags=re.M)[1]
+    require(re.search(r"^### Breaking changes\s*$", entry, re.M | re.I),
+            "a declared breaking release needs a '### Breaking changes' section in its changelog entry")
+    require((ROOT / "MIGRATION.md").is_file() and f"to {version}" in (ROOT / "MIGRATION.md").read_text(),
+            f"a declared breaking release needs a MIGRATION.md section for {version}")
+    print(f"release-breaking: {base} -> {version} declared breaking")
+
+
 def release_identity():
     version = check_state()
     require(not git("status", "--porcelain", "--untracked-files=no").strip(),
@@ -107,6 +130,8 @@ def main():
     policy = commands.add_parser("check-policy")
     policy.add_argument("base", nargs="?")
     commands.add_parser("baseline")
+    breaking = commands.add_parser("check-breaking")
+    breaking.add_argument("base", nargs="?")
     generate = commands.add_parser("manifest")
     generate.add_argument("--output", required=True)
     body = commands.add_parser("notes")
@@ -116,6 +141,8 @@ def main():
         print(f"release-state: {check_state()} passed")
     elif args.command == "check-policy":
         check_policy(args.base)
+    elif args.command == "check-breaking":
+        check_breaking(args.base)
     elif args.command == "baseline":
         print(latest_tag())
     elif args.command == "notes":
