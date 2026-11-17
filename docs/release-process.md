@@ -52,10 +52,11 @@ lanes and the protected release gate when maintaining workflows, following
 5. Run `cargo semver-checks --baseline-rev "$(python3 scripts/release.py baseline)"
    --default-features --release-type minor` with pinned cargo-semver-checks 0.46.0.
    Without `--release-type minor`, a pre-1.0 minor bump counts as major and every
-   breaking-change lint is skipped. A release that declares breaking changes in the
-   changelog and migration guide fails this lane by design, so record the reported
-   breaks in those documents before dispatching. The lane checks the Rust API only,
-   not behavior or wire formats.
+   breaking-change lint is skipped. A release with breaking changes fails this lane
+   by design: record every reported break in the changelog entry's
+   `### Breaking changes` section and in a `MIGRATION.md` section for the new
+   version, then dispatch with `breaking: true` (see below). The lane checks the Rust
+   API only, not behavior or wire formats.
    Report actual executed/skipped SemVer check counts; a permitted minor bump
    does not prove source compatibility. Also run the independent minimal and
    additive consumers and resolved-graph assertions in
@@ -95,7 +96,17 @@ human reviewer is configured, failing closed otherwise. The repository owner ver
 settings; an unprotected environment is not an approved publication route.
 
 Toby dispatches `release.yml` as `Dastari`, from `main`, supplying `version`
-(without `v`), `target_ref` (the full current `main` SHA), and `prerelease`.
+(without `v`), `target_ref` (the full current `main` SHA), `prerelease`, and
+`breaking`.
+
+`breaking` defaults to `false`, and then any cargo-semver-checks failure blocks
+publication. Set it to `true` only for a release that declares breaking changes.
+The guard then runs `python3 scripts/release.py check-breaking`, which requires the
+next breaking version after the last tag (`0.y+1.0` before 1.0, `x+1.0.0` after),
+a `### Breaking changes` section in the top changelog entry, and a `MIGRATION.md`
+section naming the version. The SemVer job still runs every lint and uploads its
+report as the `semver-report` artifact, but its findings no longer block the
+release. Review that report against the changelog before approving.
 The protected entry job requires human approval before validation. The workflow
 checks current `main` and an unused tag, runs CI and SemVer lanes, rechecks
 current `main`, generates and attests assets, pushes an annotated tag, assembles
