@@ -1,5 +1,181 @@
 # Changelog
 
+## 0.27.0
+
+Security release covering credential counting, refresh sessions, access-token
+validation, delegation, single-use tokens and the OIDC/OAuth 2.0 clients. This is a
+breaking pre-1.0 minor: store traits gain required methods, defaults are stricter and
+some error codes change. Read MIGRATION.md, including its upgrade order, first.
+
+### Security
+
+- A full or failing rate-limit store no longer leaves credential attempts uncounted.
+  Password login, TOTP and login codes reserve the attempt on every key before any
+  secret is checked and fail closed with `AUTH_SERVICE_UNAVAILABLE`. Concurrent
+  bursts can no longer verify more attempts than the lockout budget allows.
+- The shared client (IP) bucket is checked before every credential check but records
+  only failed checks, so concurrent correct logins behind one NAT never throttle each
+  other, and a success never clears failures recorded from that address. Success
+  clears only the principal bucket. Request flows record nothing when any key is
+  throttled.
+  Known accounts are counted by local user ID, so aliases share one budget.
+- `USER_DISABLED` is returned only after the correct password. Unverifiable stored
+  hashes do dummy Argon2 work and return `INVALID_CREDENTIALS`. Passwords over
+  `max_password_bytes` (default 1024) are never hashed, and dummy work uses the
+  configured Argon2 parameters (#38).
+- A failed password-worker spawn is no longer cached for the process lifetime (#39).
+- `verify_login_challenge_for` refuses a challenge for another principal or channel
+  before it spends an attempt (#27). `step_up_session` refuses an empty method list
+  and `RecentMfaPolicy` rejects MFA that records no method (#34, #41).
+- `logout(token, false)` with a superseded refresh token revokes the family as
+  `ReplayDetected`, and a rotation racing the call no longer survives it.
+- Neither rotation nor any access token extends a session past
+  `max_session_lifetime` (default 90 days): access-token expiry is capped at the
+  session's absolute deadline as well as the refresh token's.
+  New `AuthService::revoke_user_sessions` ends all of a user's refresh sessions, and
+  consuming a password-reset token now calls it (#33).
+- The `RefreshTokenStore` concurrency rules (rotation serialized with family
+  revocation, update-first compare-and-swap, revoked rows unchanged) apply to every
+  store, not only reuse-grace adopters.
+- `graphql_refresh_cookie_directive` blanks the refresh token in aliased, nested,
+  incomplete and partial-error responses. It sanitizes the response in place, so
+  keys keep their selection order, and leaves hex digests alone.
+- `AuthError`'s `Display` is the public message; internal detail goes only through
+  `diagnostic()`, `internal_detail()` and `Debug` (#28).
+- Access tokens need `typ`, `purpose` and the standard `scope` claim by default.
+  `Authorization` values need the `Bearer` scheme in the validator (by default),
+  `AuthService`, `ApiTokenService` and `CombinedAuth`, and in the `authorization`
+  connection-init key; `access_token`/`accessToken` keys carry the bare token (#32). HMAC algorithms need `accept_hs256(true)`
+  on every validator path, including custom key resolvers and HS384/HS512.
+- JWKS keys verify only their own algorithm; `oct` keys, duplicate `kid`s and
+  unidentified keys in multi-key documents are refused (#30). Stale keys stop
+  verifying after a bounded `max_stale` window (#29).
+- Default guards refuse session-bound delegations and `actor` tokens unless they call
+  `allow_delegated()`. `require_cnf` verifies the presented certificate or key
+  thumbprint, not just the presence of `cnf`.
+- A trailing scope wildcard matches whole segments only (`tenant.1*` no longer covers
+  `tenant.10.read`), and empty requirement lists deny (#35).
+- Purpose tokens carry a `jti` and can be consumed once (#34).
+- A resolved delegation reference never carries more than the delegated token's
+  grants, expiry and assurance; an expired reference, or one without an expiry, is
+  refused instead of inheriting the parent session's lifetime. Every session-bound delegation needs an enabled parent.
+- Reset tokens must carry the reset `typ` and are always recorded. Only a user's
+  newest outstanding token can be consumed, and consuming it invalidates the rest.
+- API-token authentication enforces the stored audience and a configured resource.
+- `Debug` no longer prints login codes, credential or token hashes, or the refresh
+  token in `GraphqlRefreshCookieDirective::Set`.
+- OIDC and OAuth 2.0 logins refuse disabled and missing local users before linking an
+  identity or issuing a session. OAuth state is bound to the initiating browser.
+- OIDC discovery requires `https` endpoints and an exact issuer; Entra tokens must
+  match the signing key's JWKS `issuer`. RFC 9207 `iss` is checked, `private_key_jwt`
+  assertions target the issuer and live at most ten minutes, `exchange_code` and
+  `fetch_profile` are crate-private, and client credentials are zeroized (#40).
+
+### Breaking changes
+
+- Required store methods: `RefreshTokenStore::revoke_refresh_tokens_for_user`,
+  `PasswordResetTokenStore::invalidate_password_reset_tokens_for_user`.
+  `OAuthStateStore` must persist `browser_binding_hash`. Default `ApiTokenStore` bulk
+  revocation returns `InvalidConfiguration` instead of `Ok(0)`.
+- New public fields on `AuthConfig`, `StoredRefreshToken`, `KeyRefreshPolicy`,
+  `IssuedPurposeToken`, `VerifiedPurposeToken`, `PrincipalReference`,
+  `RecentMfaPolicy`, `OidcProviderConfig`, `OidcCallbackInput`, `OAuthLoginState` and
+  `OidcAuthorizationRequest`. `RequireAuth` and `RequirePrincipal` are not unit structs.
+- New variants: `AuthError::{PasswordTooLong, PurposeTokenReplayed}`,
+  `ClaimRequirementError::{ConfirmationMismatch, ConfirmationNotPresented}`,
+  `AuthMethod::OAuth2`.
+- `issue_password_reset_token` is async and takes the store;
+  `issue_password_reset_token_with_ttl` and both `code_verifier` request fields are
+  removed; `exchange_code` and `fetch_profile` are crate-private. Provider configs and
+  token responses implement `Drop`. `AuthError` `Display` text changed.
+  `CombinedAuth` and `ApiTokenService` are no longer `UnwindSafe`/`RefUnwindSafe`.
+- `AuthService::authenticate_bearer`, `inject_http_auth`,
+  `authenticate_session_management_bearer`, `ApiTokenService::authenticate_bearer`
+  and `CombinedAuth::inject_http_auth` refuse a bare token with
+  `INVALID_BEARER_TOKEN`; pass bare tokens to `authenticate_access_token` /
+  `authenticate_token`.
+- Stricter defaults: `PurposePolicy`, `BearerParseMode`, `LegacyScopeClaims`,
+  `OAuthBrowserBinding`, a 90-day session lifetime and a 1024-byte password cap.
+  Golden scope vectors move to version `2.0`.
+- Looser default: `KeyRefreshPolicy::default()` is now `UseStale` with a one-hour
+  `max_stale` (it was `Reject`, contrary to the docs), so after a failed JWKS refresh
+  cached keys, including withdrawn ones, keep verifying for up to
+  `cache_ttl + max_stale` (about 65 minutes by default). Set
+  `stale_policy: StaleKeyPolicy::Reject` to keep failing closed (#29).
+- Error codes: disabled-with-wrong-password and unverifiable hashes give
+  `INVALID_CREDENTIALS`; foreign-audience API tokens `INVALID_API_TOKEN`; pre-0.27
+  delegation references and unprovisioned external users `FORBIDDEN`.
+- Behaviour: see Security for sign-out, guards, `require_cnf` and wildcards.
+  `ResolvedPrincipal::principal()` for a delegation is the narrowed view; delegation
+  and external login need the user in the `UserStore`; known-account counters use a
+  new key; request flows get at most half of a `MemoryAuthRateLimitStore`.
+- Stricter validation of challenge, TOTP, OIDC/OAuth 2.0, JWKS and TTL settings,
+  short TOTP secrets, reserved purpose-token claims, and `LegacyArray` scope claims
+  without `LegacyScopeClaims::Accept`. `with_refresh_rotation_clock` now drives all
+  session-clock time (#38).
+
+### Added
+
+- `AuthService::{revoke_user_sessions, consume_purpose_token,
+  verify_login_challenge_for, with_password_work_pool, password_hash_needs_rehash,
+  with_session_clock, with_clock}`, `ApiTokenService::with_clock` (#38).
+- `AuthConfig::{max_session_lifetime, password_hashing, previous_verification_keys}`,
+  `with_previous_verification_key`, `PasswordHashingConfig`, `PasswordWorkPool`,
+  `PasswordWorkPoolConfig` and their limit constants (#31, #33, #39).
+- `AuthError::diagnostic()`, `AccessTokenValidatorBuilder::key_ids`,
+  `KeyRefreshPolicy::max_stale`, `RotatingJwksKeySet::needs_refresh`.
+- `PresentedConfirmation`, `AccessTokenMetadata::{verify_confirmation, is_delegated}`,
+  `ClaimRequirements::validate_with_confirmation`, `*_with_confirmation` validator
+  methods and `allow_delegated()` on user and principal guards.
+- `RoleScopeCatalogue::{hierarchical_scope_match, apply_exact_only}`,
+  `PurposeTokenReplayStore`, `DelegationGrantCeiling`, `LoginChallengeExpectation`,
+  `RecentMfaPolicy::{new, required_amr, required_context}`.
+- `ApiTokenService::{with_expected_audience, with_expected_resource,
+  with_touch_observer}` and `ApiTokenTouchObserver`.
+- `OAuth2Provider::login_with_callback`, `OAuth2UserProvisioner`,
+  `OAuthBrowserBinding`, provider `issuer` settings, `OidcCallbackInput::{with_issuer,
+  with_browser_binding}`, `ClientJwtClaims` `x5t#S256` and `nbf`, OAuth limit constants.
+- Bounds: challenge `code_length` 6 to 12 and `max_attempts` 1 to 10; TOTP period 15
+  to 300 s, skew at most 2, secrets 20 to 64 bytes generated and 16 required (#38).
+
+### Fixed
+
+- Service-side issuance, validation, logout and revocation time comes from the
+  session clock; OIDC ID-token `exp`/`nbf` use the provider clock (#38).
+- `KeyRefreshPolicy::default()` matches the docs (#29; see the looser default under
+  Breaking changes). Static JWKS key handling
+  follows the docs, and multi-key rotation works without `key_id` (#30).
+- Key-refresh durations saturate; a failed API-token touch no longer fails
+  authentication; mixed `allowed_id_token_algs` fail at configuration time.
+- Negative `expires_in`, fragment or non-`https` redirect URIs and `state_ttl` over an
+  hour are refused; over-long profile values are dropped (#40).
+- `MemoryAuthRateLimitStore` keeps half its capacity for credential flows. The
+  password pool is sized from available parallelism (#39).
+- `AuthPrincipal::expires_at()` returns the access-token expiry, `access_token_ttl`
+  may not exceed `max_access_token_ttl`, `internal_detail()` covers
+  `InvalidOidcAuthorizationOptions`, `exact_only` catalogue flags can be enforced and
+  MFA AMR lists match case-insensitively (#38).
+- Store docs state required atomicity with portable SQL, and contradictory sign-out
+  and delegation-reference docs are fixed (#38).
+
+### Dependencies and repository
+
+- Upgrade `jsonwebtoken` to 11.1 (matching graphql-orm-router, removing a
+  duplicate) and the `tokio` dev-dependency to 1.54.1 (RUSTSEC-2026-0386).
+- Remove the direct `rsa` dependency; RS256 JWKS `n`/`e` are derived through
+  `jsonwebtoken`. RUSTSEC-2023-0071 (rsa 0.9) and RUSTSEC-2026-0387
+  (crypto-bigint 0.5) remain reachable only through `jsonwebtoken`'s
+  `rust_crypto` backend; dispositions are in `docs/dependency-advisories.md`.
+- Declare `rust-version = "1.90"` and `#![forbid(unsafe_code)]`.
+- CI runs `cargo audit`; add Dependabot, `CODEOWNERS` and `SECURITY.md`
+  (private vulnerability reporting). Drop the redundant `--no-default-features`
+  lane: the crate has no features and the release script refuses to add one.
+- Add a direct `zeroize` 1 dependency (already in the lock graph through
+  `jsonwebtoken`; no new crate is downloaded).
+- Add `tests/public_api.rs`, an external-consumer suite that implements host
+  stores outside the crate and covers login, validation, rotation, replay,
+  sign-out everywhere and error redaction through the public API (#38).
+
 ## 0.26.0
 
 - Add an opt-in grace window for reuse of a just-rotated refresh token, off by

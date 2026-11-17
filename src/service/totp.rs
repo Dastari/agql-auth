@@ -9,7 +9,8 @@ use crate::models::AuthRateLimitFlow;
 use crate::models::{TotpOptions, TotpProvisioning, TotpSecret};
 use crate::stores::{RefreshTokenStore, TotpReplayStore, UserStore};
 use crate::util::{
-    decode_base32_secret, generate_totp_code_for_step, totp_step, validate_totp_options,
+    MAX_GENERATED_TOTP_SECRET_BYTES, MIN_GENERATED_TOTP_SECRET_BYTES, decode_base32_secret,
+    generate_totp_code_for_step, totp_step, validate_totp_options,
 };
 use crate::{AuthError, AuthResult};
 
@@ -18,12 +19,17 @@ where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
-    /// Generates a random TOTP secret.
+    /// Generates a random TOTP secret of `num_bytes` bytes.
+    ///
+    /// `num_bytes` must be between 20 (the 160-bit length RFC 4226 recommends)
+    /// and 64 (the HMAC-SHA1 block size; longer keys are hashed down).
     pub fn generate_totp_secret(&self, num_bytes: usize) -> AuthResult<TotpSecret> {
-        if num_bytes < 10 {
-            return Err(AuthError::InvalidConfiguration(
-                "totp secret must be at least 10 bytes".to_string(),
-            ));
+        if !(MIN_GENERATED_TOTP_SECRET_BYTES..=MAX_GENERATED_TOTP_SECRET_BYTES).contains(&num_bytes)
+        {
+            return Err(AuthError::InvalidConfiguration(format!(
+                "totp secret must be between {MIN_GENERATED_TOTP_SECRET_BYTES} and \
+                 {MAX_GENERATED_TOTP_SECRET_BYTES} bytes"
+            )));
         }
 
         let mut raw_secret = vec![0u8; num_bytes];
@@ -36,6 +42,8 @@ where
     }
 
     /// Builds an `otpauth://` provisioning URI for an authenticator app.
+    ///
+    /// Rejects options and secrets that verification would refuse.
     pub fn build_totp_provisioning(
         &self,
         secret: &TotpSecret,
@@ -44,6 +52,7 @@ where
         options: TotpOptions,
     ) -> AuthResult<TotpProvisioning> {
         validate_totp_options(&options)?;
+        decode_base32_secret(&secret.base32_secret)?;
         let issuer = issuer.into();
         let account_name = account_name.into();
         let label = format!("{}:{}", issuer, account_name);
@@ -90,6 +99,12 @@ where
     /// again within its time window. It does not check factor ownership or
     /// establish MFA/session state. For one-time acceptance use
     /// [`Self::verify_totp_code_with_replay_store_and_metadata`].
+    ///
+    /// The attempt is counted against the principal and client buckets before
+    /// the code is checked, so concurrent guesses cannot exceed the lockout
+    /// budget and a store that cannot count fails with
+    /// `AuthServiceUnavailable` for every code. Success clears the principal
+    /// bucket and refunds only this attempt from the client bucket.
     pub async fn verify_totp_code_for_principal(
         &self,
         principal_id: &str,
@@ -99,32 +114,26 @@ where
         now: OffsetDateTime,
         metadata: ClientMetadata,
     ) -> AuthResult<()> {
+        let policy = &self.config.rate_limits.credential;
+        let secret = prepare_totp_secret(secret_base32, &options)?;
         let rate_limit_keys = self.rate_limit_keys(
             AuthRateLimitFlow::TotpVerification,
             Some(principal_id),
             &metadata,
         );
-        let rate_limit_permit = self
-            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let reservation = self
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
 
-        match self.verify_totp_code_step(secret_base32, code, options, now) {
-            Ok(_) => {
-                self.clear_rate_limit_attempts(
-                    &self.config.rate_limits.credential,
-                    &rate_limit_permit,
-                )
-                .await?;
-                Ok(())
+        match match_totp_code(&secret, code, &options, now) {
+            Ok(_) => self.settle_rate_limit_success(policy, reservation).await,
+            Err(AuthError::InvalidTotpCode) => {
+                self.settle_rate_limit_failure(policy, reservation).await?;
+                Err(AuthError::InvalidTotpCode)
             }
             Err(err) => {
-                if matches!(err, AuthError::InvalidTotpCode) {
-                    self.record_rate_limit_attempt(
-                        &self.config.rate_limits.credential,
-                        &rate_limit_keys,
-                    )
+                self.refund_rate_limit_reservation(policy, reservation)
                     .await?;
-                }
                 Err(err)
             }
         }
@@ -172,6 +181,9 @@ where
     /// time, verifies factor ownership and session binding, and only then records
     /// accepted MFA (for example through [`Self::step_up_session`]). This method
     /// neither enrolls a factor nor changes session assurance itself.
+    ///
+    /// Attempts are counted before the code is checked, as for
+    /// [`Self::verify_totp_code_for_principal`]; a replayed step stays counted.
     #[allow(clippy::too_many_arguments)]
     pub async fn verify_totp_code_with_replay_store_and_metadata<S>(
         &self,
@@ -187,40 +199,38 @@ where
     where
         S: TotpReplayStore,
     {
+        let policy = &self.config.rate_limits.credential;
+        let secret = prepare_totp_secret(secret_base32, &options)?;
         let rate_limit_keys = self.rate_limit_keys(
             AuthRateLimitFlow::TotpVerification,
             Some(principal_id),
             &metadata,
         );
-        let rate_limit_permit = self
-            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let reservation = self
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
 
-        let step = match self.verify_totp_code_step(secret_base32, code, options, now) {
+        let step = match match_totp_code(&secret, code, &options, now) {
             Ok(step) => step,
+            Err(AuthError::InvalidTotpCode) => {
+                self.settle_rate_limit_failure(policy, reservation).await?;
+                return Err(AuthError::InvalidTotpCode);
+            }
             Err(err) => {
-                if matches!(err, AuthError::InvalidTotpCode) {
-                    self.record_rate_limit_attempt(
-                        &self.config.rate_limits.credential,
-                        &rate_limit_keys,
-                    )
+                self.refund_rate_limit_reservation(policy, reservation)
                     .await?;
-                }
                 return Err(err);
             }
         };
-        let consumed = store
+        // A replayed step and a replay-store error stay counted.
+        if !store
             .consume_totp_step(principal_id, factor_id, step, now)
-            .await?;
-        if consumed {
-            self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
-                .await?;
-            Ok(())
-        } else {
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
-            Err(AuthError::TotpCodeReplayed)
+            .await?
+        {
+            self.settle_rate_limit_failure(policy, reservation).await?;
+            return Err(AuthError::TotpCodeReplayed);
         }
+        self.settle_rate_limit_success(policy, reservation).await
     }
 
     fn verify_totp_code_step(
@@ -230,33 +240,46 @@ where
         options: TotpOptions,
         now: OffsetDateTime,
     ) -> AuthResult<i64> {
-        validate_totp_options(&options)?;
-        if !code.chars().all(|ch| ch.is_ascii_digit()) {
-            return Err(AuthError::InvalidTotpCode);
-        }
-
-        let secret = decode_base32_secret(secret_base32)?;
-        let current_step = totp_step(now, options.period_seconds)?;
-        let skew = i64::try_from(options.allowed_skew)
-            .map_err(|_| AuthError::InvalidConfiguration("invalid totp skew".to_string()))?;
-
-        for offset in -skew..=skew {
-            let step = current_step + offset;
-            if step < 0 {
-                continue;
-            }
-            let expected = generate_totp_code_for_step(
-                &secret,
-                u64::try_from(step).map_err(|_| {
-                    AuthError::InvalidConfiguration("invalid totp step".to_string())
-                })?,
-                options.digits,
-            )?;
-            if expected.as_bytes().ct_eq(code.as_bytes()).into() {
-                return Ok(step);
-            }
-        }
-
-        Err(AuthError::InvalidTotpCode)
+        let secret = prepare_totp_secret(secret_base32, &options)?;
+        match_totp_code(&secret, code, &options, now)
     }
+}
+
+/// Validates host-supplied options and secret before any attempt is counted.
+fn prepare_totp_secret(secret_base32: &str, options: &TotpOptions) -> AuthResult<Vec<u8>> {
+    validate_totp_options(options)?;
+    decode_base32_secret(secret_base32)
+}
+
+fn match_totp_code(
+    secret: &[u8],
+    code: &str,
+    options: &TotpOptions,
+    now: OffsetDateTime,
+) -> AuthResult<i64> {
+    if !code.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(AuthError::InvalidTotpCode);
+    }
+
+    let current_step = totp_step(now, options.period_seconds)?;
+    let skew = i64::try_from(options.allowed_skew)
+        .map_err(|_| AuthError::InvalidConfiguration("invalid totp skew".to_string()))?;
+
+    for offset in -skew..=skew {
+        let step = current_step + offset;
+        if step < 0 {
+            continue;
+        }
+        let expected = generate_totp_code_for_step(
+            secret,
+            u64::try_from(step)
+                .map_err(|_| AuthError::InvalidConfiguration("invalid totp step".to_string()))?,
+            options.digits,
+        )?;
+        if expected.as_bytes().ct_eq(code.as_bytes()).into() {
+            return Ok(step);
+        }
+    }
+
+    Err(AuthError::InvalidTotpCode)
 }

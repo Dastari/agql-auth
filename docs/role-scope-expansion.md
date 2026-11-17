@@ -43,6 +43,22 @@ on that error, and return `Unavailable` when no signature-verified snapshot is
 usable. This avoids silently dropping inherited scopes without putting HTTP or
 database policy into this crate.
 
+Expansion only lists scopes; the catalogue's `exact_only` flags and
+`exact_only_scope_patterns` take effect in the request-time matcher. Build it
+from the verified catalogue so wildcard grants and super-scopes cannot satisfy
+those requirements:
+
+```rust
+let matcher = catalogue.hierarchical_scope_match(
+    HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+)?;
+assert!(!matcher.matches("inventory.*", "inventory.write"));
+```
+
+`RoleScopeCatalogue::apply_exact_only` merges the same classification into
+options the host builds itself. A matcher built without either ignores the
+flags.
+
 Issuers can install `AdditionalTokenRolesProvider` to load current membership
 for refreshable sessions. The hook runs on initial issuance and every refresh,
 but never for sessionless or session-bound delegated grants. Decoded values are

@@ -16,6 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             allowed_amr: vec!["totp".to_string(), "webauthn".to_string()],
             allowed_acr: vec![],
             match_mode: Default::default(),
+            required_amr: vec![],
+            required_context: None,
         },
     );
 

@@ -3,7 +3,7 @@
 //! Import this module when you want the primary service, models, stores,
 //! guards, OIDC helpers, and session types in one place.
 
-pub use crate::api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use crate::api_tokens::{ApiTokenService, ApiTokenTouchObserver, DEFAULT_API_TOKEN_PREFIX};
 pub use crate::assurance::{
     AssuranceDenial, AssuranceDenialCode, AssuranceEvaluation, AssuranceEvaluationState,
     AssuranceInputError, AssuranceMatchMode, AssurancePolicyId, AssurancePolicyIdError,
@@ -15,7 +15,7 @@ pub use crate::assurance::{
 pub use crate::channel::ChannelIdentity;
 pub use crate::claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirements,
-    ConfirmationClaims, ExactOperationBinding,
+    ConfirmationClaims, ExactOperationBinding, PresentedConfirmation,
 };
 pub use crate::client_auth::{
     ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner, TokenEndpointAuthMethod,
@@ -24,8 +24,9 @@ pub use crate::clock::{Clock, FixedClock, SystemClock};
 pub use crate::combined::{AccessTokenAuth, CombinedAuth};
 pub use crate::config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
-    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    ClientMetadata, JwtSigningConfig, JwtVerificationKey, LegacyScopeClaims, MicrosoftEntraConfig,
+    MicrosoftEntraTenant, OAuthBrowserBinding, OAuthResponseMode, OidcProviderConfig,
+    OidcProviderKind,
 };
 pub use crate::decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
@@ -55,23 +56,25 @@ pub use crate::models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
     AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
     AuthRateLimitSnapshot, AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken,
-    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims,
-    OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult,
-    OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
-    RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
-    StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
+    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeExpectation, LoginChallengeOptions,
+    MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
+    OidcLoginResult, OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest,
+    PurposeTokenValidation, RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge,
+    StoredRefreshToken, StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use crate::oauth2::{
-    OAuth2AuthorizationRequest, OAuth2CallbackOutcome, OAuth2EmailVerification,
+    OAuth2AuthorizationRequest, OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2LoginResult,
     OAuth2ProfileMapping, OAuth2Provider, OAuth2ProviderConfig, OAuth2TokenResponse,
-    OAuth2UserProfile, OAuth2VerifiedEmailList, OAuth2VerifiedEmailSelection,
+    OAuth2UserProfile, OAuth2UserProvisioner, OAuth2VerifiedEmailList,
+    OAuth2VerifiedEmailSelection,
 };
 pub use crate::oidc::{
-    ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,
-    OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
-    ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
-    hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+    ClaimsMapper, ExternalUserProvisioner, MAX_OAUTH_STATE_TTL_SECONDS, MappedClaims,
+    MicrosoftClaimsMapper, NoopClaimsMapper, OidcCallbackOutcome, OidcDiscoveryDocument,
+    OidcHttpClient, OidcProvider, PkcePair, ProvisionedExternalUser, generate_oauth_state,
+    generate_oidc_nonce, generate_pkce_pair, hash_oauth_state, pkce_s256_challenge,
+    stable_external_subject,
 };
 pub use crate::oidc_authorization::{
     MAX_OIDC_AUTHORIZATION_TOTAL_VALUE_LENGTH, MAX_OIDC_AUTHORIZATION_VALUE_LENGTH,
@@ -80,8 +83,8 @@ pub use crate::oidc_authorization::{
     OidcIdTokenClaimRequest, OidcPrompt,
 };
 pub use crate::principal_reference::{
-    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
-    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    CurrentPrincipalResolver, DelegationGrantCeiling, MAX_SESSION_VERSION_LENGTH,
+    PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
     VerifiedActiveUserSessionResolver,
 };
 pub use crate::purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
@@ -101,7 +104,8 @@ pub use crate::session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionCo
 pub use crate::stores::{
     AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,
     LoginChallengeStore, MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
+    PasswordResetTokenStore, PurposeTokenReplayStore, RefreshTokenStore, TotpReplayStore,
+    UserStore,
 };
 pub use crate::token_decode::{
     BearerParseMode, MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH, MAX_ACCESS_TOKEN_SCOPE_LENGTH,

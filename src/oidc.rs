@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -13,11 +12,17 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
+use zeroize::Zeroize;
 
-use crate::client_auth::{TokenEndpointAuthMethod, client_authentication};
+use crate::client_auth::{
+    ClientJwtAudiences, TokenEndpointAuthMethod, client_authentication, zeroize_pairs,
+};
 use crate::clock::{Clock, SystemClock};
-use crate::config::{ClientMetadata, OAuthResponseMode, OidcProviderConfig, OidcProviderKind};
+use crate::config::{
+    ClientMetadata, OAuthBrowserBinding, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+};
 use crate::models::{
     ExternalIdentity, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
     OidcLoginResult, OidcTokenResponse, ValidatedOidcClaims,
@@ -58,7 +63,7 @@ const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'|')
     .add(b'}');
-const MICROSOFT_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
+pub(crate) const MICROSOFT_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 #[async_trait]
 /// Minimal HTTP abstraction used by [`OidcProvider`] and [`crate::OAuth2Provider`].
@@ -68,6 +73,12 @@ const MICROSOFT_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad
 /// non-success status or a body that is not JSON, bound response sizes and
 /// timeouts, and never log request headers, form values or response bodies:
 /// they carry client secrets, authorization codes and provider tokens.
+///
+/// Implementations must not follow redirects. Return `Err` for any 3xx
+/// response instead: a client that follows a 307 or 308 re-sends the client
+/// secret, authorization code, PKCE verifier or bearer token to the redirect
+/// target, and a followed GET can replace a validated endpoint with another
+/// origin.
 pub trait OidcHttpClient: Send + Sync {
     /// Performs a JSON GET request.
     async fn get_json(&self, url: &str) -> AuthResult<JsonValue>;
@@ -240,6 +251,13 @@ impl ClaimsMapper for NoopClaimsMapper {
 
 #[async_trait]
 /// Host extension point for external user provisioning and account linking.
+///
+/// [`OidcProvider::login_with_callback`] re-reads the returned user from the
+/// [`AuthService`] user store before linking or issuing a session, and refuses
+/// a missing user ([`AuthError::ExternalLoginRejected`]) or a disabled one
+/// ([`AuthError::UserDisabled`]). The returned user ID must therefore name a
+/// stored user. Implementations need not check `disabled` themselves, but must
+/// apply any other account policy (deletion, lockout, email trust).
 pub trait ExternalUserProvisioner: Send + Sync {
     /// Resolves a validated external identity to a local user.
     ///
@@ -536,6 +554,7 @@ impl OidcProvider {
                 AuthError::OidcDiscovery("provider discovery response was invalid".to_string())
             })?;
         document.raw = raw;
+        self.validate_discovery_document(&document)?;
         let expires_at = now
             .checked_add(self.config.discovery_cache_ttl)
             .ok_or_else(|| {
@@ -554,9 +573,59 @@ impl OidcProvider {
         Ok(document)
     }
 
+    /// Requires the configured issuer and secure endpoints in a fetched
+    /// discovery document.
+    fn validate_discovery_document(&self, document: &OidcDiscoveryDocument) -> AuthResult<()> {
+        if !self
+            .config
+            .expected_discovery_issuers()
+            .iter()
+            .any(|expected| expected == &document.issuer)
+        {
+            return Err(AuthError::OidcDiscovery(
+                "provider discovery issuer does not match the configured issuer".to_string(),
+            ));
+        }
+        let userinfo_endpoint = match document.raw.get("userinfo_endpoint") {
+            None | Some(JsonValue::Null) => None,
+            Some(JsonValue::String(endpoint)) => Some(endpoint.as_str()),
+            Some(_) => {
+                return Err(AuthError::OidcDiscovery(
+                    "provider discovery response was invalid".to_string(),
+                ));
+            }
+        };
+        if ![
+            document.authorization_endpoint.as_str(),
+            document.token_endpoint.as_str(),
+            document.jwks_uri.as_str(),
+        ]
+        .into_iter()
+        .chain(userinfo_endpoint)
+        .all(is_secure_endpoint_url)
+        {
+            return Err(AuthError::OidcDiscovery(
+                "provider discovery endpoint is not an https URL".to_string(),
+            ));
+        }
+        match document
+            .raw
+            .get("authorization_response_iss_parameter_supported")
+        {
+            None | Some(JsonValue::Null | JsonValue::Bool(_)) => Ok(()),
+            Some(_) => Err(AuthError::OidcDiscovery(
+                "provider discovery response was invalid".to_string(),
+            )),
+        }
+    }
+
     /// Creates an authorization URL and stores one-time state.
     ///
-    /// The generated request always includes PKCE and nonce.
+    /// The generated request always includes PKCE and nonce. With the default
+    /// [`OAuthBrowserBinding::Required`], set
+    /// [`OidcAuthorizationRequest::browser_binding`] as a cookie on the
+    /// browser before redirecting it, and pass it back with
+    /// [`OidcCallbackInput::with_browser_binding`].
     pub async fn create_authorization_request<S>(
         &self,
         state_store: &S,
@@ -602,6 +671,8 @@ impl OidcProvider {
         })?;
         let scopes = self.config.scopes();
         let scope = scopes.join(" ");
+        let (browser_binding, browser_binding_hash) =
+            new_browser_binding(self.config.browser_binding);
         let state_record = OAuthLoginState {
             provider_name: self.config.provider_name.clone(),
             state_hash: hash_oauth_state(&state),
@@ -611,6 +682,7 @@ impl OidcProvider {
             scopes: scopes.clone(),
             authorization_policy: authorization_policy.clone(),
             response_mode: self.config.response_mode,
+            browser_binding_hash,
             created_at: now,
             expires_at,
             consumed_at: None,
@@ -653,8 +725,8 @@ impl OidcProvider {
             provider_name: self.config.provider_name.clone(),
             state,
             nonce,
-            code_verifier: pkce.code_verifier,
-            code_challenge: pkce.code_challenge,
+            code_challenge: pkce.code_challenge.clone(),
+            browser_binding,
             authorization_policy,
             expires_at,
         })
@@ -681,10 +753,17 @@ impl OidcProvider {
     /// Handles a callback delivered in `delivered_mode`.
     ///
     /// For [`OAuthResponseMode::FormPost`], the host parses `code`, `state`,
-    /// `error` and `error_description` from the `POST` form body into
+    /// `iss`, `error` and `error_description` from the `POST` form body into
     /// [`OidcCallbackInput`]. A delivery mode other than the configured mode is
     /// refused before the state is consumed; a consumed state bound to another
     /// mode is refused too.
+    ///
+    /// After consumption the state must match the browser binding
+    /// ([`AuthError::InvalidOAuthState`] otherwise). When `iss` is present, or
+    /// the discovery document sets
+    /// `authorization_response_iss_parameter_supported`, it must equal the
+    /// provider issuer before the code is exchanged (RFC 9207), and must also
+    /// equal the validated ID token `iss`.
     pub async fn handle_callback_in_mode<S>(
         &self,
         state_store: &S,
@@ -730,6 +809,12 @@ impl OidcProvider {
             return Err(AuthError::InvalidOAuthState);
         }
 
+        verify_browser_binding(
+            self.config.browser_binding,
+            state.browser_binding_hash.as_deref(),
+            input.browser_binding.as_deref(),
+        )?;
+
         if state.response_mode != delivered_mode {
             return Err(AuthError::OidcCallback(
                 "authorization response mode does not match state".to_string(),
@@ -742,10 +827,35 @@ impl OidcProvider {
             })?;
         }
 
+        let discovery = self.discover().await?;
+        let advertised = discovery
+            .raw
+            .get("authorization_response_iss_parameter_supported")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        match input.iss.as_deref() {
+            None if advertised => {
+                return Err(AuthError::OidcCallback(
+                    "authorization response is missing iss".to_string(),
+                ));
+            }
+            Some(iss) if !issuer_template_matches(&discovery.issuer, iss) => {
+                return Err(AuthError::OidcCallback(
+                    "authorization response iss does not match the provider".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
         let token_response = self.exchange_code(&code, &state).await?;
         let claims = self
             .validate_id_token(&token_response.id_token, &state.nonce)
             .await?;
+        if input.iss.as_deref().is_some_and(|iss| iss != claims.issuer) {
+            return Err(AuthError::OidcCallback(
+                "authorization response iss does not match the ID token".to_string(),
+            ));
+        }
         let authorization = self.enforce_authorization_policy(
             state.authorization_policy.as_ref(),
             &claims,
@@ -766,6 +876,12 @@ impl OidcProvider {
     /// This method validates the provider callback, resolves or links a local
     /// user through host extension points, and returns an [`OidcLoginResult`].
     /// Use [`Self::login_with_callback_in_mode`] for `form_post`.
+    ///
+    /// After provisioning, the local user is re-read from the
+    /// [`AuthService`]'s [`UserStore`]: a disabled user is refused with
+    /// [`AuthError::UserDisabled`] and a missing user with
+    /// [`AuthError::ExternalLoginRejected`], before any identity is linked or
+    /// updated and before a session is issued.
     #[allow(clippy::too_many_arguments)]
     pub async fn login_with_callback<U, R, S, E, P, M>(
         &self,
@@ -845,6 +961,9 @@ impl OidcProvider {
                     .to_string(),
             ));
         }
+        auth_service
+            .require_enabled_external_user(&provisioned_user.user_id)
+            .await?;
 
         let claims_snapshot = outcome.claims.raw.clone();
         let external_identity = if let Some(mut identity) = existing_identity {
@@ -920,18 +1039,26 @@ impl OidcProvider {
     /// Client authentication follows
     /// [`OidcProviderConfig::token_endpoint_auth_method`]. A configured
     /// [`crate::ClientJwtSigner`] mints a fresh JWT for this request only.
-    pub async fn exchange_code(
+    /// Only the callback path calls this, after it consumed the state.
+    pub(crate) async fn exchange_code(
         &self,
         code: &str,
         state: &OAuthLoginState,
     ) -> AuthResult<OidcTokenResponse> {
         let discovery = self.discover().await?;
+        let assertion_audience = match self.config.provider_kind {
+            OidcProviderKind::MicrosoftEntra => discovery.token_endpoint.as_str(),
+            OidcProviderKind::Generic => discovery.issuer.as_str(),
+        };
         let authentication = client_authentication(
             self.config.token_endpoint_auth_method,
             &self.config.client_id,
             self.config.client_secret.as_deref(),
             self.config.client_jwt.as_ref(),
-            &discovery.token_endpoint,
+            ClientJwtAudiences {
+                assertion: assertion_audience,
+                signed_secret: &discovery.token_endpoint,
+            },
             self.clock.now(),
         )
         .map_err(|_| {
@@ -952,30 +1079,54 @@ impl OidcProvider {
         } else {
             let mut headers = authentication.headers;
             headers.push((ACCEPT_JSON.0.to_string(), ACCEPT_JSON.1.to_string()));
-            self.http_client
+            let response = self
+                .http_client
                 .post_form_json_with_headers(&discovery.token_endpoint, &headers, &form)
-                .await
+                .await;
+            zeroize_pairs(&mut headers);
+            response
         };
-        let raw = response.map_err(|_| {
+        zeroize_pairs(&mut form);
+        let mut raw = response.map_err(|_| {
             AuthError::OidcTokenExchange("provider token endpoint request failed".to_string())
         })?;
 
         if raw.get("error").is_some() {
+            zeroize_json(&mut raw);
             return Err(AuthError::OidcTokenExchange(
                 "provider token endpoint returned an error".to_string(),
             ));
         }
 
-        let mut token_response: OidcTokenResponse =
-            serde_json::from_value(raw.clone()).map_err(|_| {
-                AuthError::OidcTokenExchange("provider token response was invalid".to_string())
-            })?;
+        let mut token_response: OidcTokenResponse = match serde_json::from_value(raw.clone()) {
+            Ok(token_response) => token_response,
+            Err(_) => {
+                zeroize_json(&mut raw);
+                return Err(AuthError::OidcTokenExchange(
+                    "provider token response was invalid".to_string(),
+                ));
+            }
+        };
         token_response.raw = raw;
+        if token_response
+            .expires_in
+            .is_some_and(|expires_in| expires_in < 0)
+        {
+            return Err(AuthError::OidcTokenExchange(
+                "provider token response expires_in is invalid".to_string(),
+            ));
+        }
 
         Ok(token_response)
     }
 
     /// Validates an OIDC ID token against discovery, JWKS, audience, issuer, and nonce.
+    ///
+    /// `exp`, `nbf`, `iat` and `auth_time` are checked against the provider's
+    /// clock (see [`Self::new_with_clock`]) with
+    /// [`OidcProviderConfig::clock_skew`]. For Microsoft Entra, a signing key
+    /// that carries JWKS `issuer` metadata must match the token `iss`, with
+    /// `{tenantid}` substituted by the token `tid`.
     pub async fn validate_id_token(
         &self,
         id_token: &str,
@@ -988,7 +1139,7 @@ impl OidcProvider {
         let kid = header.kid.clone().ok_or_else(|| {
             AuthError::OidcTokenValidation("ID token header is missing kid".to_string())
         })?;
-        let allowed_algorithms = self.allowed_algorithms()?;
+        let allowed_algorithms = self.config.id_token_algorithms()?;
 
         if !allowed_algorithms.contains(&header.alg) {
             return Err(AuthError::OidcTokenValidation(format!(
@@ -997,8 +1148,8 @@ impl OidcProvider {
             )));
         }
 
-        let jwk = match self.jwk_for_kid(&kid, false).await? {
-            Some(jwk) => jwk,
+        let (jwk, key_issuer) = match self.jwk_for_kid(&kid, false).await? {
+            Some(key) => key,
             None if self.allow_forced_jwks_refresh()? => self
                 .jwk_for_kid(&kid, true)
                 .await?
@@ -1015,8 +1166,10 @@ impl OidcProvider {
         validation.algorithms = allowed_algorithms;
         validation.set_audience(std::slice::from_ref(&self.config.client_id));
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "iat"]);
-        validation.validate_nbf = true;
-        validation.leeway = self.clock_skew_seconds()?;
+        // `exp` and `nbf` are checked in `validate_claims` against the
+        // injected clock rather than the system clock.
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
 
         let token_data = decode::<RawOidcIdTokenClaims>(id_token, &decoding_key, &validation)
             .map_err(|_| {
@@ -1025,15 +1178,28 @@ impl OidcProvider {
                 )
             })?;
 
-        self.validate_claims(token_data.claims, expected_nonce, &discovery)
+        self.validate_claims(
+            token_data.claims,
+            expected_nonce,
+            &discovery,
+            key_issuer.as_deref(),
+        )
     }
 
-    async fn jwk_for_kid(&self, kid: &str, force_refresh: bool) -> AuthResult<Option<Jwk>> {
+    async fn jwk_for_kid(
+        &self,
+        kid: &str,
+        force_refresh: bool,
+    ) -> AuthResult<Option<(Jwk, Option<String>)>> {
         let jwks = self.jwks(force_refresh).await?;
-        Ok(jwks.find(kid).cloned())
+        Ok(jwks
+            .jwks
+            .find(kid)
+            .cloned()
+            .map(|jwk| (jwk, jwks.key_issuers.get(kid).cloned())))
     }
 
-    async fn jwks(&self, force_refresh: bool) -> AuthResult<JwkSet> {
+    async fn jwks(&self, force_refresh: bool) -> AuthResult<CachedJwks> {
         let now = self.clock.now();
         if !force_refresh
             && let Some(cache) = self
@@ -1044,7 +1210,7 @@ impl OidcProvider {
                 .cloned()
             && cache.expires_at > now
         {
-            return Ok(cache.jwks);
+            return Ok(cache);
         }
 
         let discovery = self.discover().await?;
@@ -1053,23 +1219,26 @@ impl OidcProvider {
             .get_json(&discovery.jwks_uri)
             .await
             .map_err(|_| AuthError::OidcDiscovery("provider JWKS request failed".to_string()))?;
+        let key_issuers = jwks_key_issuers(&raw);
         let jwks: JwkSet = serde_json::from_value(raw).map_err(|_| {
             AuthError::OidcDiscovery("provider JWKS response was invalid".to_string())
         })?;
         let expires_at = now
             .checked_add(self.config.jwks_cache_ttl)
             .ok_or_else(|| AuthError::OidcDiscovery("JWKS cache expiry overflowed".to_string()))?;
+        let cache = CachedJwks {
+            jwks,
+            key_issuers,
+            expires_at,
+        };
 
         *self
             .jwks_cache
             .lock()
             .map_err(|_| AuthError::OidcDiscovery("JWKS cache lock poisoned".to_string()))? =
-            Some(CachedJwks {
-                jwks: jwks.clone(),
-                expires_at,
-            });
+            Some(cache.clone());
 
-        Ok(jwks)
+        Ok(cache)
     }
 
     fn allow_forced_jwks_refresh(&self) -> AuthResult<bool> {
@@ -1107,6 +1276,7 @@ impl OidcProvider {
         claims: RawOidcIdTokenClaims,
         expected_nonce: &str,
         discovery: &OidcDiscoveryDocument,
+        key_issuer: Option<&str>,
     ) -> AuthResult<ValidatedOidcClaims> {
         let nonce = claims.nonce.clone().ok_or_else(|| {
             AuthError::OidcTokenValidation("ID token is missing nonce".to_string())
@@ -1151,6 +1321,14 @@ impl OidcProvider {
                     "Microsoft consumer accounts are not enabled".to_string(),
                 ));
             }
+
+            if key_issuer.is_some_and(|key_issuer| {
+                !issuer_pattern_matches(key_issuer, &claims.iss, Some(tid))
+            }) {
+                return Err(AuthError::OidcTokenValidation(
+                    "ID token issuer does not match the signing key issuer".to_string(),
+                ));
+            }
         }
 
         let now_datetime = self.clock.now();
@@ -1159,6 +1337,21 @@ impl OidcProvider {
             .ok_or_else(|| {
                 AuthError::OidcTokenValidation("OIDC clock-skew arithmetic overflowed".to_string())
             })?;
+        let earliest = now_datetime
+            .checked_sub(self.config.clock_skew)
+            .ok_or_else(|| {
+                AuthError::OidcTokenValidation("OIDC clock-skew arithmetic overflowed".to_string())
+            })?;
+        if claims.exp <= earliest.unix_timestamp() {
+            return Err(AuthError::OidcTokenValidation(
+                "ID token signature, time, or claim types are invalid".to_string(),
+            ));
+        }
+        if claims.nbf.is_some_and(|nbf| nbf > latest.unix_timestamp()) {
+            return Err(AuthError::OidcTokenValidation(
+                "ID token signature, time, or claim types are invalid".to_string(),
+            ));
+        }
         if claims.iat > latest.unix_timestamp() {
             return Err(AuthError::OidcTokenValidation(
                 "ID token iat is in the future".to_string(),
@@ -1225,9 +1418,15 @@ impl OidcProvider {
                 .extra
                 .get("email_verified")
                 .and_then(parse_email_verified),
-            email: claims.email,
-            name: claims.name,
-            preferred_username: claims.preferred_username,
+            email: claims
+                .email
+                .filter(|email| email.len() <= crate::MAX_OAUTH2_EMAIL_LENGTH),
+            name: claims
+                .name
+                .filter(|name| name.len() <= crate::MAX_OAUTH2_NAME_LENGTH),
+            preferred_username: claims
+                .preferred_username
+                .filter(|username| username.len() <= crate::MAX_OAUTH2_NAME_LENGTH),
             roles: claims.roles,
             groups: claims.groups,
             raw,
@@ -1388,26 +1587,6 @@ impl OidcProvider {
             .iter()
             .any(|allowed| issuer_pattern_matches(allowed, issuer, tenant_id))
     }
-
-    fn allowed_algorithms(&self) -> AuthResult<Vec<Algorithm>> {
-        self.config
-            .allowed_id_token_algs
-            .iter()
-            .map(|alg| {
-                Algorithm::from_str(alg).map_err(|_| {
-                    AuthError::InvalidConfiguration(format!(
-                        "unsupported OIDC ID token algorithm: {alg}"
-                    ))
-                })
-            })
-            .collect()
-    }
-
-    fn clock_skew_seconds(&self) -> AuthResult<u64> {
-        u64::try_from(self.config.clock_skew.whole_seconds()).map_err(|_| {
-            AuthError::InvalidConfiguration("OIDC clock_skew is too large".to_string())
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -1419,7 +1598,32 @@ struct CachedDiscovery {
 #[derive(Clone)]
 struct CachedJwks {
     jwks: JwkSet,
+    /// Per-key `issuer` metadata (Microsoft Entra), keyed by the first key
+    /// with each `kid`, matching [`JwkSet::find`].
+    key_issuers: HashMap<String, String>,
     expires_at: OffsetDateTime,
+}
+
+fn jwks_key_issuers(raw: &JsonValue) -> HashMap<String, String> {
+    let mut issuers = HashMap::new();
+    let mut seen = HashSet::new();
+    for key in raw
+        .get("keys")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(kid) = key.get("kid").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        if !seen.insert(kid.to_string()) {
+            continue;
+        }
+        if let Some(issuer) = key.get("issuer").and_then(JsonValue::as_str) {
+            issuers.insert(kid.to_string(), issuer.to_string());
+        }
+    }
+    issuers
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1566,6 +1770,81 @@ fn issuer_pattern_matches(pattern: &str, issuer: &str, tenant_id: Option<&str>) 
         == issuer
 }
 
+/// Whether `value` equals `pattern`, where a `{tenantid}` placeholder in
+/// `pattern` stands for one non-empty path segment.
+fn issuer_template_matches(pattern: &str, value: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once("{tenantid}") else {
+        return pattern == value;
+    };
+    value.len() > prefix.len() + suffix.len()
+        && value.starts_with(prefix)
+        && value.ends_with(suffix)
+        && !value[prefix.len()..value.len() - suffix.len()].contains(['/', '?', '#', '{', '}'])
+}
+
+/// Creates the browser-binding secret and its stored hash.
+pub(crate) fn new_browser_binding(mode: OAuthBrowserBinding) -> (Option<String>, Option<String>) {
+    if !mode.is_required() {
+        return (None, None);
+    }
+    let binding = generate_urlsafe_secret();
+    let hash = hash_oauth_state(&binding);
+    (Some(binding), Some(hash))
+}
+
+/// Checks a callback's browser binding against its consumed state.
+///
+/// A state that carries a hash always requires the matching value. A state
+/// without one is accepted only when the provider opted out.
+pub(crate) fn verify_browser_binding(
+    mode: OAuthBrowserBinding,
+    stored_hash: Option<&str>,
+    presented: Option<&str>,
+) -> AuthResult<()> {
+    match (stored_hash, presented) {
+        (Some(stored_hash), Some(presented)) => {
+            let presented_hash = hash_oauth_state(presented);
+            if bool::from(presented_hash.as_bytes().ct_eq(stored_hash.as_bytes())) {
+                Ok(())
+            } else {
+                Err(AuthError::InvalidOAuthState)
+            }
+        }
+        (Some(_), None) => Err(AuthError::InvalidOAuthState),
+        (None, _) if mode.is_required() => Err(AuthError::InvalidOAuthState),
+        (None, _) => Ok(()),
+    }
+}
+
+/// Overwrites provider tokens and every string in their raw response.
+pub(crate) fn zeroize_provider_tokens<'a>(
+    tokens: impl IntoIterator<Item = Option<&'a mut String>>,
+    raw: &mut JsonValue,
+) {
+    for token in tokens.into_iter().flatten() {
+        token.zeroize();
+    }
+    zeroize_json(raw);
+}
+
+/// Overwrites every string (keys and values) in a JSON value.
+pub(crate) fn zeroize_json(value: &mut JsonValue) {
+    match value {
+        JsonValue::String(text) => text.zeroize(),
+        JsonValue::Array(values) => values.iter_mut().for_each(zeroize_json),
+        JsonValue::Object(map) => {
+            for (_, value) in map.iter_mut() {
+                zeroize_json(value);
+            }
+            let entries = std::mem::take(map);
+            for (mut key, _) in entries {
+                key.zeroize();
+            }
+        }
+        JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) => {}
+    }
+}
+
 fn unix_timestamp_to_datetime(timestamp: i64) -> AuthResult<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(timestamp).map_err(|_| {
         AuthError::OidcTokenValidation("ID token timestamp is outside supported bounds".to_string())
@@ -1587,6 +1866,52 @@ fn generate_urlsafe_secret() -> String {
     let mut bytes = [0u8; 48];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Longest accepted OAuth state lifetime (one hour) for
+/// [`OidcProviderConfig::state_ttl`] and [`crate::OAuth2ProviderConfig::state_ttl`].
+pub const MAX_OAUTH_STATE_TTL_SECONDS: i64 = 3_600;
+
+/// Whether `value` is an absolute `https://` URL, or an `http://` URL on a
+/// loopback host (`localhost`, `127.0.0.1`, `[::1]`) for development and tests.
+/// User information in the authority, whitespace and control characters are
+/// refused.
+pub(crate) fn is_secure_endpoint_url(value: &str) -> bool {
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return false;
+    }
+    let Some((scheme, remainder)) = value.split_once("://") else {
+        return false;
+    };
+    let Some(authority) = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|authority| !authority.is_empty() && !authority.contains('@'))
+    else {
+        return false;
+    };
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    if host.is_empty() {
+        return false;
+    }
+    if scheme.eq_ignore_ascii_case("https") {
+        return true;
+    }
+    scheme.eq_ignore_ascii_case("http")
+        && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1")
+}
+
+/// Whether `value` is an acceptable redirect URI: a secure endpoint URL
+/// without a fragment (RFC 6749 section 3.1.2).
+pub(crate) fn is_valid_redirect_uri(value: &str) -> bool {
+    is_secure_endpoint_url(value) && !value.contains('#')
 }
 
 pub(crate) fn ensure_no_reserved_authorization_parameters(endpoint: &str) -> AuthResult<()> {

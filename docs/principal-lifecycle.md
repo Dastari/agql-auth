@@ -17,8 +17,16 @@ persist_for_later(&reference).await?;
 `PrincipalReference` contains stable identity, session/token, session version,
 grant kind, audience, tenant, actor, resource, exact operation, expiry, and
 correlation references where available. It deliberately omits bearer values,
-token hashes, cookies, roles, and scopes. It is not proof that the principal
-remains active or authorized.
+token hashes and cookies. Current roles and scopes are not part of it; only a
+session-bound delegation carries a `grant_ceiling` recording the roles, scopes,
+authorization roles and `auth_time` of the delegated token, as an upper bound.
+It is not proof that the principal remains active or authorized.
+
+Store references where the job's submitter cannot edit them. Resolution trusts the
+stored `grant_ceiling` and expiry: an edited ceiling can widen plain resolution up
+to the parent's current authority (sensitive revalidation still narrows to the
+accepted token). A delegation reference that has expired, or carries no expiry, is
+refused with `AccessTokenExpired`.
 
 ## Rehydrate Current Authority
 
@@ -48,13 +56,28 @@ impl CurrentPrincipalResolver for HostPrincipalResolver {
 The host must check current session/token status, revocation, expiry,
 membership, assurance, roles, and scopes. `ResolvedPrincipal::new` additionally
 verifies that immutable identity and resource bindings match the requested
-reference. Callers then use only `resolved.principal()` for current authority.
+reference. Callers then use `resolved.principal()` for current authority.
 
-For `session_bound_delegation`, actor/resource/operation values belong to the
-delegated token while the resolved principal represents the underlying normal
-user session. `ResolvedPrincipal::new` therefore requires exact subject,
-session, family, tenant, and session version continuity while retaining the
-delegation bindings on the reference for the protected operation to enforce.
+For `session_bound_delegation`, the host resolves the underlying normal user
+session. `ResolvedPrincipal::new` requires exact subject, session, family,
+tenant, and session version continuity, and a `grant_ceiling` on the reference;
+a delegation reference without one, including any persisted before 0.27, is
+refused with `Forbidden`. `resolved.principal()` is then not the parent session
+but a delegated view of it that never has more authority than the delegated
+token had:
+
+- roles, scopes and authorization roles are the parent's current values
+  intersected exactly with the ceiling, so removals propagate and nothing is
+  added;
+- token ID, actor, resource, operation and correlation come from the reference,
+  and the grant kind stays `session_bound_delegation`, so the view cannot manage
+  the session or prepare a further delegation;
+- expiry is the earlier of the delegated token's and the parent's;
+- the parent's assurance survives only while its `auth_time` equals the
+  delegated token's, and custom additional claims are dropped.
+
+The protected operation must still enforce the delegation bindings, and
+sensitive operations still go through `revalidate_sensitive_principal`.
 
 Rehydrate before every protected operation, after approval, before external
 disclosure, and before each sensitive subscription event or job action. Periodic
@@ -106,7 +129,8 @@ revocation. Missing authority or status must deny. A decision observes state at
 evaluation; subsequent writes need host transaction/version fencing where atomic
 revocation ordering is required.
 
-For session-bound delegation, the resolver returns the current parent session;
+For session-bound delegation, the resolver returns the current parent session,
+which `ResolvedPrincipal::new` narrows to the delegated view described above;
 the requested delegation reference must remain exact and its subject/session,
 family, tenant, session version and active business scope must match that parent.
 The status checker independently checks the original delegated token, even when

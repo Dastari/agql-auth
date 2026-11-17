@@ -30,41 +30,90 @@ The trait uses only concrete parameters and remains object-safe behind
 
 ## Request Admission
 
-Password-reset and login-code request helpers atomically decide admission and
-record the attempt for each key. Admission is based on the state before the
-transition, preserving the existing rule that the request which first activates
-backoff is allowed. A concurrent request cannot also claim the same pre-state:
-its CAS conflicts, it rereads the committed backoff, and it returns `false`.
+Password-reset and login-code request helpers first evaluate every key and
+return `false` without recording anything when any key is in backoff or
+lockout. Only then do they record the request against each key. A throttled
+client therefore cannot add or advance state for the principals it names, so
+one address cannot silently suppress another user's reset or login-code mail
+or fill the store with principal entries. Admission is based on the state
+before the transition, preserving the rule that the request which first
+activates backoff is allowed. A concurrent request cannot also claim the same
+pre-state: its CAS conflicts, it rereads the committed backoff, and it returns
+`false`. If a key denies during recording (a concurrent request won the race)
+or cannot be recorded, keys already recorded by that call are refunded.
 
-Principal and client buckets are separate keys. Atomicity is guaranteed per
-key, not as one transaction across both buckets. If one key admits and records
-before a second key denies, the first key remains recorded; this is a safe
-over-count rather than an abuse-state bypass.
+Request helpers count the submitted principal as given (trimmed and ASCII
+lowercased); they never look the account up, so they reveal nothing about it.
 
-Credential checks remain check-then-verify operations because password, code,
-and factor verification cannot be held inside a storage transaction. A burst
-may begin before another failure activates lockout, but every resulting failure
-is recorded through CAS and none is lost.
+## Credential Reservation
 
-Password login applies the same configured credential controls to unknown,
-disabled, and enabled/wrong-password attempts. Unknown and disabled accounts
-perform one verification against the fixed dummy Argon2 hash; enabled accounts
-use their stored hash. Disabled correct-password attempts are failures too.
-An admitted disabled attempt returns `UserDisabled`, never clears attempts,
-and never enters access/refresh issuance. Already active controls reject before
-password work; persistence errors propagate through the safe public error map.
-The threshold-activating failure returns its credential error, and the next
-attempt receives throttling/lockout. There is no constant-time guarantee across
-host-chosen stored hash parameters and no change to the deliberately distinct
-public `USER_DISABLED` error.
+Password login, login-code verification and both rate-limited TOTP variants
+count an attempt before verifying anything:
 
-## Record Versus Clear
+1. every principal and client key is evaluated; active backoff or lockout
+   returns `AuthThrottled` or `AuthLocked` without recording;
+2. each principal key is then incremented by CAS exactly as a failure would
+   be, and every CAS rechecks backoff and lockout against the state it replaces;
+3. only then does the service verify the password, code or TOTP step;
+4. a failed check records one failure on each client key (the IP address).
 
-Before credential verification, the service remembers the observed revision
-for each key. Success clears only those exact revisions. If another failure
-commits a newer revision while verification is in flight, clear conflicts and
-leaves the newer failure intact. If clear linearizes first, a later failure sees
-absence and creates a fresh revision, so the failure remains recorded.
+Because the principal count is committed before verification, a burst of
+concurrent attempts cannot all observe a state below the lockout threshold: at
+most `max_attempts_before_lockout` attempts per window are verified for one
+principal. Until an attempt resolves it counts toward its principal's
+thresholds, so concurrent attempts on the same account can see a transient
+backoff that the attempt's success later removes.
+
+The client bucket is shared by every user behind one address (office or
+carrier NAT, a proxy), so it is only checked before the work and records
+failures after it. Concurrent correct logins from one address never throttle
+each other, while failed guesses from it accumulate and throttle it as before.
+A concurrent spray across many accounts from one address can therefore have as
+many checks in flight as it has concurrent requests before the client bucket
+reacts; each account's own budget still bounds guesses against it.
+
+A store that cannot record the attempt (an error, or a full
+`MemoryAuthRateLimitStore`) fails the request with `AuthServiceUnavailable`
+before verification. No outcome then depends on the secret, so a full or
+failing store is never an uncounted guessing oracle. If one key was recorded
+before another failed, that record is refunded where possible.
+
+Password login resolves the account before building keys. A known account is
+counted against its stable local user ID, so every spelling or alias the user
+store accepts shares one budget; an unknown principal is counted against its
+normalized input. Unknown accounts, and stored hashes that Argon2 cannot
+verify with real work (unparsable, another algorithm, invalid parameters),
+perform one verification against the fixed dummy Argon2 hash and return
+`InvalidCredentials`. Disabled accounts verify their stored hash: a wrong
+password returns `InvalidCredentials` and the correct one `UserDisabled`, so
+the disabled state is only revealed with proof of the password. Both stay
+counted, never clear attempts and never enter access/refresh issuance.
+Already active controls reject before password work; persistence errors
+propagate through the safe public error map. The threshold-activating failure
+returns its credential error, and the next attempt receives
+throttling/lockout. There is no constant-time guarantee across host-chosen
+stored hash parameters.
+
+## Settle Versus Refund
+
+A success settles its reservation. The principal bucket is cleared if its
+revision is still the one the reservation wrote; otherwise only this attempt
+is refunded and newer failures survive. A success records nothing on the
+client bucket and never clears it: failures other principals recorded from
+that address stay counted, so logging in to one's own account does not reset
+an address used to spray other accounts, and successful logins never
+accumulate state for a shared address.
+
+A refund restores the exact state the reservation replaced when nothing was
+recorded since. Otherwise it removes one attempt from the current window and
+drops backoff or lockout only when the remaining count is below that
+threshold. A refund for a window that has since ended changes nothing.
+
+Attempts that verified nothing are refunded: a saturated password work pool,
+an expired login challenge, or invalid host-supplied TOTP options. These
+outcomes do not depend on the submitted secret. Password-reset token
+consumption verifies a signed token, which cannot be guessed; it keeps
+check-then-record counting and clears only the principal bucket on success.
 
 Expired state is treated as inactive. The next attempt atomically replaces it
 with a reset window using its current revision. Stores may delete expired rows
@@ -106,6 +155,7 @@ Downstream adapters should run the same store against these cases:
 - `u32::MAX` attempt state and maximum timestamps;
 - stale compare-exchange conflict without mutation;
 - stale conditional clear leaving a newer revision intact;
+- refund CAS restoring a replaced state and conditional delete of a fresh record;
 - clear followed by insert using a fresh revision;
 - two `AuthService` instances sharing the adapter;
 - safe public errors that contain no normalized principal, client address, or
@@ -124,7 +174,15 @@ operation reclaims expired records under the CAS mutex, using an expiry index
 that retains one deadline per key. New distinct keys at capacity return
 `AuthServiceUnavailable`; existing active counters and lockouts remain intact.
 Never treat this error as admission or evict an active record to accept a new
-principal. Multi-process hosts still need durable shared storage and bounded
+principal. Credential flows reserve before verification, so at capacity they
+fail closed for every outcome rather than verifying uncounted.
+
+Request-initiation flows (password-reset and login-code requests, with a
+six-hour default TTL) may hold at most half of the capacity, rounded down.
+Request spam therefore cannot take the entries credential verification needs.
+While either share is full, new principals in that share receive
+`AuthServiceUnavailable`, which is a denial of service, not a bypass.
+Multi-process hosts still need durable shared storage and bounded
 request/work admission.
 
 ```rust
@@ -144,13 +202,34 @@ idle periods; no background task is spawned. See [the migration guide](../MIGRAT
 ## Async password work admission
 
 Async password login and challenge hashing/verification leave runtime threads using
-one process-wide pool of two workers and 32 queued jobs. Admission uses a nonblocking
-bounded queue; saturation and worker faults fail closed as `AuthServiceUnavailable`
-before credential-failure counters change. No store lock is held during CPU work.
-Cancellation does not free actual running/queued capacity early. Atomic challenge
-attempts already reserved remain charged even when the executor cannot admit work.
+a `PasswordWorkPool`. By default every `AuthService` shares `PasswordWorkPool::shared()`,
+one process-wide budget with one worker per available core (at most 8) and 16 queued
+jobs per worker. Build a pool with `PasswordWorkPool::new(PasswordWorkPoolConfig { .. })`
+and pass it to `AuthService::with_password_work_pool` to size it, or to share or
+isolate it between services. Workers start on first use; a thread that cannot be
+started fails that call as `AuthServiceUnavailable` and is retried on the next one,
+so a startup failure is never cached.
 
-Hosts separately bound incoming requests, password/code sizes and accepted Argon2
-costs. These controls must cover explicit synchronous hash/verify helpers too; those
-helpers remain blocking by design. This pool does not add a password-size or Argon2
-parameter compatibility cutoff and never logs sensitive inputs.
+Admission uses a nonblocking bounded queue; saturation and worker faults fail closed
+as `AuthServiceUnavailable`. The attempt was reserved before work was queued and is
+refunded, because no secret was checked and the outcome is the same for every
+password. No store lock is held during CPU work. Cancellation does not free actual running/queued capacity
+early. Atomic challenge attempts already reserved remain charged even when the
+executor cannot admit work.
+
+**Throttle the login route at the edge.** Every admitted login runs one Argon2
+verification, unknown and disabled users included, and a full queue is deliberately
+not counted as a credential failure. Without a per-client and global request limit in
+front of the service, a modest request rate keeps the queue full and legitimate
+logins fail with `AuthServiceUnavailable`.
+
+`AuthConfig::password_hashing` sets the Argon2id parameters of new hashes and a
+password length cap, `max_password_bytes` (1024 bytes by default). A longer password
+is never hashed: `hash_password` returns `PasswordTooLong`, and verification treats
+it as a wrong password, so login records a credential failure without queueing
+work. Unknown and disabled users verify a dummy hash made with the configured
+parameters. Verification reads each stored hash's own parameters; after a successful
+login, `password_hash_needs_rehash` tells the host to replace a hash made with other
+parameters. Hosts still bound request bodies and the explicit synchronous
+hash/verify helpers, which remain blocking by design. The pool never logs sensitive
+inputs.

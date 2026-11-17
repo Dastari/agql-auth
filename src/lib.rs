@@ -104,6 +104,8 @@
 //! JWT signing and JWKS, Microsoft Entra OIDC, recovery flows, and MFA
 //! primitives.
 
+#![forbid(unsafe_code)]
+
 mod api_tokens;
 mod assurance;
 mod channel;
@@ -143,7 +145,7 @@ mod validator;
 #[cfg(test)]
 mod tests;
 
-pub use api_tokens::{ApiTokenService, DEFAULT_API_TOKEN_PREFIX};
+pub use api_tokens::{ApiTokenService, ApiTokenTouchObserver, DEFAULT_API_TOKEN_PREFIX};
 pub use assurance::{
     AssuranceDenial, AssuranceDenialCode, AssuranceEvaluation, AssuranceEvaluationState,
     AssuranceInputError, AssuranceMatchMode, AssurancePolicyId, AssurancePolicyIdError,
@@ -155,26 +157,29 @@ pub use assurance::{
 pub use channel::ChannelIdentity;
 pub use claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirementError,
-    ClaimRequirements, ConfirmationClaims, ExactOperationBinding,
+    ClaimRequirements, ConfirmationClaims, ExactOperationBinding, PresentedConfirmation,
 };
 pub use client_auth::{
     CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientJwtAlgorithm, ClientJwtClaims, ClientJwtSigner,
     DEFAULT_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS, MAX_CLIENT_JWT_ISSUED_AT_SKEW_SECONDS,
-    MAX_CLIENT_JWT_LIFETIME_SECONDS, TokenEndpointAuthMethod,
+    MAX_CLIENT_JWT_LIFETIME_SECONDS, MAX_PRIVATE_KEY_JWT_LIFETIME_SECONDS, TokenEndpointAuthMethod,
 };
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use combined::{AccessTokenAuth, CombinedAuth};
 pub use config::{
     AccessTokenScopeClaimFormat, AuthConfig, AuthRateLimitConfig, AuthRateLimitPolicy,
-    ClientMetadata, JwtSigningConfig, LegacyScopeClaims, MicrosoftEntraConfig,
-    MicrosoftEntraTenant, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    ClientMetadata, DEFAULT_MAX_PASSWORD_BYTES, DEFAULT_MAX_SESSION_LIFETIME, JwtSigningConfig,
+    JwtVerificationKey, LegacyScopeClaims, MAX_PASSWORD_BYTES_LIMIT,
+    MAX_PREVIOUS_VERIFICATION_KEYS, MicrosoftEntraConfig, MicrosoftEntraTenant,
+    OAuthBrowserBinding, OAuthResponseMode, OidcProviderConfig, OidcProviderKind,
+    PasswordHashingConfig,
 };
 pub use decision::{
     AuthorizationDecision, AuthorizationDecisionHook, AuthorizationInvocation,
     AuthorizationOutcome, AuthorizationReasonCode, LinkedAuthorizationDecision,
     NoopAuthorizationDecisionHook, emit_decision,
 };
-pub use errors::AuthError;
+pub use errors::{AuthError, AuthErrorDiagnostic};
 pub use grant::{
     AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
     SessionBoundDelegationBinding,
@@ -198,24 +203,26 @@ pub use models::{
     ApiTokenIssueRequest, ApiTokenPrincipal, ApiTokenPrincipalKind, ApiTokenRevocationReason,
     AuthPayload, AuthPrincipal, AuthRateLimitBucket, AuthRateLimitFlow, AuthRateLimitKey,
     AuthRateLimitSnapshot, AuthRateLimitState, AuthUser, ExternalIdentity, IssuedApiToken,
-    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeOptions, MicrosoftEntraClaims,
-    OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput, OidcLoginResult,
-    OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest, PurposeTokenValidation,
-    RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge, StoredRefreshToken,
-    StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
+    IssuedLoginChallenge, IssuedPurposeToken, LoginChallengeExpectation, LoginChallengeOptions,
+    MicrosoftEntraClaims, OAuthLoginState, OidcAuthorizationRequest, OidcCallbackInput,
+    OidcLoginResult, OidcTokenResponse, PasswordResetToken, PurposeTokenIssueRequest,
+    PurposeTokenValidation, RefreshTokenRevocationReason, StoredApiToken, StoredLoginChallenge,
+    StoredRefreshToken, StoredUser, TotpOptions, TotpProvisioning, TotpSecret, ValidatedOidcClaims,
     VerifiedLoginChallenge, VerifiedPasswordResetToken, VerifiedPurposeToken,
 };
 pub use oauth2::{
+    MAX_OAUTH2_EMAIL_LENGTH, MAX_OAUTH2_NAME_LENGTH, MAX_OAUTH2_PICTURE_LENGTH,
     MAX_OAUTH2_SUBJECT_LENGTH, MAX_OAUTH2_VERIFIED_EMAIL_ENTRIES, OAuth2AuthorizationRequest,
-    OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2ProfileMapping, OAuth2Provider,
-    OAuth2ProviderConfig, OAuth2TokenResponse, OAuth2UserProfile, OAuth2VerifiedEmailList,
-    OAuth2VerifiedEmailSelection,
+    OAuth2CallbackOutcome, OAuth2EmailVerification, OAuth2LoginResult, OAuth2ProfileMapping,
+    OAuth2Provider, OAuth2ProviderConfig, OAuth2TokenResponse, OAuth2UserProfile,
+    OAuth2UserProvisioner, OAuth2VerifiedEmailList, OAuth2VerifiedEmailSelection,
 };
 pub use oidc::{
-    ClaimsMapper, ExternalUserProvisioner, MappedClaims, MicrosoftClaimsMapper, NoopClaimsMapper,
-    OidcCallbackOutcome, OidcDiscoveryDocument, OidcHttpClient, OidcProvider, PkcePair,
-    ProvisionedExternalUser, generate_oauth_state, generate_oidc_nonce, generate_pkce_pair,
-    hash_oauth_state, pkce_s256_challenge, stable_external_subject,
+    ClaimsMapper, ExternalUserProvisioner, MAX_OAUTH_STATE_TTL_SECONDS, MappedClaims,
+    MicrosoftClaimsMapper, NoopClaimsMapper, OidcCallbackOutcome, OidcDiscoveryDocument,
+    OidcHttpClient, OidcProvider, PkcePair, ProvisionedExternalUser, generate_oauth_state,
+    generate_oidc_nonce, generate_pkce_pair, hash_oauth_state, pkce_s256_challenge,
+    stable_external_subject,
 };
 pub use oidc_authorization::{
     MAX_OIDC_AUTHORIZATION_TOTAL_VALUE_LENGTH, MAX_OIDC_AUTHORIZATION_VALUE_LENGTH,
@@ -223,9 +230,13 @@ pub use oidc_authorization::{
     OidcAuthorizationOptions, OidcAuthorizationOutcome, OidcAuthorizationPolicy,
     OidcIdTokenClaimRequest, OidcPrompt,
 };
+pub use password_work::{
+    DEFAULT_MAX_PASSWORD_WORKERS, DEFAULT_QUEUED_PASSWORD_JOBS_PER_WORKER, MAX_PASSWORD_WORKERS,
+    MAX_QUEUED_PASSWORD_JOBS, PasswordWorkPool, PasswordWorkPoolConfig,
+};
 pub use principal_reference::{
-    CurrentPrincipalResolver, MAX_SESSION_VERSION_LENGTH, PrincipalReference,
-    PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
+    CurrentPrincipalResolver, DelegationGrantCeiling, MAX_SESSION_VERSION_LENGTH,
+    PrincipalReference, PrincipalReferenceKind, ResolvedPrincipal, VerifiedActiveUserSession,
     VerifiedActiveUserSessionResolver,
 };
 pub use purpose_grant::{PurposeBoundGrantReference, PurposeGrantStatus};
@@ -248,7 +259,8 @@ pub use session::{ActiveScope, AuthMethod, MfaFactor, MfaState, SessionContext};
 pub use stores::{
     AdditionalTokenRolesProvider, ApiTokenStore, AuthRateLimitStore, ExternalIdentityStore,
     LoginChallengeStore, MemoryAuthRateLimitStore, OAuthStateStore, OAuthTokenStore,
-    PasswordResetTokenStore, RefreshTokenStore, TotpReplayStore, UserStore,
+    PasswordResetTokenStore, PurposeTokenReplayStore, RefreshTokenStore, TotpReplayStore,
+    UserStore,
 };
 pub use token_decode::{
     BearerParseMode, MAX_ACCESS_TOKEN_AUTHORIZATION_ROLE_LENGTH,

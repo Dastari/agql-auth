@@ -13,6 +13,7 @@ use super::validator::rs256_config;
 use super::{MemoryRefreshTokenStore, MemoryUserStore};
 use crate::prelude::*;
 
+mod enabled_parent;
 mod fixed_audience;
 
 #[tokio::test]
@@ -106,7 +107,7 @@ async fn session_bound_grant_preserves_active_session_and_current_assurance_with
     let refresh_store = MemoryRefreshTokenStore::default();
     let auth = AuthService::new(
         rs256_config(),
-        Arc::new(MemoryUserStore::default()),
+        Arc::new(users_with_enabled_parent()),
         Arc::new(refresh_store.clone()),
     )
     .unwrap();
@@ -290,9 +291,19 @@ async fn session_bound_grant_preserves_active_session_and_current_assurance_with
         })
         .build()
         .unwrap();
-    assert_eq!(
+    // require_cnf proves possession (0.27): the plain path fails closed and the
+    // confirmation-aware path needs the bound key thumbprint.
+    assert!(
         validator
             .authenticate_access_token(&grant.access_token)
+            .is_err()
+    );
+    assert_eq!(
+        validator
+            .authenticate_access_token_with_confirmation(
+                &grant.access_token,
+                &PresentedConfirmation::jwk_thumbprint("tool-key-thumbprint"),
+            )
             .unwrap(),
         decoded
     );
@@ -303,6 +314,8 @@ async fn session_bound_grant_preserves_active_session_and_current_assurance_with
         allowed_amr: vec!["otp".to_string()],
         allowed_acr: vec!["urn:example:loa:2".to_string()],
         match_mode: AssuranceMatchMode::All,
+        required_amr: vec![],
+        required_context: None,
     };
     mfa_policy
         .evaluate(&decoded, &FixedClock::new(now))
@@ -666,7 +679,7 @@ async fn delegated_credentials_cannot_manage_or_chain_the_session() {
         Err(AuthError::Forbidden)
     ));
     assert!(matches!(
-        auth.authenticate_session_management_bearer(&grant.access_token),
+        auth.authenticate_session_management_bearer(&format!("Bearer {}", grant.access_token)),
         Err(AuthError::Forbidden)
     ));
     let delegated_principal = AuthPrincipal::User(delegated);
@@ -706,7 +719,10 @@ async fn delegated_credentials_cannot_manage_or_chain_the_session() {
         Err(AuthError::Forbidden)
     ));
     assert!(matches!(
-        auth.authenticate_session_management_bearer(&sessionless.access_token),
+        auth.authenticate_session_management_bearer(&format!(
+            "Bearer {}",
+            sessionless.access_token
+        )),
         Err(AuthError::Forbidden)
     ));
 }
@@ -730,7 +746,7 @@ async fn signed_delegation_passes_middleware_current_session_and_protected_resol
     let request = auth
         .inject_http_auth(
             async_graphql::Request::new("{ currentUserContext }"),
-            Some(&grant.access_token),
+            Some(&format!("Bearer {}", grant.access_token)),
         )
         .await
         .unwrap();
@@ -745,7 +761,7 @@ async fn signed_delegation_passes_middleware_current_session_and_protected_resol
     let revoked_request = auth
         .inject_http_auth(
             async_graphql::Request::new("{ currentUserContext }"),
-            Some(&grant.access_token),
+            Some(&format!("Bearer {}", grant.access_token)),
         )
         .await
         .unwrap();
@@ -761,7 +777,7 @@ async fn signed_delegation_passes_middleware_current_session_and_protected_resol
     let expired_request = auth
         .inject_http_auth(
             async_graphql::Request::new("{ currentUserContext }"),
-            Some(&grant.access_token),
+            Some(&format!("Bearer {}", grant.access_token)),
         )
         .await
         .unwrap();
@@ -980,10 +996,24 @@ fn test_auth_service_with_config(
 ) -> AuthService<MemoryUserStore, MemoryRefreshTokenStore> {
     AuthService::new(
         config,
-        Arc::new(MemoryUserStore::default()),
+        Arc::new(users_with_enabled_parent()),
         Arc::new(MemoryRefreshTokenStore::default()),
     )
     .unwrap()
+}
+
+/// Session-bound delegation requires the parent to exist and be enabled.
+fn users_with_enabled_parent() -> MemoryUserStore {
+    let users = MemoryUserStore::default();
+    users.insert(StoredUser {
+        id: verified_user().user_id,
+        principal: "user-1@example.test".to_string(),
+        password_hash: "unused".to_string(),
+        roles: verified_user().roles,
+        scopes: verified_user().scopes,
+        disabled: false,
+    });
+    users
 }
 
 fn test_auth_service_with_resolver(

@@ -46,8 +46,11 @@ let request = provider
     .create_authorization_request_with_options(&oauth_state_store, options)
     .await?;
 
-// Redirect the browser to request.authorization_url. The request's Debug
-// output redacts the complete URL, state, nonce, verifier, and challenge.
+// Set request.browser_binding as an HttpOnly, Secure cookie, then redirect the
+// browser to request.authorization_url. The request's Debug output redacts the
+// complete URL, state, nonce, binding, and challenge; the PKCE verifier stays
+// in the stored state. `callback_input` carries the callback's code, state and
+// iss plus that cookie value in `browser_binding`.
 
 let outcome = provider
     .handle_callback(&oauth_state_store, callback_input)

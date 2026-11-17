@@ -1,5 +1,5 @@
 # Rust build output
-/target/
+target/
 
 # Release validation retains the reviewed library Cargo.lock
 
@@ -27,3 +27,6 @@ Thumbs.db
 __pycache__/
 /release-dist/
 /.handoff/
+
+# Local agent worktrees
+/.claude/

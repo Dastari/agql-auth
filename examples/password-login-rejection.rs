@@ -46,6 +46,14 @@ impl RefreshTokenStore for NoSessions {
     ) -> AuthResult<()> {
         panic!("unexpected family revocation")
     }
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        _: &str,
+        _: OffsetDateTime,
+        _: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        panic!("unexpected user revocation")
+    }
     async fn touch_refresh_token(
         &self,
         _: Uuid,
@@ -100,12 +108,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .collect();
+    // The store and the service must share one trusted clock.
+    let clock = Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH));
     let auth = AuthService::new_with_rate_limit_store_and_clock(
         config,
         Arc::new(Users(users)),
         Arc::new(NoSessions),
-        Arc::new(MemoryAuthRateLimitStore::default()),
-        Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+        Arc::new(MemoryAuthRateLimitStore::with_capacity_and_clock(
+            std::num::NonZeroUsize::new(64).expect("nonzero capacity"),
+            clock.clone(),
+        )),
+        clock,
     )?;
     for (index, (case, password)) in [
         ("unknown", "wrong"),

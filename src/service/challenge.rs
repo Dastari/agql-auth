@@ -4,7 +4,8 @@ use super::AuthService;
 use crate::config::ClientMetadata;
 use crate::models::AuthRateLimitFlow;
 use crate::models::{
-    IssuedLoginChallenge, LoginChallengeOptions, StoredLoginChallenge, VerifiedLoginChallenge,
+    IssuedLoginChallenge, LoginChallengeExpectation, LoginChallengeOptions, StoredLoginChallenge,
+    VerifiedLoginChallenge,
 };
 use crate::stores::{LoginChallengeStore, RefreshTokenStore, UserStore};
 use crate::util::{generate_numeric_code, validate_login_challenge_options};
@@ -53,6 +54,11 @@ where
     }
 
     /// Verifies and consumes a one-time login challenge.
+    ///
+    /// The challenge alone fixes the principal and channel: this method checks
+    /// no expectation. Use the returned principal as the identity, never a
+    /// separately submitted one. When the host already knows the principal or
+    /// requires a delivery channel, use [`Self::verify_login_challenge_for`].
     pub async fn verify_login_challenge<S>(
         &self,
         store: &S,
@@ -72,11 +78,53 @@ where
     }
 
     /// Verifies and consumes a one-time login challenge with abuse protection.
+    ///
+    /// Checks no principal or channel expectation; see
+    /// [`Self::verify_login_challenge`].
     pub async fn verify_login_challenge_with_metadata<S>(
         &self,
         store: &S,
         challenge_id: Uuid,
         code: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedLoginChallenge>
+    where
+        S: LoginChallengeStore,
+    {
+        self.verify_login_challenge_checked(store, challenge_id, code, None, metadata)
+            .await
+    }
+
+    /// Verifies and consumes a login challenge that must belong to the expected
+    /// principal and/or channel, with abuse protection.
+    ///
+    /// A challenge created for another principal or channel is refused with
+    /// [`AuthError::InvalidLoginChallenge`], the error for an unknown challenge
+    /// ID, before any attempt is admitted or password work runs. The mismatch
+    /// therefore reveals nothing about the challenge and cannot spend the
+    /// legitimate holder's attempts. Use this for second factors and step-up,
+    /// where the principal comes from the current session or first factor.
+    pub async fn verify_login_challenge_for<S>(
+        &self,
+        store: &S,
+        challenge_id: Uuid,
+        code: &str,
+        expected: &LoginChallengeExpectation,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedLoginChallenge>
+    where
+        S: LoginChallengeStore,
+    {
+        self.verify_login_challenge_checked(store, challenge_id, code, Some(expected), metadata)
+            .await
+    }
+
+    async fn verify_login_challenge_checked<S>(
+        &self,
+        store: &S,
+        challenge_id: Uuid,
+        code: &str,
+        expected: Option<&LoginChallengeExpectation>,
         metadata: ClientMetadata,
     ) -> AuthResult<VerifiedLoginChallenge>
     where
@@ -91,13 +139,18 @@ where
             .find_login_challenge(challenge_id)
             .await?
             .ok_or(AuthError::InvalidLoginChallenge)?;
+        // Same error and side effects as an unknown ID. The reserved record is
+        // later compared with this snapshot, so it carries the same binding.
+        if expected.is_some_and(|expected| !expected.matches(&challenge)) {
+            return Err(AuthError::InvalidLoginChallenge);
+        }
         let rate_limit_keys = self.rate_limit_keys(
             AuthRateLimitFlow::LoginCodeVerification,
             Some(&challenge.principal),
             &metadata,
         );
-        let rate_limit_permit = self
-            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let policy = &self.config.rate_limits.credential;
+        self.reject_if_rate_limited(policy, &rate_limit_keys)
             .await?;
 
         let now = self.login_challenge_clock.now();
@@ -128,6 +181,10 @@ where
         if reserved.is_expired(self.login_challenge_clock.now()) {
             return Err(AuthError::LoginChallengeExpired);
         }
+        // Count the guess against principal and client before any code work.
+        let reservation = self
+            .reserve_credential_attempt(policy, &rate_limit_keys)
+            .await?;
         let verified = self
             .verify_password_async_before(
                 code,
@@ -138,6 +195,9 @@ where
         // Password work and storage awaits can outlive the admission timestamp.
         let verified_at = self.login_challenge_clock.now();
         if reserved.is_expired(verified_at) {
+            // Expiry is the outcome whatever the code was.
+            self.refund_rate_limit_reservation(policy, reservation)
+                .await?;
             return Err(AuthError::LoginChallengeExpired);
         }
         if let Err(error) = verified {
@@ -145,10 +205,11 @@ where
                 error,
                 AuthError::AuthServiceUnavailable | AuthError::LoginChallengeExpired
             ) {
+                self.refund_rate_limit_reservation(policy, reservation)
+                    .await?;
                 return Err(error);
             }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            self.settle_rate_limit_failure(policy, reservation).await?;
             if reserved.attempts >= reserved.max_attempts {
                 return Err(AuthError::LoginChallengeAttemptsExhausted);
             }
@@ -159,15 +220,15 @@ where
             .consume_login_challenge(challenge_id, verified_at)
             .await?;
         if reserved.is_expired(self.login_challenge_clock.now()) {
+            self.refund_rate_limit_reservation(policy, reservation)
+                .await?;
             return Err(AuthError::LoginChallengeExpired);
         }
         if !consumed {
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::LoginChallengeReplayed);
         }
-        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
-            .await?;
+        self.settle_rate_limit_success(policy, reservation).await?;
 
         let verified_at = self.login_challenge_clock.now();
         if reserved.is_expired(verified_at) {

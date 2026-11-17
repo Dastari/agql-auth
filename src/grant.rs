@@ -8,6 +8,7 @@ use crate::claims::{ActorIdentity, ConfirmationClaims, ExactOperationBinding};
 use crate::models::AuthUser;
 use crate::principal_reference::PrincipalReference;
 use crate::session::SessionContext;
+use crate::util::dedupe_stable;
 
 /// Request to issue a short-lived access token without a refresh token.
 #[derive(Debug, Clone)]
@@ -223,15 +224,4 @@ impl fmt::Debug for AccessTokenOnlyGrant {
             .field("user", &self.user)
             .finish()
     }
-}
-
-fn dedupe_stable(values: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        if seen.insert(value.clone()) {
-            out.push(value);
-        }
-    }
-    out
 }

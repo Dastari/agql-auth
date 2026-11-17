@@ -11,15 +11,23 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{AuthError, AuthResult};
 
 /// Largest accepted client JWT lifetime (15,777,000 seconds, about six months).
 ///
-/// This is the most lenient documented provider maximum (Sign in with Apple).
-/// Signers mint a fresh JWT for every token request, so short lifetimes are
-/// recommended; [`ClientJwtClaims::new`] defaults to five minutes.
+/// This is the most lenient documented provider maximum (Sign in with Apple)
+/// and applies to signed client secrets. Signers mint a fresh JWT for every
+/// token request, so short lifetimes are recommended;
+/// [`ClientJwtClaims::new`] defaults to five minutes.
 pub const MAX_CLIENT_JWT_LIFETIME_SECONDS: i64 = 15_777_000;
+
+/// Largest accepted `private_key_jwt` assertion lifetime (ten minutes).
+///
+/// A `client_assertion` authenticates one token request, so it is capped far
+/// below [`MAX_CLIENT_JWT_LIFETIME_SECONDS`].
+pub const MAX_PRIVATE_KEY_JWT_LIFETIME_SECONDS: i64 = 600;
 
 /// Default backdating of a client JWT `iat` (30 seconds), absorbing clock skew
 /// at identity providers that reject an `iat` in their future.
@@ -62,8 +70,9 @@ pub enum TokenEndpointAuthMethod {
     /// [`crate::OidcHttpClient`] that supports request headers.
     ClientSecretBasic,
     /// RFC 7523 / OIDC Core `private_key_jwt`: a fresh signed
-    /// `client_assertion` per request. Requires a [`ClientJwtSigner`] and no
-    /// static client secret.
+    /// `client_assertion` per request. Requires a [`ClientJwtSigner`] whose
+    /// `iss` and `sub` are both the client ID, a lifetime of at most
+    /// [`MAX_PRIVATE_KEY_JWT_LIFETIME_SECONDS`], and no static client secret.
     PrivateKeyJwt,
 }
 
@@ -98,13 +107,23 @@ impl ClientJwtAlgorithm {
 pub struct ClientJwtClaims {
     /// `kid` header value identifying the key at the provider.
     pub key_id: Option<String>,
-    /// `iss` claim. For `private_key_jwt` this is the client ID; Sign in with
-    /// Apple uses the developer team ID.
+    /// `x5t#S256` header value: the base64url (unpadded) SHA-256 thumbprint of
+    /// the DER certificate for the key, as Microsoft Entra certificate
+    /// credentials document. `None` omits it.
+    #[serde(default)]
+    pub x509_sha256_thumbprint: Option<String>,
+    /// `iss` claim. For `private_key_jwt` this must be the client ID; Sign in
+    /// with Apple uses the developer team ID.
     pub issuer: String,
-    /// `sub` claim, normally the client ID.
+    /// `sub` claim. For `private_key_jwt` this must be the client ID.
     pub subject: String,
-    /// `aud` claim. `None` uses the token endpoint URL, as OIDC Core recommends
-    /// for `private_key_jwt`. Sign in with Apple requires `https://appleid.apple.com`.
+    /// `aud` claim. `None` uses the provider default: for `private_key_jwt`
+    /// the authorization server's issuer identifier (the validated discovery
+    /// issuer of a generic [`crate::OidcProvider`], or
+    /// [`crate::OAuth2ProviderConfig::issuer`] when set), and otherwise the
+    /// token endpoint URL. Microsoft Entra providers use the token endpoint,
+    /// as Microsoft documents. Sign in with Apple requires
+    /// `https://appleid.apple.com`.
     pub audience: Option<String>,
     /// Lifetime of each minted JWT (`exp - iat`), in whole seconds. At least
     /// one second longer than `issued_at_skew` and at most
@@ -117,6 +136,9 @@ pub struct ClientJwtClaims {
     /// valid for `lifetime - issued_at_skew` after minting.
     #[serde(default = "default_issued_at_skew")]
     pub issued_at_skew: Duration,
+    /// Whether to add an `nbf` claim equal to `iat`.
+    #[serde(default)]
+    pub include_not_before: bool,
 }
 
 impl ClientJwtClaims {
@@ -125,17 +147,32 @@ impl ClientJwtClaims {
     pub fn new(issuer: impl Into<String>, subject: impl Into<String>) -> Self {
         Self {
             key_id: None,
+            x509_sha256_thumbprint: None,
             issuer: issuer.into(),
             subject: subject.into(),
             audience: None,
             lifetime: Duration::minutes(5),
             issued_at_skew: default_issued_at_skew(),
+            include_not_before: false,
         }
     }
 
     /// Sets the `kid` header.
     pub fn with_key_id(mut self, key_id: impl Into<String>) -> Self {
         self.key_id = Some(key_id.into());
+        self
+    }
+
+    /// Sets the `x5t#S256` header: the base64url (unpadded) SHA-256
+    /// thumbprint of the key's DER certificate.
+    pub fn with_x509_sha256_thumbprint(mut self, thumbprint: impl Into<String>) -> Self {
+        self.x509_sha256_thumbprint = Some(thumbprint.into());
+        self
+    }
+
+    /// Adds an `nbf` claim equal to `iat` to every minted JWT.
+    pub fn with_not_before(mut self) -> Self {
+        self.include_not_before = true;
         self
     }
 
@@ -170,6 +207,19 @@ impl ClientJwtClaims {
         {
             return Err(AuthError::InvalidConfiguration(
                 "client JWT key_id must not be empty when set".to_string(),
+            ));
+        }
+        if self
+            .x509_sha256_thumbprint
+            .as_deref()
+            .is_some_and(|thumbprint| {
+                URL_SAFE_NO_PAD
+                    .decode(thumbprint)
+                    .map_or(true, |digest| digest.len() != 32)
+            })
+        {
+            return Err(AuthError::InvalidConfiguration(
+                "client JWT x5t#S256 must be an unpadded base64url SHA-256 thumbprint".to_string(),
             ));
         }
         if self
@@ -239,6 +289,8 @@ struct ClientJwtPayload<'a> {
     sub: &'a str,
     aud: &'a str,
     iat: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nbf: Option<i64>,
     exp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     jti: Option<String>,
@@ -294,8 +346,8 @@ impl ClientJwtSigner {
         &self.claims
     }
 
-    /// Mints a client JWT signed at `now`, with `iat = now - issued_at_skew`
-    /// and `exp = iat + lifetime`.
+    /// Mints a client JWT signed at `now`, with `iat = now - issued_at_skew`,
+    /// `exp = iat + lifetime` and, when enabled, `nbf = iat`.
     ///
     /// `default_audience` is used when the claim template has no fixed
     /// audience. `include_jti` adds a random `jti` (required for
@@ -323,12 +375,14 @@ impl ClientJwtSigner {
             sub: &self.claims.subject,
             aud: self.claims.audience.as_deref().unwrap_or(default_audience),
             iat,
+            nbf: self.claims.include_not_before.then_some(iat),
             exp,
             jti,
         };
         let mut header = Header::new(self.algorithm.jwt_algorithm());
         header.typ = Some("JWT".to_string());
         header.kid = self.claims.key_id.clone();
+        header.x5t_s256 = self.claims.x509_sha256_thumbprint.clone();
         encode(&header, &payload, &self.key)
             .map_err(|_| AuthError::TokenCreation("client JWT signing failed".to_string()))
     }
@@ -338,6 +392,7 @@ impl ClientJwtSigner {
 pub(crate) fn validate_client_authentication(
     prefix: &str,
     method: TokenEndpointAuthMethod,
+    client_id: &str,
     client_secret: Option<&str>,
     client_jwt: Option<&ClientJwtSigner>,
 ) -> AuthResult<()> {
@@ -357,9 +412,20 @@ pub(crate) fn validate_client_authentication(
             Ok(())
         }
         TokenEndpointAuthMethod::PrivateKeyJwt => {
-            if client_jwt.is_none() {
+            let Some(signer) = client_jwt else {
                 return Err(AuthError::InvalidConfiguration(format!(
                     "{prefix} private_key_jwt requires client_jwt"
+                )));
+            };
+            let claims = signer.claims();
+            if claims.issuer != client_id || claims.subject != client_id {
+                return Err(AuthError::InvalidConfiguration(format!(
+                    "{prefix} private_key_jwt issuer and subject must equal client_id"
+                )));
+            }
+            if claims.lifetime > Duration::seconds(MAX_PRIVATE_KEY_JWT_LIFETIME_SECONDS) {
+                return Err(AuthError::InvalidConfiguration(format!(
+                    "{prefix} private_key_jwt lifetime must be at most the supported maximum"
                 )));
             }
             Ok(())
@@ -373,21 +439,38 @@ pub(crate) struct ClientAuthentication {
     pub(crate) form: Vec<(String, String)>,
 }
 
+/// Default `aud` values for client JWTs minted for one token request.
+pub(crate) struct ClientJwtAudiences<'a> {
+    /// `private_key_jwt` assertion audience.
+    pub(crate) assertion: &'a str,
+    /// Signed `client_secret` audience (the token endpoint).
+    pub(crate) signed_secret: &'a str,
+}
+
+/// Overwrites every name and value before the pairs are released.
+pub(crate) fn zeroize_pairs(pairs: &mut [(String, String)]) {
+    for (name, value) in pairs.iter_mut() {
+        name.zeroize();
+        value.zeroize();
+    }
+}
+
 /// Builds the client-authentication parts of a token request.
 ///
-/// Secret values exist only in the returned request parts.
+/// Secret values exist only in the returned request parts; callers zeroize
+/// them with [`zeroize_pairs`] once the request is sent.
 pub(crate) fn client_authentication(
     method: TokenEndpointAuthMethod,
     client_id: &str,
     client_secret: Option<&str>,
     client_jwt: Option<&ClientJwtSigner>,
-    token_endpoint: &str,
+    audiences: ClientJwtAudiences<'_>,
     now: OffsetDateTime,
 ) -> AuthResult<ClientAuthentication> {
     let secret = match (method, client_secret, client_jwt) {
         (TokenEndpointAuthMethod::PrivateKeyJwt, _, _) => None,
         (_, Some(secret), _) => Some(secret.to_string()),
-        (_, None, Some(signer)) => Some(signer.sign(now, token_endpoint, false)?),
+        (_, None, Some(signer)) => Some(signer.sign(now, audiences.signed_secret, false)?),
         (_, None, None) => None,
     };
     let mut headers = Vec::new();
@@ -400,19 +483,22 @@ pub(crate) fn client_authentication(
             }
         }
         TokenEndpointAuthMethod::ClientSecretBasic => {
-            let secret = secret.ok_or_else(|| {
+            let secret = Zeroizing::new(secret.ok_or_else(|| {
                 AuthError::InvalidConfiguration(
                     "client_secret_basic requires a client secret".to_string(),
                 )
-            })?;
-            let credentials = format!(
+            })?);
+            let credentials = Zeroizing::new(format!(
                 "{}:{}",
                 utf8_percent_encode(client_id, FORM_COMPONENT_ENCODE_SET),
                 utf8_percent_encode(&secret, FORM_COMPONENT_ENCODE_SET)
-            );
+            ));
             headers.push((
                 "Authorization".to_string(),
-                format!("Basic {}", STANDARD.encode(credentials)),
+                format!(
+                    "Basic {}",
+                    Zeroizing::new(STANDARD.encode(credentials.as_bytes())).as_str()
+                ),
             ));
         }
         TokenEndpointAuthMethod::PrivateKeyJwt => {
@@ -426,7 +512,7 @@ pub(crate) fn client_authentication(
             ));
             form.push((
                 "client_assertion".to_string(),
-                signer.sign(now, token_endpoint, true)?,
+                signer.sign(now, audiences.assertion, true)?,
             ));
         }
     }

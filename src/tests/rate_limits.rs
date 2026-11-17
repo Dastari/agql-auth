@@ -670,10 +670,11 @@ async fn stale_success_clear_cannot_erase_a_newer_failure() {
     store.continue_clear.notify_one();
     successful.await.unwrap().unwrap();
 
+    // A known principal is counted against its resolved account.
     let key = first
-        .rate_limit_keys(
-            AuthRateLimitFlow::PasswordLogin,
-            Some("alice@example.com"),
+        .password_login_rate_limit_keys(
+            "alice@example.com",
+            Some("user-clear-race"),
             &ClientMetadata::default(),
         )
         .pop()

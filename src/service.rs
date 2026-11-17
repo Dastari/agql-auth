@@ -1,4 +1,5 @@
 mod challenge;
+mod external_login;
 mod fixed_audience;
 mod password_reset;
 mod totp;
@@ -13,13 +14,7 @@ use argon2::password_hash::{
     PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
 use async_graphql::Data;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rsa::RsaPublicKey;
-use rsa::pkcs1::DecodeRsaPublicKey;
-use rsa::pkcs8::DecodePublicKey;
-use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use time::{Duration, OffsetDateTime};
@@ -31,7 +26,10 @@ use crate::assurance::{
 };
 use crate::claims::{AccessTokenGrantKind, AccessTokenMetadata, ClaimRequirements};
 use crate::clock::{Clock, SystemClock};
-use crate::config::{AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig};
+use crate::config::{
+    AuthConfig, AuthRateLimitPolicy, ClientMetadata, JwtSigningConfig,
+    MAX_PREVIOUS_VERIFICATION_KEYS,
+};
 use crate::errors::AuthError;
 use crate::grant::{
     AccessTokenOnlyGrant, AccessTokenOnlyRequest, SessionBoundAccessTokenOnlyRequest,
@@ -53,8 +51,8 @@ use crate::refresh_reuse_grace::{
 use crate::scope_match::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use crate::session::{AuthMethod, SessionContext};
 use crate::stores::{
-    AdditionalTokenRolesProvider, AuthRateLimitStore, MemoryAuthRateLimitStore, RefreshTokenStore,
-    UserStore,
+    AdditionalTokenRolesProvider, AuthRateLimitStore, MemoryAuthRateLimitStore,
+    PurposeTokenReplayStore, RefreshTokenStore, UserStore,
 };
 use crate::token_decode::{
     ACCESS_TOKEN_PURPOSE, ACCESS_TOKEN_TYPE, AccessTokenClaims, AccessTokenDecodeConfig,
@@ -62,11 +60,10 @@ use crate::token_decode::{
     issued_scope_claims,
 };
 use crate::util::{
-    extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
+    dedupe_stable, extract_connection_init_token, generate_opaque_token, hash_rate_limit_value,
     hash_refresh_token, map_purpose_token_decode_error, strip_bearer_prefix,
 };
 
-const MIN_HS256_SECRET_BYTES: usize = 32;
 const PASSWORD_RESET_TOKEN_TYPE: &str = "password_reset";
 const PASSWORD_RESET_TOKEN_PURPOSE: &str = "password_reset";
 const PURPOSE_TOKEN_TYPE: &str = "purpose_token";
@@ -90,6 +87,10 @@ pub(super) struct PasswordResetTokenClaims {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PurposeTokenClaims {
     typ: String,
+    // Optional on decode so purpose tokens minted before 0.27 still pass
+    // plain validation; consumption requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
     sub: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sid: Option<String>,
@@ -119,18 +120,22 @@ pub struct AuthService<U, R> {
     pub(super) rate_limit_clock: Arc<dyn Clock>,
     pub(super) login_challenge_clock: Arc<dyn Clock>,
     pub(super) argon2: Argon2<'static>,
+    /// Hash verified for unknown and disabled users: same parameters as new
+    /// hashes, so its cost matches a current user's.
+    dummy_password_hash: Arc<str>,
     pub(super) password_executor: Arc<crate::password_work::PasswordWorkPool>,
     pub(super) encoding_key: EncodingKey,
     pub(super) decoding_key: DecodingKey,
     pub(super) validation: Validation,
     signing_algorithm: Algorithm,
     signing_key_id: Option<String>,
+    previous_decoding_keys: Vec<(String, DecodingKey)>,
     jwks: Option<JsonValue>,
     scope_matcher: Arc<dyn ScopeMatch>,
     active_user_session_resolver: Option<Arc<dyn VerifiedActiveUserSessionResolver>>,
     additional_token_roles_provider: Option<Arc<dyn AdditionalTokenRolesProvider>>,
     refresh_grant_authority: Option<Arc<dyn crate::RefreshGrantAuthority>>,
-    refresh_rotation_clock: Arc<dyn Clock>,
+    session_clock: Arc<dyn Clock>,
     refresh_reuse_grace: Option<Duration>,
     refresh_reuse_grace_observer: Option<Arc<dyn RefreshReuseGraceObserver>>,
     fixed_delegation_audience: Option<String>,
@@ -197,6 +202,8 @@ where
     {
         config.validate()?;
         let jwt_keys = JwtKeyMaterial::from_config(&config)?;
+        let argon2 = config.password_hashing.argon2()?;
+        let dummy_password_hash = dummy_password_hash(&config.password_hashing, &argon2)?;
         let rate_limit_store: Arc<dyn AuthRateLimitStore> = rate_limit_store;
 
         Ok(Self {
@@ -205,12 +212,13 @@ where
             validation: jwt_keys.validation,
             signing_algorithm: jwt_keys.algorithm,
             signing_key_id: jwt_keys.key_id,
+            previous_decoding_keys: jwt_keys.previous_decoding_keys,
             jwks: jwt_keys.jwks,
             scope_matcher: Arc::new(ExactScopeMatch),
             active_user_session_resolver: None,
             additional_token_roles_provider: None,
             refresh_grant_authority: None,
-            refresh_rotation_clock: Arc::new(SystemClock),
+            session_clock: Arc::new(SystemClock),
             refresh_reuse_grace: None,
             refresh_reuse_grace_observer: None,
             fixed_delegation_audience: None,
@@ -220,8 +228,9 @@ where
             rate_limit_store,
             rate_limit_clock,
             login_challenge_clock: Arc::new(SystemClock),
-            argon2: Argon2::default(),
-            password_executor: crate::password_work::PasswordWorkPool::shared()?,
+            argon2,
+            dummy_password_hash,
+            password_executor: crate::password_work::PasswordWorkPool::shared(),
             #[cfg(test)]
             password_work: Arc::default(),
             #[cfg(test)]
@@ -297,20 +306,84 @@ where
         self
     }
 
-    /// Sets the trusted clock for refresh and step-up rotation.
+    /// Sets the trusted clock for local tokens and refresh sessions.
     ///
-    /// It stamps rotations and decides refresh-token expiry and the reuse grace,
-    /// and it sets the times in the tokens those calls issue. It does not change
-    /// login, logout or validation, which keep the system clock. Defaults to the
-    /// system clock.
-    pub fn with_refresh_rotation_clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.refresh_rotation_clock = clock;
+    /// It stamps login, refresh, step-up and verified-session issuance, decides
+    /// refresh-token expiry, the absolute session lifetime and the reuse grace,
+    /// stamps logout and user revocation, and checks expiry when this service
+    /// validates its own access, purpose and password-reset tokens. Defaults to
+    /// the system clock. Rate-limit and login-challenge time keep their own
+    /// clocks; [`Self::with_clock`] sets this one and the challenge clock.
+    pub fn with_session_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.session_clock = clock;
         self
     }
 
+    /// Former name of [`Self::with_session_clock`]. Since 0.27 the clock also
+    /// covers issuance, logout and service-side validation, not only rotation.
+    pub fn with_refresh_rotation_clock(self, clock: Arc<dyn Clock>) -> Self {
+        self.with_session_clock(clock)
+    }
+
+    /// Uses one trusted clock for tokens and sessions
+    /// ([`Self::with_session_clock`]) and login challenges
+    /// ([`Self::with_login_challenge_clock`]).
+    ///
+    /// Abuse-control time is not changed: it must agree with the rate-limit
+    /// store's own expiry clock, so it is chosen together with the store in
+    /// [`Self::new_with_rate_limit_store_and_clock`].
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.login_challenge_clock = clock.clone();
+        self.session_clock = clock;
+        self
+    }
+
+    /// Runs this service's password work on `pool` instead of
+    /// [`PasswordWorkPool::shared`](crate::PasswordWorkPool::shared).
+    ///
+    /// Pass the same pool to several services to share one budget, or a
+    /// separate pool to isolate them.
+    pub fn with_password_work_pool(mut self, pool: Arc<crate::PasswordWorkPool>) -> Self {
+        self.password_executor = pool;
+        self
+    }
+
+    /// Whether a stored hash should be replaced with one made under the
+    /// current [`crate::PasswordHashingConfig`].
+    ///
+    /// True for a hash that is not Argon2id version 19 with exactly the
+    /// configured memory, iterations and lanes, or that cannot be parsed. Call
+    /// it after a successful login, while the password is at hand, and store
+    /// `hash_password(password)` in place of the old hash. It reads only the
+    /// hash's parameters and never verifies a password.
+    pub fn password_hash_needs_rehash(&self, password_hash: &str) -> bool {
+        let Ok(parsed) = PasswordHash::new(password_hash) else {
+            return true;
+        };
+        let Ok(params) = argon2::Params::try_from(&parsed) else {
+            return true;
+        };
+        let current = self.argon2.params();
+        parsed.algorithm != argon2::Algorithm::Argon2id.ident()
+            || parsed.version != Some(argon2::Version::V0x13.into())
+            || params.m_cost() != current.m_cost()
+            || params.t_cost() != current.t_cost()
+            || params.p_cost() != current.p_cost()
+    }
+
+    fn password_too_long(&self, password: &str) -> bool {
+        password.len() > self.config.password_hashing.max_password_bytes
+    }
+
     /// Hashes a password synchronously with Argon2. This blocks the caller;
-    /// async service entry points use the shared bounded worker pool.
+    /// async service entry points use the bounded worker pool.
+    ///
+    /// Returns [`AuthError::PasswordTooLong`] for a password longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`].
     pub fn hash_password(&self, password: &str) -> AuthResult<String> {
+        if self.password_too_long(password) {
+            return Err(AuthError::PasswordTooLong);
+        }
         let salt = SaltString::generate(&mut OsRng);
         self.argon2
             .hash_password(password.as_bytes(), &salt)
@@ -358,8 +431,15 @@ where
     }
 
     /// Verifies a password synchronously against an Argon2 hash. This blocks
-    /// the caller; async service entry points use the shared bounded worker pool.
+    /// the caller; async service entry points use the bounded worker pool.
+    ///
+    /// A password longer than
+    /// [`crate::PasswordHashingConfig::max_password_bytes`] is
+    /// [`AuthError::InvalidCredentials`] without Argon2 work.
     pub fn verify_password(&self, password: &str, password_hash: &str) -> AuthResult<()> {
+        if self.password_too_long(password) {
+            return Err(AuthError::InvalidCredentials);
+        }
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
         let result = self
@@ -375,7 +455,10 @@ where
     }
 
     pub(super) async fn hash_password_async(&self, password: &str) -> AuthResult<String> {
-        let password = password.to_owned();
+        if self.password_too_long(password) {
+            return Err(AuthError::PasswordTooLong);
+        }
+        let password = zeroize::Zeroizing::new(password.to_owned());
         let argon2 = self.argon2.clone();
         self.password_executor
             .execute(move || {
@@ -403,8 +486,18 @@ where
         password_hash: &str,
         deadline: Option<(Arc<dyn Clock>, OffsetDateTime)>,
     ) -> AuthResult<()> {
-        let password = password.to_owned();
-        let password_hash = password_hash.to_owned();
+        // An over-long password can never match: a wrong password, without
+        // queueing or Argon2 work. The check does not depend on the account.
+        if self.password_too_long(password) {
+            return Err(AuthError::InvalidCredentials);
+        }
+        let password = zeroize::Zeroizing::new(password.to_owned());
+        // The fixed dummy hash stands for the configured parameters.
+        let password_hash = if password_hash == DUMMY_PASSWORD_HASH {
+            self.dummy_password_hash.to_string()
+        } else {
+            password_hash.to_owned()
+        };
         let argon2 = self.argon2.clone();
         #[cfg(test)]
         let password_work = self.password_work.clone();
@@ -426,68 +519,81 @@ where
     }
 
     /// Performs password login and issues a local session.
-    /// Password work awaits the process-wide bounded pool; saturation returns
-    /// `AuthServiceUnavailable` without recording a bad credential.
+    /// Password work awaits the bounded pool; saturation returns
+    /// `AuthServiceUnavailable` and refunds the reserved attempt, so throttle
+    /// the login route at the edge as well (see
+    /// [`PasswordWorkPool`](crate::PasswordWorkPool)).
     ///
     /// The returned [`AuthPayload`] contains a short-lived local JWT access
     /// token and an opaque refresh token.
-    /// Disabled accounts perform dummy password work and record a credential
-    /// failure before returning [`AuthError::UserDisabled`]. Active abuse
-    /// controls and store errors take precedence; disabled attempts never
-    /// clear counters or issue a session.
+    ///
+    /// Every admitted attempt is counted against the principal bucket as a
+    /// credential failure before any password work. The principal bucket is the
+    /// resolved local user ID when the store finds an account, otherwise the
+    /// normalized submitted principal. A store that cannot record the attempt
+    /// fails closed with `AuthServiceUnavailable` before verification, so no
+    /// outcome depends on the password. The client bucket (the IP address) is
+    /// checked before the work and records only failed attempts, so concurrent
+    /// correct logins behind one address never throttle each other. Success
+    /// clears the principal bucket and leaves the client bucket unchanged.
+    ///
+    /// Unknown principals and stored hashes this crate cannot verify perform
+    /// one dummy Argon2 verification and return
+    /// [`AuthError::InvalidCredentials`]. Disabled accounts verify their stored
+    /// hash and return [`AuthError::UserDisabled`] only for the correct
+    /// password; that attempt stays counted, never clears counters and never
+    /// issues a session. Password work awaits the process-wide bounded pool;
+    /// saturation returns `AuthServiceUnavailable` and refunds the attempt,
+    /// because no password was checked.
     pub async fn login(
         &self,
         principal: &str,
         password: &str,
         metadata: ClientMetadata,
     ) -> AuthResult<AuthPayload> {
-        let rate_limit_keys =
-            self.rate_limit_keys(AuthRateLimitFlow::PasswordLogin, Some(principal), &metadata);
-        let rate_limit_permit = self
-            .reject_if_rate_limited(&self.config.rate_limits.credential, &rate_limit_keys)
+        let policy = &self.config.rate_limits.credential;
+        let user = self.user_store.find_user_by_principal(principal).await?;
+        let rate_limit_keys = self.password_login_rate_limit_keys(
+            principal,
+            user.as_ref().map(|user| user.id.as_str()),
+            &metadata,
+        );
+        let reservation = self
+            .reserve_credential_attempt(policy, &rate_limit_keys)
             .await?;
 
-        let Some(user) = self.user_store.find_user_by_principal(principal).await? else {
-            match self
-                .verify_password_async(password, DUMMY_PASSWORD_HASH)
-                .await
-            {
-                Ok(()) | Err(AuthError::InvalidCredentials) => {}
-                Err(error) => return Err(error),
+        // Unknown accounts and unverifiable stored hashes use the same fixed
+        // dummy work as a real verification, independent of the password.
+        let user = user.filter(|user| is_verifiable_password_hash(&user.password_hash));
+        let verified = self
+            .verify_password_async(
+                password,
+                user.as_ref()
+                    .map_or(DUMMY_PASSWORD_HASH, |user| user.password_hash.as_str()),
+            )
+            .await;
+        match verified {
+            Ok(()) => {}
+            Err(AuthError::AuthServiceUnavailable) => {
+                self.refund_rate_limit_reservation(policy, reservation)
+                    .await?;
+                return Err(AuthError::AuthServiceUnavailable);
             }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            Err(_) => {
+                self.settle_rate_limit_failure(policy, reservation).await?;
+                return Err(AuthError::InvalidCredentials);
+            }
+        }
+        let Some(user) = user else {
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::InvalidCredentials);
         };
-
         if user.disabled {
-            // Disabled accounts cannot authenticate. Use the same fixed work as
-            // unknown accounts, independent of their stored hash or password.
-            match self
-                .verify_password_async(password, DUMMY_PASSWORD_HASH)
-                .await
-            {
-                Ok(()) | Err(AuthError::InvalidCredentials) => {}
-                Err(error) => return Err(error),
-            }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
+            // Proven password, still a counted failure: never clear or issue.
+            self.settle_rate_limit_failure(policy, reservation).await?;
             return Err(AuthError::UserDisabled);
         }
-
-        if let Err(err) = self
-            .verify_password_async(password, &user.password_hash)
-            .await
-        {
-            if matches!(err, AuthError::AuthServiceUnavailable) {
-                return Err(err);
-            }
-            self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
-                .await?;
-            return Err(err);
-        }
-        self.clear_rate_limit_attempts(&self.config.rate_limits.credential, &rate_limit_permit)
-            .await?;
+        self.settle_rate_limit_success(policy, reservation).await?;
 
         // Queueing and counter-store awaits can outlive the original user
         // snapshot. Observe current authority immediately before session creation.
@@ -551,7 +657,9 @@ where
     /// The injected clock supplies the genuine step-up time. Only the session
     /// identified by `refresh_token` is changed; unrelated sessions and token
     /// families are untouched. Calling this method is the host's assertion that
-    /// the supplied methods/ACR satisfy its MFA policy.
+    /// the supplied methods/ACR satisfy its MFA policy. A step-up without at
+    /// least one method is refused with [`AuthError::InvalidConfiguration`] and
+    /// rotates nothing.
     pub async fn step_up_session(
         &self,
         refresh_token: &str,
@@ -559,6 +667,11 @@ where
         metadata: ClientMetadata,
         clock: &dyn Clock,
     ) -> AuthResult<AuthPayload> {
+        if step_up.methods.is_empty() {
+            return Err(AuthError::InvalidConfiguration(
+                "step-up requires at least one authentication method".to_string(),
+            ));
+        }
         let assurance = SessionAssurance::new(
             clock.now(),
             step_up.methods,
@@ -577,7 +690,7 @@ where
         metadata: ClientMetadata,
         assurance_override: Option<SessionAssurance>,
     ) -> AuthResult<AuthPayload> {
-        let now = self.refresh_rotation_clock.now();
+        let now = self.session_clock.now();
         let token_hash = hash_refresh_token(refresh_token);
         let existing = self
             .refresh_store
@@ -689,7 +802,7 @@ where
         };
 
         for _ in 0..MAX_REFRESH_REUSE_GRACE_RETRIES {
-            let now = self.refresh_rotation_clock.now();
+            let now = self.session_clock.now();
             if !superseded_within(presented, now, window) {
                 return Ok(None);
             }
@@ -859,6 +972,11 @@ where
             },
         };
 
+        let session_expires_at = [Some(source), newest]
+            .into_iter()
+            .flatten()
+            .filter_map(|record| self.session_deadline(record))
+            .min();
         self.issue_tokens_only(
             auth_user,
             source.session_family_id,
@@ -866,13 +984,53 @@ where
             now,
             source.grant_source,
             Some(&authorization_role_ceiling),
+            session_expires_at,
         )
         .await
     }
 
-    /// Revokes a refresh token or its full session family.
+    /// The absolute deadline a replacement for `record` inherits.
+    ///
+    /// A record without one, from before the setting or from a store that does
+    /// not persist it, is not extended past its own expiry while a maximum
+    /// lifetime is configured.
+    fn session_deadline(&self, record: &StoredRefreshToken) -> Option<OffsetDateTime> {
+        record
+            .session_expires_at
+            .or(self.config.max_session_lifetime.map(|_| record.expires_at))
+    }
+
+    /// Revokes every refresh token of a user, in every session family.
+    ///
+    /// Call this when disabling a user, after a password change or reset, and
+    /// for "sign out everywhere". Returns the number of tokens revoked. Access
+    /// tokens already issued stay valid until they expire, so pair it with
+    /// short access-token lifetimes or a status check. Store errors are
+    /// returned; nothing is reported as revoked unless the store did it.
+    pub async fn revoke_user_sessions(
+        &self,
+        user_id: &str,
+        reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        self.refresh_store
+            .revoke_refresh_tokens_for_user(user_id, self.session_clock.now(), reason)
+            .await
+    }
+
+    /// Ends the session that `refresh_token` belongs to.
+    ///
+    /// Use `revoke_family = true` for sign-out. It revokes every token in the
+    /// session family.
+    ///
+    /// With `false`, only the presented token is revoked while it is the
+    /// family's live token. A token that rotation has superseded, before or
+    /// during this call, is a reuse signal: its successor may be held by
+    /// someone else, so the whole family is revoked, with
+    /// [`RefreshTokenRevocationReason::ReplayDetected`] when it was already
+    /// superseded. Either way no token of the family stays live. A token
+    /// revoked for another reason, or an unknown token, changes nothing.
     pub async fn logout(&self, refresh_token: &str, revoke_family: bool) -> AuthResult<()> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let token_hash = hash_refresh_token(refresh_token);
         let Some(existing) = self
             .refresh_store
@@ -883,27 +1041,56 @@ where
         };
 
         if revoke_family {
+            return self
+                .refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::Logout,
+                )
+                .await;
+        }
+        if existing.is_revoked() {
+            if existing.replaced_by_token_id.is_none() {
+                // Already ended by sign-out, expiry or revocation. A second
+                // revocation could only move `revoked_at`.
+                return Ok(());
+            }
+            return self
+                .refresh_store
+                .revoke_refresh_token_family(
+                    existing.session_family_id,
+                    now,
+                    RefreshTokenRevocationReason::ReplayDetected,
+                )
+                .await;
+        }
+
+        self.refresh_store
+            .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)
+            .await?;
+        // The store leaves a token that a concurrent rotation revoked first
+        // unchanged, so read again: a successor must not outlive the sign-out.
+        let rotated = self
+            .refresh_store
+            .find_refresh_token_by_hash(&token_hash)
+            .await?
+            .is_none_or(|current| current.replaced_by_token_id.is_some());
+        if rotated {
             self.refresh_store
                 .revoke_refresh_token_family(
                     existing.session_family_id,
                     now,
                     RefreshTokenRevocationReason::Logout,
                 )
-                .await
-        } else if self.refresh_reuse_grace.is_some() && existing.is_revoked() {
-            // A second revocation could move `revoked_at` in some stores, which
-            // would let the holder of a superseded token renew its window.
-            Ok(())
-        } else {
-            self.refresh_store
-                .revoke_refresh_token(existing.id, now, None, RefreshTokenRevocationReason::Logout)
-                .await
+                .await?;
         }
+        Ok(())
     }
 
     /// Validates a local JWT access token and returns the authenticated user.
     pub fn authenticate_access_token(&self, token: &str) -> AuthResult<AuthUser> {
-        let claims = decode_access_token_claims(token, &self.access_token_decode_config())?;
+        let claims = decode_access_token_claims(token, &self.access_token_decode_config(token)?)?;
         access_token_claims_to_user(claims)
     }
 
@@ -912,7 +1099,7 @@ where
         token: &str,
         audience: &str,
     ) -> AuthResult<AuthUser> {
-        let mut config = self.access_token_decode_config();
+        let mut config = self.access_token_decode_config(token)?;
         config.validation = self.validation_for_audience(audience);
         config.purpose_policy = PurposePolicy::RequireAccessToken;
         config.claim_requirements = ClaimRequirements {
@@ -929,7 +1116,8 @@ where
         access_token_claims_to_user(decode_access_token_claims(token, &config)?)
     }
 
-    /// Validates a bearer token with or without the `Bearer ` prefix.
+    /// Validates an `Authorization` value, which must use the `Bearer` scheme.
+    /// Use [`Self::authenticate_access_token`] for a bare token.
     pub fn authenticate_bearer(&self, bearer_or_token: &str) -> AuthResult<AuthUser> {
         let token = strip_bearer_prefix(bearer_or_token)?;
         self.authenticate_access_token(token)
@@ -948,7 +1136,10 @@ where
 
     /// Returns the public JWKS document for asymmetric signing.
     ///
-    /// HS256 configurations return [`AuthError::JwksUnsupported`].
+    /// The current signing key comes first, followed by every
+    /// [`AuthConfig::previous_verification_keys`] entry, each with its own
+    /// `kid`. Previous keys verify but never sign. HS256 configurations return
+    /// [`AuthError::JwksUnsupported`].
     pub fn jwks(&self) -> AuthResult<JsonValue> {
         self.jwks.clone().ok_or(AuthError::JwksUnsupported)
     }
@@ -961,6 +1152,11 @@ where
     /// [`AuthService::authenticate_purpose_token`], not
     /// [`AuthService::authenticate_access_token`]. An audience reserved by
     /// [`Self::into_shared_with_fixed_audience_delegation`] is refused.
+    ///
+    /// Every token carries a random `jti` ([`IssuedPurposeToken::token_id`]).
+    /// The token is a bearer credential: [`Self::authenticate_purpose_token`]
+    /// accepts it repeatedly until `exp`. Use
+    /// [`Self::consume_purpose_token`] where a grant must be single-use.
     pub fn issue_purpose_token(
         &self,
         request: PurposeTokenIssueRequest,
@@ -973,11 +1169,13 @@ where
         {
             return Err(AuthError::Forbidden);
         }
-        let issued_at = OffsetDateTime::now_utc();
+        let issued_at = self.session_clock.now();
         let expires_at =
             crate::util::checked_jwt_expiry(issued_at, request.ttl, "purpose-token ttl")?;
+        let token_id = Uuid::new_v4();
         let claims = PurposeTokenClaims {
             typ: PURPOSE_TOKEN_TYPE.to_string(),
+            jti: Some(token_id.to_string()),
             sub: request.subject.clone(),
             sid: request.session_id.map(|session_id| session_id.to_string()),
             scopes: request.scopes.clone(),
@@ -992,6 +1190,7 @@ where
 
         Ok(IssuedPurposeToken {
             token,
+            token_id,
             subject: request.subject,
             purpose: request.purpose,
             audience: request.audience,
@@ -1003,6 +1202,10 @@ where
     }
 
     /// Validates a short-lived purpose token with exact purpose and audience.
+    ///
+    /// Validation is stateless and repeatable: the same token passes again
+    /// until it expires. For a single-use grant call
+    /// [`Self::consume_purpose_token`] instead.
     pub fn authenticate_purpose_token(
         &self,
         token: &str,
@@ -1012,13 +1215,14 @@ where
             return Err(AuthError::InvalidPurposeToken);
         }
 
-        self.validate_local_jwt_header(token)
+        let decoding_key = self
+            .local_jwt_decoding_key(token)
             .map_err(|_| AuthError::InvalidPurposeToken)?;
         let validation = self.validation_for_audience(&expected.audience);
-        let token_data = decode::<PurposeTokenClaims>(token, &self.decoding_key, &validation)
+        let token_data = decode::<PurposeTokenClaims>(token, decoding_key, &validation)
             .map_err(map_purpose_token_decode_error)?;
         let claims = token_data.claims;
-        if claims.exp <= OffsetDateTime::now_utc().unix_timestamp() {
+        if claims.exp <= self.session_clock.now().unix_timestamp() {
             return Err(AuthError::PurposeTokenExpired);
         }
         if claims.typ != PURPOSE_TOKEN_TYPE
@@ -1034,12 +1238,19 @@ where
             .map(Uuid::parse_str)
             .transpose()
             .map_err(|_| AuthError::InvalidPurposeToken)?;
+        let token_id = claims
+            .jti
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| AuthError::InvalidPurposeToken)?;
         let issued_at = OffsetDateTime::from_unix_timestamp(claims.iat)
             .map_err(|_| AuthError::InvalidPurposeToken)?;
         let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
             .map_err(|_| AuthError::InvalidPurposeToken)?;
 
         Ok(VerifiedPurposeToken {
+            token_id,
             subject: claims.sub,
             purpose: claims.purpose,
             audience: claims.aud,
@@ -1049,6 +1260,35 @@ where
             issued_at,
             expires_at,
         })
+    }
+
+    /// Validates a purpose token like [`Self::authenticate_purpose_token`] and
+    /// consumes its `jti` in `store`, so the token succeeds at most once.
+    ///
+    /// The store must record the id atomically (insert-if-absent) and keep it
+    /// until the token's expiry. A replay returns
+    /// [`AuthError::PurposeTokenReplayed`]. Tokens without a `jti` (minted
+    /// before 0.27) cannot be consumed and return
+    /// [`AuthError::InvalidPurposeToken`]. A store failure fails closed.
+    pub async fn consume_purpose_token<S>(
+        &self,
+        token: &str,
+        expected: PurposeTokenValidation,
+        store: &S,
+    ) -> AuthResult<VerifiedPurposeToken>
+    where
+        S: PurposeTokenReplayStore + ?Sized,
+    {
+        let verified = self.authenticate_purpose_token(token, expected)?;
+        let token_id = verified.token_id.ok_or(AuthError::InvalidPurposeToken)?;
+        if store
+            .consume_purpose_token(token_id, verified.expires_at)
+            .await?
+        {
+            Ok(verified)
+        } else {
+            Err(AuthError::PurposeTokenReplayed)
+        }
     }
 
     /// Issues a local session for a user already verified by the trusted host.
@@ -1264,7 +1504,7 @@ where
         request: AccessTokenOnlyRequest,
     ) -> AuthResult<AccessTokenOnlyGrant> {
         validate_access_token_only_request(&request, &self.config)?;
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
         if ttl <= Duration::ZERO {
             return Err(AuthError::InvalidConfiguration(
@@ -1325,6 +1565,9 @@ where
     /// and stamps the request with the authoritative session/security version.
     /// The issuance method performs a second read, so revocation, expiry,
     /// identity, version, or authority changes after preparation fail closed.
+    /// Both reads also require a current, enabled parent user in the
+    /// [`UserStore`]: a missing user fails with [`AuthError::Forbidden`] and a
+    /// disabled one with [`AuthError::UserDisabled`].
     /// Legacy source access tokens may omit a session version because this
     /// method obtains it from the authoritative record.
     pub async fn prepare_session_bound_access_token_only(
@@ -1380,6 +1623,8 @@ where
         );
         validate_session_bound_access_token_only_request(&request, &self.config)?;
         self.validate_session_bound_current_authority(verified.user(), &request)?;
+        self.require_enabled_delegation_parent(&request.reference.subject)
+            .await?;
         Ok(request)
     }
 
@@ -1389,7 +1634,8 @@ where
     /// resolver after request construction, preserves its exact
     /// subject/session/version, and validates current role and scope authority.
     /// The resolver contract is read-only: issuance must not extend idle expiry
-    /// or last-active state.
+    /// or last-active state. The parent user must still exist and be enabled in
+    /// the [`UserStore`].
     /// No refresh token, refresh-store row, session family, or new login session
     /// is created. A request prepared by a [`FixedAudienceDelegation`] is refused.
     pub async fn issue_session_bound_access_token_only(
@@ -1422,12 +1668,10 @@ where
         }
         let current = verified.user();
         self.validate_session_bound_current_authority(current, &request)?;
-        if request.fixed_audience.is_some() {
-            self.require_enabled_delegation_parent(&current.user_id)
-                .await?;
-        }
+        self.require_enabled_delegation_parent(&current.user_id)
+            .await?;
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
         let ttl = request.ttl.unwrap_or(self.config.access_token_ttl);
         let requested_expires_at = now.checked_add(ttl).ok_or_else(|| {
             AuthError::InvalidConfiguration(
@@ -1569,8 +1813,8 @@ where
 
     /// Authenticates an `async-graphql` WebSocket connection-init payload.
     pub async fn authenticate_connection_init_value(&self, value: JsonValue) -> AuthResult<Data> {
-        let token = extract_connection_init_token(&value)?;
-        let auth_user = self.authenticate_bearer(&token)?;
+        let token = extract_connection_init_token(&value, crate::BearerParseMode::RequireBearer)?;
+        let auth_user = self.authenticate_access_token(&token)?;
         let mut data = Data::default();
         data.insert(AuthRuntime::new(self.scope_matcher()));
         data.insert(auth_user);
@@ -1584,7 +1828,12 @@ where
         metadata: ClientMetadata,
         grant_source: crate::RefreshGrantSource,
     ) -> AuthResult<AuthPayload> {
-        let now = OffsetDateTime::now_utc();
+        let now = self.session_clock.now();
+        let session_expires_at = self
+            .config
+            .max_session_lifetime
+            .map(|lifetime| crate::util::checked_expiry(now, lifetime, "maximum session lifetime"))
+            .transpose()?;
         let (refresh_token, record, access_token, access_token_expires_at, user) = self
             .issue_tokens_only(
                 auth_user,
@@ -1593,6 +1842,7 @@ where
                 now,
                 grant_source,
                 None,
+                session_expires_at,
             )
             .await?;
 
@@ -1609,6 +1859,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn issue_tokens_only(
         &self,
         mut auth_user: AuthUser,
@@ -1617,6 +1868,7 @@ where
         now: OffsetDateTime,
         grant_source: crate::RefreshGrantSource,
         authorization_role_ceiling: Option<&[String]>,
+        session_expires_at: Option<OffsetDateTime>,
     ) -> AuthResult<(String, StoredRefreshToken, String, OffsetDateTime, AuthUser)> {
         #[cfg(test)]
         self.token_work
@@ -1632,14 +1884,27 @@ where
                 .authorization_roles
                 .retain(|role| ceiling.contains(role));
         }
+        if session_expires_at.is_some_and(|deadline| deadline <= now) {
+            return Err(AuthError::RefreshTokenExpired);
+        }
         let access_token_expires_at =
             crate::util::checked_jwt_expiry(now, self.config.access_token_ttl, "access-token ttl")?;
+        // No token outlives the session's absolute deadline.
+        let access_token_expires_at = session_expires_at
+            .map_or(access_token_expires_at, |deadline| {
+                access_token_expires_at.min(deadline)
+            });
         let (access_token, user) =
             self.issue_access_token_with_user(auth_user, now, access_token_expires_at)?;
 
         let raw_refresh_token = generate_opaque_token();
         let refresh_token_expires_at =
             crate::util::checked_expiry(now, self.config.refresh_token_ttl, "refresh-token ttl")?;
+        // Rotation never extends a session past its absolute deadline.
+        let refresh_token_expires_at = session_expires_at
+            .map_or(refresh_token_expires_at, |deadline| {
+                refresh_token_expires_at.min(deadline)
+            });
         let refreshable_metadata = RefreshableTokenMetadata {
             tenant_id: user.token_claims.tenant_id.clone(),
             organization_id: user.token_claims.organization_id.clone(),
@@ -1662,6 +1927,7 @@ where
             token_hash: hash_refresh_token(&raw_refresh_token),
             created_at: now,
             expires_at: refresh_token_expires_at,
+            session_expires_at,
             last_used_at: None,
             revoked_at: None,
             replaced_by_token_id: None,
@@ -1768,34 +2034,49 @@ where
             .map_err(|err| AuthError::TokenCreation(err.to_string()))
     }
 
-    pub(super) fn validate_local_jwt_header(&self, token: &str) -> AuthResult<()> {
+    /// Selects the verification key for a locally issued JWT by header `alg`
+    /// and `kid`: the current signing key or a verification-only previous key.
+    pub(super) fn local_jwt_decoding_key(&self, token: &str) -> AuthResult<&DecodingKey> {
         let header =
             jsonwebtoken::decode_header(token).map_err(|_| AuthError::InvalidAccessToken)?;
         if header.alg != self.signing_algorithm {
             return Err(AuthError::InvalidAccessToken);
         }
 
-        if let Some(expected_kid) = &self.signing_key_id {
-            match header.kid.as_deref() {
-                Some(actual_kid) if actual_kid == expected_kid => {}
-                _ => return Err(AuthError::InvalidAccessToken),
-            }
+        let Some(signing_kid) = &self.signing_key_id else {
+            return Ok(&self.decoding_key);
+        };
+        let kid = header.kid.as_deref().ok_or(AuthError::InvalidAccessToken)?;
+        if kid == signing_kid {
+            return Ok(&self.decoding_key);
         }
-
-        Ok(())
+        self.previous_decoding_keys
+            .iter()
+            .find(|(previous_kid, _)| previous_kid == kid)
+            .map(|(_, key)| key)
+            .ok_or(AuthError::InvalidAccessToken)
     }
 
-    pub(super) fn access_token_decode_config(&self) -> AccessTokenDecodeConfig {
-        AccessTokenDecodeConfig::for_service(
-            self.decoding_key.clone(),
+    pub(super) fn access_token_decode_config(
+        &self,
+        token: &str,
+    ) -> AuthResult<AccessTokenDecodeConfig> {
+        // The key was selected by kid above, so the decode core does not pin
+        // one kid again.
+        let mut config = AccessTokenDecodeConfig::for_service(
+            self.local_jwt_decoding_key(token)?.clone(),
             self.validation.clone(),
-            self.signing_key_id.clone(),
+            None,
             self.config.legacy_scope_claims,
-        )
+        );
+        config.clock = self.session_clock.clone();
+        Ok(config)
     }
 
     fn validation_for_audience(&self, audience: &str) -> Validation {
         let mut validation = Validation::new(self.signing_algorithm);
+        // Expiry is checked against the session clock by each caller.
+        validation.validate_exp = false;
         validation.set_issuer(std::slice::from_ref(&self.config.issuer));
         validation.set_audience(&[audience]);
         validation.required_spec_claims.extend(
@@ -1810,7 +2091,9 @@ where
     /// process it.
     ///
     /// `Ok(false)` means the request was throttled or locked and the host
-    /// should preserve silent-success semantics without sending email.
+    /// should preserve silent-success semantics without sending email. The
+    /// request is recorded only when the principal and client buckets both
+    /// admit it, so a throttled client leaves the principal untouched.
     pub async fn should_process_password_reset_request(
         &self,
         principal: &str,
@@ -1823,7 +2106,9 @@ where
     /// Records a login-code request and returns whether the host should process it.
     ///
     /// `Ok(false)` means the request was throttled or locked and the host
-    /// should preserve silent-success semantics without sending email.
+    /// should preserve silent-success semantics without sending email. The
+    /// request is recorded only when the principal and client buckets both
+    /// admit it, so a throttled client leaves the principal untouched.
     pub async fn should_process_login_code_request(
         &self,
         principal: &str,
@@ -1868,6 +2153,24 @@ where
         {
             keys.push(rate_limit_key(flow, AuthRateLimitBucket::Client, &client));
         }
+        keys
+    }
+
+    /// Password-login keys. A resolved account is counted by its stable local
+    /// user ID, so every spelling or alias the user store accepts shares one
+    /// budget; an unknown principal is counted by its normalized input.
+    pub(super) fn password_login_rate_limit_keys(
+        &self,
+        principal: &str,
+        user_id: Option<&str>,
+        metadata: &ClientMetadata,
+    ) -> Vec<AuthRateLimitKey> {
+        let flow = AuthRateLimitFlow::PasswordLogin;
+        let Some(user_id) = user_id else {
+            return self.rate_limit_keys(flow, Some(principal), metadata);
+        };
+        let mut keys = self.rate_limit_keys(flow.clone(), None, metadata);
+        keys.insert(0, account_rate_limit_key(flow, user_id));
         keys
     }
 
@@ -1928,6 +2231,10 @@ where
         Ok(RateLimitPermit { observations })
     }
 
+    /// Records one credential failure for every key after verification.
+    ///
+    /// Only flows without a guessable secret use this; credential checks
+    /// reserve their attempt with [`Self::reserve_rate_limit_attempt`] first.
     pub(super) async fn record_rate_limit_attempt(
         &self,
         policy: &AuthRateLimitPolicy,
@@ -1943,8 +2250,8 @@ where
                 .record_rate_limit_attempt_for_key(policy, key, now, false)
                 .await?
             {
-                RateLimitRecordOutcome::Recorded => {}
-                RateLimitRecordOutcome::Denied => {
+                RateLimitRecordOutcome::Recorded(_) => {}
+                RateLimitRecordOutcome::Denied(_) => {
                     return Err(AuthError::Store(
                         "credential failure recording was unexpectedly denied".to_string(),
                     ));
@@ -1955,26 +2262,198 @@ where
         Ok(())
     }
 
+    /// Counts one attempt against every key before the caller verifies anything.
+    ///
+    /// Every key is evaluated before any is recorded. Each record is an atomic
+    /// compare-and-swap that rechecks backoff and lockout against the state it
+    /// replaces, so concurrent callers cannot share the last admitted attempt.
+    /// If a key denies or cannot be recorded, keys this call already recorded
+    /// are refunded and the denial or store error is returned. The reservation
+    /// stays counted as a failure unless the caller settles or refunds it.
+    pub(super) async fn reserve_rate_limit_attempt(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<RateLimitReservation> {
+        self.reserve_rate_limit_keys(policy, keys, false).await
+    }
+
+    /// Reserves a credential check: the principal bucket is counted before
+    /// verification as [`Self::reserve_rate_limit_attempt`] does, while shared
+    /// client buckets are only checked for active backoff or lockout. They are
+    /// recorded by [`Self::settle_rate_limit_failure`], so concurrent correct
+    /// checks from one address (shared NAT) never throttle each other. The
+    /// principal reservation alone bounds guesses and fails closed when the
+    /// store cannot record.
+    pub(super) async fn reserve_credential_attempt(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+    ) -> AuthResult<RateLimitReservation> {
+        self.reserve_rate_limit_keys(policy, keys, true).await
+    }
+
+    async fn reserve_rate_limit_keys(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        keys: &[AuthRateLimitKey],
+        defer_client: bool,
+    ) -> AuthResult<RateLimitReservation> {
+        let mut reservation = RateLimitReservation::default();
+        if !policy.enabled || keys.is_empty() {
+            return Ok(reservation);
+        }
+        self.reject_if_rate_limited(policy, keys).await?;
+
+        let now = self.rate_limit_clock.now();
+        for key in keys {
+            if defer_client && key.bucket == AuthRateLimitBucket::Client {
+                reservation.deferred_client_keys.push(key.clone());
+                continue;
+            }
+            let denial = match self
+                .record_rate_limit_attempt_for_key(policy, key, now, true)
+                .await
+            {
+                Ok(RateLimitRecordOutcome::Recorded(record)) => {
+                    reservation.records.push(*record);
+                    continue;
+                }
+                Ok(RateLimitRecordOutcome::Denied(denial)) => denial,
+                Err(error) => error,
+            };
+            // The denial or store error is the outcome; a failed refund only
+            // leaves a safe over-count.
+            let _ = self
+                .refund_rate_limit_reservation(policy, reservation)
+                .await;
+            return Err(denial);
+        }
+        Ok(reservation)
+    }
+
+    /// Completes a successful reserved attempt.
+    ///
+    /// Principal buckets are cleared when nothing else was recorded since the
+    /// reservation, otherwise only this attempt is refunded. Client buckets
+    /// are shared by every principal behind one address, so a success only
+    /// refunds its own attempt and leaves other failures counted.
+    pub(super) async fn settle_rate_limit_success(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        reservation: RateLimitReservation,
+    ) -> AuthResult<()> {
+        for record in &reservation.records {
+            if record.key.bucket == AuthRateLimitBucket::Principal
+                && self
+                    .rate_limit_store
+                    .clear_auth_rate_limit_state(&record.key, Some(record.written.revision))
+                    .await?
+            {
+                continue;
+            }
+            self.refund_rate_limit_record(policy, record).await?;
+        }
+        Ok(())
+    }
+
+    /// Completes a reserved credential check that failed: the principal
+    /// attempt stays counted and each deferred client bucket records one
+    /// failure. Call it on every failed check, before returning its error.
+    pub(super) async fn settle_rate_limit_failure(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        reservation: RateLimitReservation,
+    ) -> AuthResult<()> {
+        self.record_rate_limit_attempt(policy, &reservation.deferred_client_keys)
+            .await
+    }
+
+    /// Removes a reserved attempt that verified nothing, such as when password
+    /// work could not be admitted or host input was invalid.
+    pub(super) async fn refund_rate_limit_reservation(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        reservation: RateLimitReservation,
+    ) -> AuthResult<()> {
+        let mut result = Ok(());
+        for record in reservation.records.iter().rev() {
+            if let Err(error) = self.refund_rate_limit_record(policy, record).await {
+                result = result.and(Err(error));
+            }
+        }
+        result
+    }
+
+    async fn refund_rate_limit_record(
+        &self,
+        policy: &AuthRateLimitPolicy,
+        record: &RateLimitRecord,
+    ) -> AuthResult<()> {
+        for _ in 0..MAX_RATE_LIMIT_CAS_RETRIES {
+            let Some(current) = self
+                .rate_limit_store
+                .find_auth_rate_limit_state(&record.key)
+                .await?
+            else {
+                return Ok(());
+            };
+            let now = self.rate_limit_clock.now();
+            let replacement = if current.revision == record.written.revision {
+                // Nothing was recorded since this attempt: restore what it replaced.
+                record
+                    .previous
+                    .clone()
+                    .filter(|previous| previous.expires_at > now)
+            } else if current.state.expires_at <= now
+                || current.state.first_attempt_at != record.written.state.first_attempt_at
+            {
+                // The window this attempt was counted in has ended.
+                return Ok(());
+            } else {
+                refunded_rate_limit_state(&current.state, policy)
+            };
+            let applied = match replacement {
+                Some(state) => {
+                    self.rate_limit_store
+                        .compare_exchange_auth_rate_limit_state(
+                            &record.key,
+                            Some(current.revision),
+                            AuthRateLimitSnapshot {
+                                state,
+                                revision: Uuid::new_v4(),
+                            },
+                        )
+                        .await?
+                }
+                None => {
+                    self.rate_limit_store
+                        .clear_auth_rate_limit_state(&record.key, Some(current.revision))
+                        .await?
+                }
+            };
+            if applied {
+                return Ok(());
+            }
+        }
+
+        Err(AuthError::Store(
+            "rate-limit refund compare-and-swap retry limit exceeded".to_string(),
+        ))
+    }
+
+    /// Admits a request only when every key allows it, then records it
+    /// against every key.
     async fn record_rate_limit_request_if_allowed(
         &self,
         policy: &AuthRateLimitPolicy,
         keys: &[AuthRateLimitKey],
     ) -> AuthResult<bool> {
-        if !policy.enabled || keys.is_empty() {
-            return Ok(true);
+        match self.reserve_rate_limit_attempt(policy, keys).await {
+            Ok(_) => Ok(true),
+            Err(AuthError::AuthLocked { .. } | AuthError::AuthThrottled { .. }) => Ok(false),
+            Err(error) => Err(error),
         }
-
-        let now = self.rate_limit_clock.now();
-        for key in keys {
-            if matches!(
-                self.record_rate_limit_attempt_for_key(policy, key, now, true)
-                    .await?,
-                RateLimitRecordOutcome::Denied
-            ) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     async fn record_rate_limit_attempt_for_key(
@@ -1991,15 +2470,16 @@ where
                 .await?;
 
             if enforce_before_record
-                && current
+                && let Some(denial) = current
                     .as_ref()
-                    .is_some_and(|snapshot| active_rate_limit_error(&snapshot.state, now).is_some())
+                    .and_then(|snapshot| active_rate_limit_error(&snapshot.state, now))
             {
-                return Ok(RateLimitRecordOutcome::Denied);
+                return Ok(RateLimitRecordOutcome::Denied(denial));
             }
 
             let expected_revision = current.as_ref().map(|snapshot| snapshot.revision);
             let current_state = current.map(|snapshot| snapshot.state);
+            let previous = current_state.clone().filter(|state| state.expires_at > now);
             let next = next_rate_limit_state(key.clone(), current_state, policy, now)?;
             let replacement = AuthRateLimitSnapshot {
                 state: next,
@@ -2007,10 +2487,16 @@ where
             };
             if self
                 .rate_limit_store
-                .compare_exchange_auth_rate_limit_state(key, expected_revision, replacement)
+                .compare_exchange_auth_rate_limit_state(key, expected_revision, replacement.clone())
                 .await?
             {
-                return Ok(RateLimitRecordOutcome::Recorded);
+                return Ok(RateLimitRecordOutcome::Recorded(Box::new(
+                    RateLimitRecord {
+                        key: key.clone(),
+                        previous,
+                        written: replacement,
+                    },
+                )));
             }
         }
 
@@ -2019,6 +2505,10 @@ where
         ))
     }
 
+    /// Clears the principal buckets observed by `permit` after a success.
+    ///
+    /// Client buckets are left untouched: one principal's success must not
+    /// erase failures other principals recorded from the same address.
     pub(super) async fn clear_rate_limit_attempts(
         &self,
         policy: &AuthRateLimitPolicy,
@@ -2028,7 +2518,11 @@ where
             return Ok(());
         }
 
-        for observation in &permit.observations {
+        for observation in permit
+            .observations
+            .iter()
+            .filter(|observation| observation.key.bucket == AuthRateLimitBucket::Principal)
+        {
             let _cleared = self
                 .rate_limit_store
                 .clear_auth_rate_limit_state(&observation.key, observation.revision)
@@ -2049,9 +2543,71 @@ struct RateLimitObservation {
     revision: Option<Uuid>,
 }
 
+/// Attempts counted before verification. Settle it on success, settle it as a
+/// failure when the check fails, or refund it when nothing was verified.
+/// Dropping it keeps the principal attempt counted but records nothing on the
+/// shared client bucket.
+#[derive(Default)]
+#[must_use = "a reservation is settled on success or refunded when nothing was verified"]
+pub(super) struct RateLimitReservation {
+    records: Vec<RateLimitRecord>,
+    /// Shared client buckets of a credential check: checked before the work,
+    /// recorded only when the check fails (see [`AuthService::settle_rate_limit_failure`]).
+    deferred_client_keys: Vec<AuthRateLimitKey>,
+}
+
+struct RateLimitRecord {
+    key: AuthRateLimitKey,
+    /// Unexpired state this attempt replaced.
+    previous: Option<AuthRateLimitState>,
+    written: AuthRateLimitSnapshot,
+}
+
 enum RateLimitRecordOutcome {
-    Recorded,
-    Denied,
+    Recorded(Box<RateLimitRecord>),
+    Denied(AuthError),
+}
+
+/// One attempt fewer in the same window, with thresholds recomputed downward.
+/// Backoff or lockout set by a later attempt stays while its count holds.
+fn refunded_rate_limit_state(
+    state: &AuthRateLimitState,
+    policy: &AuthRateLimitPolicy,
+) -> Option<AuthRateLimitState> {
+    let attempts = state.attempts.saturating_sub(1);
+    if attempts == 0 {
+        return None;
+    }
+    let mut state = state.clone();
+    state.attempts = attempts;
+    if attempts < policy.max_attempts_before_lockout {
+        state.locked_until = None;
+    }
+    if attempts < policy.backoff_after_attempts {
+        state.backoff_until = None;
+    }
+    Some(state)
+}
+
+/// Whether Argon2 verification of `hash` performs real work. Anything else
+/// (unparsable, another algorithm, invalid parameters or salt) would fail
+/// fast and reveal the stored state, so login verifies the dummy hash instead.
+fn is_verifiable_password_hash(hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    let mut salt = [0u8; 64];
+    argon2::Algorithm::try_from(parsed.algorithm).is_ok()
+        && parsed
+            .version
+            .is_none_or(|version| argon2::Version::try_from(version).is_ok())
+        && argon2::Params::try_from(&parsed).is_ok()
+        && parsed.hash.is_some()
+        && parsed.salt.is_some_and(|value| {
+            value
+                .decode_b64(&mut salt)
+                .is_ok_and(|bytes| bytes.len() >= argon2::MIN_SALT_LEN)
+        })
 }
 
 fn active_rate_limit_error(state: &AuthRateLimitState, now: OffsetDateTime) -> Option<AuthError> {
@@ -2079,6 +2635,16 @@ fn normalize_principal_bucket(value: &str) -> Option<String> {
 fn normalize_client_bucket(value: &str) -> Option<String> {
     let normalized = value.trim().to_string();
     (!normalized.is_empty()).then_some(normalized)
+}
+
+/// Account keys hash an `account` segment that the `principal` form never
+/// produces, so no submitted principal collides with a user ID.
+fn account_rate_limit_key(flow: AuthRateLimitFlow, user_id: &str) -> AuthRateLimitKey {
+    AuthRateLimitKey {
+        value_hash: hash_rate_limit_value(&format!("{}:account:{user_id}", flow.as_str())),
+        flow,
+        bucket: AuthRateLimitBucket::Principal,
+    }
 }
 
 fn rate_limit_key(
@@ -2371,15 +2937,28 @@ fn is_reserved_access_token_claim(key: &str) -> bool {
         .any(|reserved| key.eq_ignore_ascii_case(reserved))
 }
 
-fn dedupe_stable(values: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        if seen.insert(value.clone()) {
-            out.push(value);
-        }
+/// The dummy hash under `config`'s parameters. The defaults reuse the fixed
+/// constant; other parameters hash a fixed input once, at construction.
+fn dummy_password_hash(
+    config: &crate::PasswordHashingConfig,
+    argon2: &Argon2<'static>,
+) -> AuthResult<Arc<str>> {
+    let defaults = crate::PasswordHashingConfig::default();
+    if (config.memory_kib, config.iterations, config.parallelism)
+        == (
+            defaults.memory_kib,
+            defaults.iterations,
+            defaults.parallelism,
+        )
+    {
+        return Ok(DUMMY_PASSWORD_HASH.into());
     }
-    out
+    let salt = SaltString::encode_b64(b"agql-auth-dummy-salt")
+        .map_err(|err| AuthError::PasswordHashing(err.to_string()))?;
+    argon2
+        .hash_password(b"agql-auth-dummy-password", &salt)
+        .map(|hash| hash.to_string().into())
+        .map_err(|err| AuthError::PasswordHashing(err.to_string()))
 }
 
 const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
@@ -2438,7 +3017,7 @@ const RESERVED_ACCESS_TOKEN_CLAIMS: &[&str] = &[
 ];
 
 const RESERVED_PURPOSE_TOKEN_CLAIMS: &[&str] = &[
-    "typ", "sub", "sid", "scopes", "purpose", "iss", "aud", "exp", "iat",
+    "typ", "jti", "sub", "sid", "scopes", "purpose", "iss", "aud", "exp", "iat", "nbf",
 ];
 
 struct JwtKeyMaterial {
@@ -2447,6 +3026,7 @@ struct JwtKeyMaterial {
     validation: Validation,
     algorithm: Algorithm,
     key_id: Option<String>,
+    previous_decoding_keys: Vec<(String, DecodingKey)>,
     jwks: Option<JsonValue>,
 }
 
@@ -2454,11 +3034,13 @@ impl JwtKeyMaterial {
     fn from_config(config: &AuthConfig) -> AuthResult<Self> {
         let signing = effective_signing_config(config);
         let algorithm = signing.algorithm();
+        let mut previous_decoding_keys = Vec::new();
         let (encoding_key, decoding_key, key_id, jwks) = match signing {
             EffectiveJwtSigningConfig::Hs256 { secret } => {
-                if secret.len() < MIN_HS256_SECRET_BYTES {
+                crate::keys::validate_hs256_secret(secret)?;
+                if !config.previous_verification_keys.is_empty() {
                     return Err(AuthError::InvalidConfiguration(
-                        "HS256 secret must be at least 32 bytes".to_string(),
+                        "previous verification keys require RS256 signing".to_string(),
                     ));
                 }
 
@@ -2489,7 +3071,37 @@ impl JwtKeyMaterial {
                         AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string())
                     })?;
                 validate_rs256_key_pair(&encoding_key, &decoding_key)?;
-                let jwks = build_rs256_jwks(public_key_pem, key_id)?;
+                if config.previous_verification_keys.len() > MAX_PREVIOUS_VERIFICATION_KEYS {
+                    return Err(AuthError::InvalidConfiguration(format!(
+                        "at most {MAX_PREVIOUS_VERIFICATION_KEYS} previous verification keys are allowed"
+                    )));
+                }
+                let mut jwk_entries = vec![rs256_jwk(&decoding_key, key_id)?];
+                for previous in &config.previous_verification_keys {
+                    let previous_kid = previous.key_id();
+                    if previous_kid.trim().is_empty()
+                        || previous_kid == key_id
+                        || previous_decoding_keys
+                            .iter()
+                            .any(|(kid, _): &(String, DecodingKey)| kid == previous_kid)
+                    {
+                        return Err(AuthError::InvalidConfiguration(
+                            "previous verification key ids must be non-empty and unique"
+                                .to_string(),
+                        ));
+                    }
+                    let previous_key = DecodingKey::from_rsa_pem(
+                        previous.public_key_pem().as_bytes(),
+                    )
+                    .map_err(|_| {
+                        AuthError::InvalidConfiguration(
+                            "invalid previous verification key PEM".to_string(),
+                        )
+                    })?;
+                    jwk_entries.push(rs256_jwk(&previous_key, previous_kid)?);
+                    previous_decoding_keys.push((previous_kid.to_string(), previous_key));
+                }
+                let jwks = json!({ "keys": jwk_entries });
 
                 (
                     encoding_key,
@@ -2501,6 +3113,8 @@ impl JwtKeyMaterial {
         };
 
         let mut validation = Validation::new(algorithm);
+        // Expiry is checked against the service's session clock by each caller.
+        validation.validate_exp = false;
         validation.set_issuer(std::slice::from_ref(&config.issuer));
         validation.set_audience(std::slice::from_ref(&config.audience));
         validation.required_spec_claims.extend(
@@ -2515,6 +3129,7 @@ impl JwtKeyMaterial {
             validation,
             algorithm,
             key_id,
+            previous_decoding_keys,
             jwks,
         })
     }
@@ -2578,24 +3193,19 @@ fn validate_rs256_key_pair(
     Ok(())
 }
 
-fn build_rs256_jwks(public_key_pem: &str, key_id: &str) -> AuthResult<JsonValue> {
-    let public_key = parse_rsa_public_key(public_key_pem)?;
+fn rs256_jwk(decoding_key: &DecodingKey, key_id: &str) -> AuthResult<JsonValue> {
+    let invalid = || AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string());
+    let jwk = jsonwebtoken::jwk::Jwk::from_decoding_key(decoding_key, Some(Algorithm::RS256))
+        .map_err(|_| invalid())?;
+    let jsonwebtoken::jwk::AlgorithmParameters::RSA(rsa) = jwk.algorithm else {
+        return Err(invalid());
+    };
     Ok(json!({
-        "keys": [
-            {
-                "kty": "RSA",
-                "use": "sig",
-                "alg": "RS256",
-                "kid": key_id,
-                "n": URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
-                "e": URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
-            }
-        ]
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": key_id,
+        "n": rsa.n,
+        "e": rsa.e,
     }))
-}
-
-fn parse_rsa_public_key(public_key_pem: &str) -> AuthResult<RsaPublicKey> {
-    RsaPublicKey::from_public_key_pem(public_key_pem)
-        .or_else(|_| RsaPublicKey::from_pkcs1_pem(public_key_pem))
-        .map_err(|_| AuthError::InvalidConfiguration("invalid RS256 public key PEM".to_string()))
 }

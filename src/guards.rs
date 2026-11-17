@@ -1,17 +1,39 @@
+//! `async-graphql` guards for local users and generic principals.
+//!
+//! Every user and principal guard refuses delegated credentials by default: a
+//! session-bound delegation (`grant_kind = session_bound_delegation`) or any
+//! access token carrying an `actor` claim. Those tokens act on behalf of
+//! someone else and are not ordinary bearers. A resolver that is meant to run
+//! under delegation opts in with `allow_delegated()` on its guard. API-token
+//! principals are not delegations and are unaffected.
+//!
+//! Guards built from an empty role or scope list deny every request.
+
 use async_graphql::{Context, ErrorExtensions, Guard, Result as GraphqlResult};
 
-use crate::{AuthError, ChannelIdentity, auth_user_from_ctx, principal_from_ctx};
+use crate::{AuthError, AuthPrincipal, AuthUser, ChannelIdentity};
 use crate::{AuthRuntime, ExactScopeMatch, ScopeMatch};
 use std::sync::Arc;
 
 /// `async-graphql` guard requiring an authenticated `AuthUser` in request data.
+///
+/// Delegated and actor tokens are refused unless [`Self::allow_delegated`] is
+/// set.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RequireAuth;
+pub struct RequireAuth {
+    allow_delegated: bool,
+}
 
 impl RequireAuth {
     /// Creates an authentication guard.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Also admits delegated and actor tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -20,15 +42,19 @@ impl Guard for RequireAuth {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
-        let result = auth_user_from_ctx(ctx).map(|_| ());
+        let result = user_from_ctx(ctx, self.allow_delegated).map(|_| ());
         async move { result }
     }
 }
 
 /// `async-graphql` guard requiring at least one matching role.
+///
+/// An empty role list denies. Delegated and actor tokens are refused unless
+/// [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequireAnyRole {
     roles: Vec<String>,
+    allow_delegated: bool,
 }
 
 impl RequireAnyRole {
@@ -40,7 +66,14 @@ impl RequireAnyRole {
     {
         Self {
             roles: roles.into_iter().map(Into::into).collect(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -49,7 +82,7 @@ impl Guard for RequireAnyRole {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
-        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
+        let allowed = user_from_ctx(ctx, self.allow_delegated).and_then(|user| {
             if self
                 .roles
                 .iter()
@@ -65,9 +98,13 @@ impl Guard for RequireAnyRole {
 }
 
 /// `async-graphql` guard requiring every configured role.
+///
+/// An empty role list denies. Delegated and actor tokens are refused unless
+/// [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequireAllRoles {
     roles: Vec<String>,
+    allow_delegated: bool,
 }
 
 impl RequireAllRoles {
@@ -79,14 +116,25 @@ impl RequireAllRoles {
     {
         Self {
             roles: roles.into_iter().map(Into::into).collect(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
 /// `async-graphql` guard requiring one exact scope.
+///
+/// Delegated and actor tokens are refused unless [`Self::allow_delegated`] is
+/// set.
 #[derive(Clone, Debug)]
 pub struct RequireScope {
     scope: String,
+    allow_delegated: bool,
 }
 
 impl RequireScope {
@@ -94,7 +142,14 @@ impl RequireScope {
     pub fn new(scope: impl Into<String>) -> Self {
         Self {
             scope: scope.into(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -104,7 +159,7 @@ impl Guard for RequireScope {
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
         let matcher = matcher_from_ctx(ctx);
-        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
+        let allowed = user_from_ctx(ctx, self.allow_delegated).and_then(|user| {
             if user.has_scope_with(matcher.as_ref(), &self.scope) {
                 Ok(())
             } else {
@@ -116,9 +171,13 @@ impl Guard for RequireScope {
 }
 
 /// `async-graphql` guard requiring at least one exact scope match.
+///
+/// An empty scope list denies. Delegated and actor tokens are refused unless
+/// [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequireAnyScope {
     scopes: Vec<String>,
+    allow_delegated: bool,
 }
 
 impl RequireAnyScope {
@@ -130,7 +189,14 @@ impl RequireAnyScope {
     {
         Self {
             scopes: scopes.into_iter().map(Into::into).collect(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -140,7 +206,7 @@ impl Guard for RequireAnyScope {
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
         let matcher = matcher_from_ctx(ctx);
-        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
+        let allowed = user_from_ctx(ctx, self.allow_delegated).and_then(|user| {
             if user.has_any_scope_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
@@ -152,9 +218,13 @@ impl Guard for RequireAnyScope {
 }
 
 /// `async-graphql` guard requiring every configured scope.
+///
+/// An empty scope list denies. Delegated and actor tokens are refused unless
+/// [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequireAllScopes {
     scopes: Vec<String>,
+    allow_delegated: bool,
 }
 
 impl RequireAllScopes {
@@ -166,7 +236,14 @@ impl RequireAllScopes {
     {
         Self {
             scopes: scopes.into_iter().map(Into::into).collect(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -176,8 +253,8 @@ impl Guard for RequireAllScopes {
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
         let matcher = matcher_from_ctx(ctx);
-        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
-            if user.has_all_scopes_with(matcher.as_ref(), &self.scopes) {
+        let allowed = user_from_ctx(ctx, self.allow_delegated).and_then(|user| {
+            if !self.scopes.is_empty() && user.has_all_scopes_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -192,11 +269,12 @@ impl Guard for RequireAllRoles {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
-        let allowed = auth_user_from_ctx(ctx).and_then(|user| {
-            if self
-                .roles
-                .iter()
-                .all(|role| user.roles.iter().any(|r| r == role))
+        let allowed = user_from_ctx(ctx, self.allow_delegated).and_then(|user| {
+            if !self.roles.is_empty()
+                && self
+                    .roles
+                    .iter()
+                    .all(|role| user.roles.iter().any(|r| r == role))
             {
                 Ok(())
             } else {
@@ -208,13 +286,24 @@ impl Guard for RequireAllRoles {
 }
 
 /// `async-graphql` guard requiring any authenticated principal.
+///
+/// Delegated and actor user tokens are refused unless
+/// [`Self::allow_delegated`] is set.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RequirePrincipal;
+pub struct RequirePrincipal {
+    allow_delegated: bool,
+}
 
 impl RequirePrincipal {
     /// Creates a generic principal guard.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Also admits delegated and actor user tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -223,15 +312,19 @@ impl Guard for RequirePrincipal {
         &self,
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
-        let result = principal_from_ctx(ctx).map(|_| ());
+        let result = principal_from_ctx(ctx, self.allow_delegated).map(|_| ());
         async move { result }
     }
 }
 
 /// `async-graphql` guard requiring one exact scope on any authenticated principal.
+///
+/// Delegated and actor user tokens are refused unless
+/// [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequirePrincipalScope {
     scope: String,
+    allow_delegated: bool,
 }
 
 impl RequirePrincipalScope {
@@ -239,7 +332,14 @@ impl RequirePrincipalScope {
     pub fn new(scope: impl Into<String>) -> Self {
         Self {
             scope: scope.into(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor user tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -249,7 +349,7 @@ impl Guard for RequirePrincipalScope {
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
         let matcher = matcher_from_ctx(ctx);
-        let allowed = principal_from_ctx(ctx).and_then(|principal| {
+        let allowed = principal_from_ctx(ctx, self.allow_delegated).and_then(|principal| {
             if principal.has_scope_with(matcher.as_ref(), &self.scope) {
                 Ok(())
             } else {
@@ -261,9 +361,13 @@ impl Guard for RequirePrincipalScope {
 }
 
 /// `async-graphql` guard requiring at least one exact scope on any authenticated principal.
+///
+/// An empty scope list denies. Delegated and actor user tokens are refused
+/// unless [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequireAnyPrincipalScope {
     scopes: Vec<String>,
+    allow_delegated: bool,
 }
 
 impl RequireAnyPrincipalScope {
@@ -275,7 +379,14 @@ impl RequireAnyPrincipalScope {
     {
         Self {
             scopes: scopes.into_iter().map(Into::into).collect(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor user tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -285,7 +396,7 @@ impl Guard for RequireAnyPrincipalScope {
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
         let matcher = matcher_from_ctx(ctx);
-        let allowed = principal_from_ctx(ctx).and_then(|principal| {
+        let allowed = principal_from_ctx(ctx, self.allow_delegated).and_then(|principal| {
             if principal.has_any_scope_with(matcher.as_ref(), &self.scopes) {
                 Ok(())
             } else {
@@ -297,9 +408,13 @@ impl Guard for RequireAnyPrincipalScope {
 }
 
 /// `async-graphql` guard requiring every configured scope on any authenticated principal.
+///
+/// An empty scope list denies. Delegated and actor user tokens are refused
+/// unless [`Self::allow_delegated`] is set.
 #[derive(Clone, Debug)]
 pub struct RequireAllPrincipalScopes {
     scopes: Vec<String>,
+    allow_delegated: bool,
 }
 
 impl RequireAllPrincipalScopes {
@@ -311,7 +426,14 @@ impl RequireAllPrincipalScopes {
     {
         Self {
             scopes: scopes.into_iter().map(Into::into).collect(),
+            allow_delegated: false,
         }
+    }
+
+    /// Also admits delegated and actor user tokens.
+    pub fn allow_delegated(mut self) -> Self {
+        self.allow_delegated = true;
+        self
     }
 }
 
@@ -321,8 +443,10 @@ impl Guard for RequireAllPrincipalScopes {
         ctx: &Context<'_>,
     ) -> impl std::future::Future<Output = GraphqlResult<()>> + Send {
         let matcher = matcher_from_ctx(ctx);
-        let allowed = principal_from_ctx(ctx).and_then(|principal| {
-            if principal.has_all_scopes_with(matcher.as_ref(), &self.scopes) {
+        let allowed = principal_from_ctx(ctx, self.allow_delegated).and_then(|principal| {
+            if !self.scopes.is_empty()
+                && principal.has_all_scopes_with(matcher.as_ref(), &self.scopes)
+            {
                 Ok(())
             } else {
                 Err(AuthError::Forbidden.extend())
@@ -358,6 +482,26 @@ impl Guard for RequireChannelScheme {
         };
         async move { allowed }
     }
+}
+
+fn user_from_ctx<'a>(ctx: &'a Context<'_>, allow_delegated: bool) -> GraphqlResult<&'a AuthUser> {
+    let user = crate::auth_user_from_ctx(ctx)?;
+    if !allow_delegated && user.token_claims.is_delegated() {
+        return Err(AuthError::Forbidden.extend());
+    }
+    Ok(user)
+}
+
+fn principal_from_ctx(ctx: &Context<'_>, allow_delegated: bool) -> GraphqlResult<AuthPrincipal> {
+    let principal = crate::principal_from_ctx(ctx)?;
+    if !allow_delegated
+        && principal
+            .access_token_metadata()
+            .is_some_and(|claims| claims.is_delegated())
+    {
+        return Err(AuthError::Forbidden.extend());
+    }
+    Ok(principal)
 }
 
 fn matcher_from_ctx(ctx: &Context<'_>) -> Arc<dyn ScopeMatch> {

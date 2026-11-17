@@ -1,5 +1,5 @@
+use async_graphql::Value as GqlValue;
 use async_graphql::{Context, ErrorExtensions, Result as GraphqlResult};
-use serde_json::Value as JsonValue;
 
 use std::sync::Arc;
 
@@ -113,7 +113,10 @@ pub struct GraphqlRefreshCookieConfig {
     pub refresh_token_field: String,
     /// Field name containing the refresh-token expiry timestamp.
     pub refresh_token_expires_at_field: String,
-    /// Whether to blank the refresh token in the GraphQL response.
+    /// Whether to remove raw refresh tokens from the GraphQL response.
+    ///
+    /// On by default. Turn it off only for clients that must read the token
+    /// from the body; the response then keeps every token it contains.
     pub sanitize_response: bool,
 }
 
@@ -138,7 +141,9 @@ impl GraphqlRefreshCookieConfig {
 }
 
 /// Refresh-cookie transport action derived from a GraphQL response.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` redacts the raw refresh token.
+#[derive(Clone, PartialEq, Eq)]
 pub enum GraphqlRefreshCookieDirective {
     /// Set or rotate the refresh cookie using this raw token and expiry.
     Set {
@@ -151,37 +156,60 @@ pub enum GraphqlRefreshCookieDirective {
     Clear,
 }
 
-/// Extracts a refresh-cookie directive from a successful GraphQL response.
+impl std::fmt::Debug for GraphqlRefreshCookieDirective {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Set {
+                refresh_token_expires_at,
+                ..
+            } => f
+                .debug_struct("Set")
+                .field("refresh_token", &"[redacted]")
+                .field("refresh_token_expires_at", refresh_token_expires_at)
+                .finish(),
+            Self::Clear => f.write_str("Clear"),
+        }
+    }
+}
+
+/// Extracts a refresh-cookie directive from a GraphQL response and, unless
+/// [`GraphqlRefreshCookieConfig::sanitize_response`] is off, removes every raw
+/// refresh token from the response body.
 ///
 /// This helper uses selected schema field names rather than GraphQL operation
 /// names. When a selected field includes `response_key`, only that response
-/// entry is inspected and sanitized. Without response keys, the helper scans
-/// top-level response entries after confirming an issuing schema field was
-/// selected.
+/// entry is inspected. Without response keys, every top-level entry is
+/// inspected once an issuing schema field was selected.
+///
+/// `Set` is returned for the first issuing entry whose `session` object holds
+/// both a non-empty refresh token and its expiry, also when other fields of the
+/// response failed. `Clear` is returned only for a response without errors.
+///
+/// Whenever an issuing field was selected, sanitizing runs on the whole body,
+/// whatever its shape: in the issuing entries, at any depth, every value under
+/// the refresh-token field name and every string shaped like a token issued by
+/// [`crate::AuthService`] is blanked, and every copy of a token found anywhere
+/// in the response is blanked. Client aliases therefore cannot carry the token
+/// past it. To keep tokens out of the body by construction, do not expose the
+/// refresh token in the schema and set the cookie from the resolver instead,
+/// for example with `async_graphql::Context::insert_http_header`.
 pub fn graphql_refresh_cookie_directive(
     response: &mut async_graphql::Response,
     selected_fields: &[GraphqlTopLevelField],
     config: &GraphqlRefreshCookieConfig,
 ) -> Option<GraphqlRefreshCookieDirective> {
-    if !response.errors.is_empty() {
-        return None;
-    }
-
     if selected_fields_match(selected_fields, &config.issuing_fields) {
-        let mut data = response.data.clone().into_json().ok()?;
-        let directive = find_refresh_cookie_set_directive(&data, selected_fields, config);
-        if directive.is_some() && config.sanitize_response {
-            sanitize_refresh_token_fields(&mut data, selected_fields, config);
-            if let Ok(next_value) = async_graphql::Value::from_json(data) {
-                response.data = next_value;
-            }
+        let directive = find_refresh_cookie_set_directive(&response.data, selected_fields, config);
+        if config.sanitize_response {
+            // In place, so response keys keep their selection order.
+            sanitize_refresh_tokens(&mut response.data, selected_fields, config);
         }
         if directive.is_some() {
             return directive;
         }
     }
 
-    selected_fields_match(selected_fields, &config.clearing_fields)
+    (response.errors.is_empty() && selected_fields_match(selected_fields, &config.clearing_fields))
         .then_some(GraphqlRefreshCookieDirective::Clear)
 }
 
@@ -191,71 +219,150 @@ fn selected_fields_match(selected_fields: &[GraphqlTopLevelField], field_names: 
         .any(|field| field_names.iter().any(|name| name == &field.schema_field))
 }
 
+/// The raw refresh token at the configured `session.refreshToken` path.
+fn canonical_refresh_token<'a>(
+    entry: &'a GqlValue,
+    config: &GraphqlRefreshCookieConfig,
+) -> Option<&'a str> {
+    gql_string(gql_get(
+        gql_get(entry, &config.session_field)?,
+        &config.refresh_token_field,
+    )?)
+    .filter(|token| !token.trim().is_empty())
+}
+
+fn gql_get<'a>(value: &'a GqlValue, key: &str) -> Option<&'a GqlValue> {
+    match value {
+        GqlValue::Object(object) => object.get(key),
+        _ => None,
+    }
+}
+
+fn gql_string(value: &GqlValue) -> Option<&str> {
+    match value {
+        GqlValue::String(text) => Some(text),
+        _ => None,
+    }
+}
+
 fn find_refresh_cookie_set_directive(
-    data: &JsonValue,
+    data: &GqlValue,
     selected_fields: &[GraphqlTopLevelField],
     config: &GraphqlRefreshCookieConfig,
 ) -> Option<GraphqlRefreshCookieDirective> {
-    for entry in candidate_response_entries(data, selected_fields, &config.issuing_fields) {
-        let session = entry.get(&config.session_field)?;
-        let refresh_token = session.get(&config.refresh_token_field)?.as_str()?;
-        let refresh_token_expires_at = session
-            .get(&config.refresh_token_expires_at_field)?
-            .as_str()?;
-        if refresh_token.trim().is_empty() {
-            continue;
-        }
-        return Some(GraphqlRefreshCookieDirective::Set {
+    candidate_response_entries(data, selected_fields, &config.issuing_fields).find_map(|entry| {
+        let refresh_token = canonical_refresh_token(entry, config)?;
+        let refresh_token_expires_at = gql_string(gql_get(
+            gql_get(entry, &config.session_field)?,
+            &config.refresh_token_expires_at_field,
+        )?)?;
+        Some(GraphqlRefreshCookieDirective::Set {
             refresh_token: refresh_token.to_string(),
             refresh_token_expires_at: refresh_token_expires_at.to_string(),
-        });
-    }
-
-    None
+        })
+    })
 }
 
-fn sanitize_refresh_token_fields(
-    data: &mut JsonValue,
+fn sanitize_refresh_tokens(
+    data: &mut GqlValue,
     selected_fields: &[GraphqlTopLevelField],
     config: &GraphqlRefreshCookieConfig,
 ) {
-    let Some(object) = data.as_object_mut() else {
+    let found: Vec<String> =
+        candidate_response_entries(data, selected_fields, &config.issuing_fields)
+            .filter_map(|entry| canonical_refresh_token(entry, config))
+            .map(str::to_owned)
+            .collect();
+
+    let GqlValue::Object(object) = data else {
+        // Fail closed: a non-object body cannot be inspected and is not returned.
+        if !matches!(data, GqlValue::Null) {
+            *data = GqlValue::Null;
+        }
         return;
     };
-
-    let response_keys = selected_response_keys(selected_fields, &config.issuing_fields);
-    if response_keys.is_empty() {
-        for entry in object.values_mut() {
-            sanitize_refresh_token_entry(entry, config);
+    let response_keys = issuing_response_keys(object, selected_fields, &config.issuing_fields);
+    for (key, entry) in object.iter_mut() {
+        if response_keys.is_empty() || response_keys.contains(&key.as_str()) {
+            sanitize_issuing_entry(entry, config);
         }
-    } else {
-        for key in response_keys {
-            if let Some(entry) = object.get_mut(key) {
-                sanitize_refresh_token_entry(entry, config);
-            }
-        }
+    }
+    if !found.is_empty() {
+        blank_copies(data, &found);
     }
 }
 
-fn sanitize_refresh_token_entry(entry: &mut JsonValue, config: &GraphqlRefreshCookieConfig) {
-    if let Some(refresh_token) = entry
-        .get_mut(&config.session_field)
-        .and_then(|session| session.get_mut(&config.refresh_token_field))
-    {
-        *refresh_token = JsonValue::String(String::new());
+/// Blanks token-carrying values at any depth of an issuing entry.
+fn sanitize_issuing_entry(value: &mut GqlValue, config: &GraphqlRefreshCookieConfig) {
+    match value {
+        GqlValue::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key.as_str() == config.refresh_token_field && !matches!(child, GqlValue::Null) {
+                    *child = GqlValue::String(String::new());
+                } else {
+                    sanitize_issuing_entry(child, config);
+                }
+            }
+        }
+        GqlValue::List(items) => {
+            for item in items {
+                sanitize_issuing_entry(item, config);
+            }
+        }
+        GqlValue::String(text) if crate::util::is_opaque_token_shape(text) => text.clear(),
+        _ => {}
     }
+}
+
+/// Blanks every string equal to a found token, anywhere in the body.
+fn blank_copies(value: &mut GqlValue, tokens: &[String]) {
+    match value {
+        GqlValue::Object(object) => {
+            for child in object.values_mut() {
+                blank_copies(child, tokens);
+            }
+        }
+        GqlValue::List(items) => {
+            for item in items {
+                blank_copies(item, tokens);
+            }
+        }
+        GqlValue::String(text) if tokens.iter().any(|token| token == text) => text.clear(),
+        _ => {}
+    }
+}
+
+/// Response keys of the selected issuing fields: the explicit response key,
+/// or the schema field name when the response contains it. Empty means the
+/// issuing entries cannot be told apart, and every top-level entry is treated
+/// as one.
+fn issuing_response_keys<'a>(
+    object: &async_graphql::indexmap::IndexMap<async_graphql::Name, GqlValue>,
+    selected_fields: &'a [GraphqlTopLevelField],
+    field_names: &[String],
+) -> Vec<&'a str> {
+    let explicit = selected_response_keys(selected_fields, field_names);
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    selected_fields
+        .iter()
+        .filter(|field| field_names.iter().any(|name| name == &field.schema_field))
+        .map(|field| field.schema_field.as_str())
+        .filter(|key| object.contains_key(*key))
+        .collect()
 }
 
 fn candidate_response_entries<'a>(
-    data: &'a JsonValue,
+    data: &'a GqlValue,
     selected_fields: &'a [GraphqlTopLevelField],
     field_names: &[String],
-) -> Box<dyn Iterator<Item = &'a JsonValue> + 'a> {
-    let Some(object) = data.as_object() else {
+) -> Box<dyn Iterator<Item = &'a GqlValue> + 'a> {
+    let GqlValue::Object(object) = data else {
         return Box::new(std::iter::empty());
     };
 
-    let response_keys = selected_response_keys(selected_fields, field_names);
+    let response_keys = issuing_response_keys(object, selected_fields, field_names);
     if response_keys.is_empty() {
         Box::new(object.values())
     } else {

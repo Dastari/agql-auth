@@ -10,8 +10,9 @@ authentication shared with `OAuth2Provider`. Defaults are unchanged:
 `OAuthResponseMode::FormPost`. The value is sent as `response_mode` and stored
 in `OAuthLoginState::response_mode`.
 
-For `form_post` the provider delivers `code`, `state`, `error` and
-`error_description` as an `application/x-www-form-urlencoded` POST body. The
+For `form_post` the provider delivers `code`, `state`, `iss` (RFC 9207, when
+supported), `error` and `error_description` as an
+`application/x-www-form-urlencoded` POST body. The
 host parses that body into the transport-neutral `OidcCallbackInput` and calls
 `handle_callback_in_mode(store, input, OAuthResponseMode::FormPost)` (or
 `login_with_callback_in_mode`). The existing `handle_callback` and
@@ -32,13 +33,30 @@ A `form_post` callback is a cross-site top-level POST from the provider:
   hashed state is the request's anti-forgery token: unknown, replayed and
   expired states are refused.
 - Browsers do not send `SameSite=Lax` or `Strict` cookies on that POST. Do not
-  rely on such a cookie to find the flow; `agql-auth` needs only `state`.
-- The server-side state does not identify the browser that started the flow. To
-  prevent login CSRF, bind completion to the initiating browser: use a
-  `SameSite=None; Secure; HttpOnly` cookie set at start, or redirect to a
-  handoff that the initiating client redeems with a secret it holds.
+  rely on such a cookie to find the flow.
+
+### Browser binding for form_post
+
+Browser binding is required by default (`OAuthBrowserBinding::Required`):
+`create_authorization_request` returns `request.browser_binding`, a random
+secret whose SHA-256 hash is stored in the state, and the callback must pass the
+raw value as `OidcCallbackInput::browser_binding`. Without it a victim's browser
+could be made to finish a flow an attacker started (login CSRF). A missing or
+wrong value fails with `InvalidOAuthState` after the state is consumed.
+
+Because the `form_post` callback is a cross-site POST, the cookie carrying the
+value must be `SameSite=None; Secure; HttpOnly` (with the `__Host-` prefix,
+`Path=/`, and `Max-Age` at most `state_ttl`), or the host must bind the flow
+another way. One alternative: have the POST route store the parsed form under a
+fresh one-time handoff ID, `303`-redirect to a same-site `GET` route, and call
+`handle_callback_in_mode` there, where a `SameSite=Lax` binding cookie is sent.
+A host that ties `state` to the browser through its own server-side session
+may set `browser_binding = OAuthBrowserBinding::NotRequiredHostBindsState`.
+
 - Answer with `303 See Other` and `Cache-Control: no-store` so a refresh does
   not resubmit the code.
+- Give each provider its own redirect URI and route; a response must reach
+  only the provider that started it.
 - Fields outside `OidcCallbackInput`, such as Apple's first-login `user` JSON,
   are unsigned. Treat them only as display hints.
 
@@ -57,6 +75,13 @@ A `form_post` callback is a cross-site top-level POST from the provider:
 `true`. Construction fails otherwise rather than dropping the header.
 `ClientSecretPost` and `PrivateKeyJwt` keep using `post_form_json`.
 
+The HTTP client must not follow redirects: a client that follows a `307` or
+`308` re-posts the client secret or assertion, the code and the PKCE verifier to
+the redirect target. Return `Err` for every 3xx response.
+
+The token exchange and the userinfo request are internal to the callback; there
+is no public API that turns an arbitrary access token into an identity.
+
 ### ClientJwtSigner
 
 `ClientJwtSigner::from_pem(algorithm, pem, ClientJwtClaims)` parses an
@@ -67,9 +92,17 @@ serialized (`client_jwt` is `#[serde(skip)]`), never logged and redacted from
 
 A fresh JWT is minted for every token request:
 
-- header: `alg`, `typ: JWT`, optional `kid`;
-- claims: `iss`, `sub`, `aud` (the configured audience, or the token endpoint
-  URL), `iat` and `exp = iat + lifetime`;
+- header: `alg`, `typ: JWT`, optional `kid`, and optional `x5t#S256`
+  (`with_x509_sha256_thumbprint`, the unpadded base64url SHA-256 of the DER
+  certificate, as Microsoft Entra certificate credentials use);
+- claims: `iss`, `sub`, `aud`, `iat`, `exp = iat + lifetime`, and optional
+  `nbf = iat` (`with_not_before`);
+- `aud` is the configured audience, else for `PrivateKeyJwt` the authorization
+  server's issuer identifier (the validated discovery `issuer` of a generic
+  `OidcProvider`, or `OAuth2ProviderConfig::issuer`). Microsoft Entra
+  providers use the token endpoint, which Microsoft documents; an
+  `OAuth2Provider` without `issuer` uses its configured token endpoint. A
+  signed `client_secret` defaults to the token endpoint;
 - `iat` is the provider clock minus `issued_at_skew` (default 30 s, at most
   300 s), so identity providers whose clock runs behind do not reject a
   future `iat`. The total lifetime `exp - iat` stays `lifetime`, and the JWT
@@ -81,6 +114,15 @@ With `PrivateKeyJwt` the JWT is the `client_assertion`. With
 signed client secret. Lifetimes are whole seconds, at least one second longer
 than `issued_at_skew` and at most `MAX_CLIENT_JWT_LIFETIME_SECONDS`
 (15,777,000 s, Apple's maximum). The default is five minutes. `client_secret` and `client_jwt` are mutually exclusive.
+
+`PrivateKeyJwt` is stricter: `iss` and `sub` must both equal the client ID and
+the lifetime is at most `MAX_PRIVATE_KEY_JWT_LIFETIME_SECONDS` (600 s).
+Configuration fails otherwise.
+
+Static client secrets in provider configurations, transient copies in token
+requests, and provider tokens in `OidcTokenResponse` / `OAuth2TokenResponse`
+are overwritten when dropped (best effort: copies the host makes, and earlier
+reallocations, are not covered).
 
 ## `email_verified`
 
@@ -122,6 +164,9 @@ let outcome = apple
         OidcCallbackInput {
             code: form.code,
             state: form.state,
+            iss: form.iss,
+            // From the SameSite=None binding cookie set at the start route.
+            browser_binding: binding_cookie,
             error: form.error,
             error_description: None,
         },

@@ -26,45 +26,45 @@ passes (exit 0).
 
 ## Behavior and compatibility
 
-After the existing admission check, an unknown or disabled account performs one
-verification against the fixed dummy Argon2 hash. An enabled account verifies
-its stored hash. Every admitted rejection records the available principal and
-client keys through `record_rate_limit_attempt`. Disabled attempts record even
-with a correct password or corrupt stored hash, return `UserDisabled`, and exit
-before conditional clear, session construction, signing, refresh generation,
-or persistence.
+This section describes current behavior. 0.27.0 kept the 0.19.2 guarantees
+(comparable Argon2 work, counting, and no clear or session for disabled users)
+and changed three things: attempts are counted before verification, disabled
+state needs proof of the password, and success refunds rather than clears the
+shared client bucket. See [abuse protection](abuse-protection.md#credential-reservation).
 
-The existing engine still owns password work, key construction, windows,
-backoff, lockout, expiry, saturating arithmetic, retry-after calculations, CAS
-retries, and conditional clear. This patch changes none of those algorithms
-or store traits. There are no production SQL adapters, consumer schemas,
-downstream edits, routes, host-specific policy, normalization changes, Cargo
-dependency additions, overrides, or dependency exceptions. The lockfile changes
-only this crate's version.
+After the active-control check, the service reserves the attempt against the
+principal and client keys by CAS, then verifies. A known account is counted by
+its local user ID; an unknown principal by its normalized input. Unknown
+accounts and stored hashes Argon2 cannot verify with real work perform one
+verification against the fixed dummy Argon2 hash. Enabled and disabled
+accounts verify their stored hash. The reservation already counts every
+rejection. Disabled attempts stay counted with any password, return
+`UserDisabled` only for the correct one, and exit before clear, session
+construction, signing, refresh generation, or persistence.
 
 | Condition | Rust error | GraphQL code |
 | --- | --- | --- |
-| Admitted unknown or enabled/wrong password | `InvalidCredentials` | `INVALID_CREDENTIALS` |
-| Admitted disabled, any password | `UserDisabled` | `USER_DISABLED` |
+| Admitted unknown, enabled/wrong, disabled/wrong, or unverifiable stored hash | `InvalidCredentials` | `INVALID_CREDENTIALS` |
+| Admitted disabled, correct password | `UserDisabled` | `USER_DISABLED` |
 | Active backoff | `AuthThrottled` | `RATE_LIMITED` + `retryAfterSeconds` |
 | Active lockout | `AuthLocked` | `RATE_LIMITED` + `retryAfterSeconds` |
-| Failure to persist a rejection | `Store` | `AUTH_SERVICE_UNAVAILABLE` |
+| Failure to record the attempt (before any password work) | `Store` or `AuthServiceUnavailable` | `AUTH_SERVICE_UNAVAILABLE` |
 
 The threshold-activating rejection retains its credential error; the next
-attempt is blocked before user lookup/password verification and is not counted
-again. Disabled failures can now block another principal sharing a client
-bucket. Only an admitted enabled/correct-password login clears its observed
-revisions, and it finishes that clear before token issuance. A concurrent
-newer failure survives stale clear. Credential admission remains check-then-
-verify; an already admitted burst can cross the threshold, and each failure is
-recorded. Per-key CAS does not provide a transaction across both buckets.
+attempt is blocked after user lookup but before password verification and is
+not counted again. Disabled failures can block another principal sharing a
+client bucket. Only an admitted enabled/correct-password login settles its
+reservation, and it finishes that before token issuance: the principal bucket
+is cleared if unchanged since the reservation, and the client bucket loses
+only this attempt. A concurrent newer failure survives. Because counting
+precedes verification, a concurrent burst cannot verify more attempts than the
+lockout budget. Per-key CAS does not provide a transaction across both
+buckets.
 
-The deliberately distinct `USER_DISABLED` public error is preserved. This is
-work comparability, not a promise of account indistinguishability or a timing
-bound. Dummy PHC parameters equal newly generated default hashes; custom
-host-stored hash parameters can have different costs. Existing tokens, refresh
-rotation, auth payloads, GraphQL transport, configuration, and store contracts
-remain compatible. There is no data migration.
+The public `USER_DISABLED` error is preserved for callers who prove the
+password. This is work comparability, not a timing bound. Dummy PHC parameters
+equal newly generated default hashes; custom host-stored hash parameters can
+have different costs.
 
 ## Executable example
 

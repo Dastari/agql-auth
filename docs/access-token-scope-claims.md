@@ -38,8 +38,9 @@ routers need only the public key or JWKS.
 
 ## Compatibility Controls
 
-`AuthConfig` defaults to standard issuance and migration-compatible
-validation:
+`AuthConfig` defaults to standard issuance and, since 0.27, strict validation
+that rejects the legacy array. A migration enables legacy acceptance
+explicitly:
 
 ```rust
 use agql_auth::{
@@ -61,12 +62,15 @@ Issuance and validation are deliberately independent:
   array. It is a temporary rollback and staged-deployment control, not a
   recommended format for new systems.
 - `LegacyScopeClaims::Accept` reads a legacy array when it does not conflict
-  with a standard claim. This is the default migration policy.
+  with a standard claim. It is the migration opt-in (the default before 0.27).
 - `LegacyScopeClaims::Reject` rejects any token containing `scopes`, even when
-  the array is empty or equivalent to `scope`.
+  the array is empty or equivalent to `scope`. This is the default since 0.27,
+  for `AuthConfig` and `AccessTokenValidator` alike.
 
 `AuthService::new` rejects legacy issuance combined with legacy rejection,
-because a service configured that way could not validate its own tokens.
+because a service configured that way could not validate its own tokens. Since
+the default is now `Reject`, selecting `LegacyArray` also requires
+`with_legacy_scope_claims(LegacyScopeClaims::Accept)`.
 
 Independent resource servers set validation policy on their builder:
 
@@ -134,7 +138,8 @@ and gateway policy. Components using `AuthService` or a 0.14
 `AccessTokenValidator` already share the compatible decoder; custom decoders
 must be updated explicitly.
 
-1. Deploy 0.14 everywhere with `LegacyScopeClaims::Accept`.
+1. Deploy 0.14 or later everywhere with `LegacyScopeClaims::Accept` (explicit
+   since 0.27).
 2. If any consumer is not ready, keep issuers on
    `AccessTokenScopeClaimFormat::LegacyArray` temporarily.
 3. Verify every consumer accepts a standard-only token and maps it to the same

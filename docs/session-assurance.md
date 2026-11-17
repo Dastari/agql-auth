@@ -46,7 +46,8 @@ alter unrelated sessions for the user.
 
 Do not call the step-up API before factor verification succeeds. The API call
 is the host's authoritative assertion that the event satisfies local MFA
-policy.
+policy. A `StepUpAuthentication` with no methods is refused with
+`InvalidConfiguration` and rotates nothing.
 
 `StepUpAuthentication` is provider-neutral. A host may record normalized
 methods such as password plus TOTP, an independently verified OIDC
@@ -59,12 +60,24 @@ raw provider token.
 
 `RecentMfaPolicy::evaluate` requires:
 
-- authoritative assurance and satisfied MFA state;
+- authoritative assurance and satisfied MFA state recording at least one
+  authentication method;
 - signed token `auth_time`, AMR, and ACR consistent with session assurance;
-- configured AMR/ACR allowlists using explicit `All` or `Any` semantics;
+- `required_context`, when set, equal to the assurance context;
+- every `required_amr` method present (all-of, independent of `match_mode`);
+- configured AMR/ACR allowlists (`allowed_amr` any-of, `allowed_acr` any-of)
+  using explicit `All` or `Any` semantics;
 - `auth_time` no farther in the future than bounded clock skew;
 - age at or below the configured inclusive maximum;
 - checked time arithmetic.
+
+Policy AMR values are trimmed and ASCII-lowercased like session methods, so
+`"TOTP"` matches `totp`; an empty entry is a policy error. ACR and context
+values compare exactly. AMR/ACR strings have no universal meaning, so set
+`required_context` when a policy should accept only one provider's or policy's
+namespace: without it, the same ACR string from any context matches.
+`RecentMfaPolicy::new(maximum_age)` starts with no skew, allowlists or
+requirements.
 
 All failures return the same safe public message and a stable denial code.
 `internal_detail()` is for protected server diagnostics and is omitted from

@@ -9,8 +9,8 @@ use time::{Duration, OffsetDateTime};
 
 use super::oidc::{
     CLIENT_ID, DISCOVERY_URL, ISSUER, JWKS_URI, MemoryOAuthStateStore, REDIRECT_URI,
-    RSA_PRIVATE_KEY, TOKEN_ENDPOINT, discovery_document, jwks_document, query_pairs,
-    signed_id_token, valid_claims,
+    RSA_PRIVATE_KEY, TOKEN_ENDPOINT, callback_with_code, discovery_document, jwks_document,
+    query_pairs, signed_id_token, valid_claims,
 };
 use super::provider_http::RecordingHttpClient;
 use crate::prelude::*;
@@ -101,8 +101,8 @@ async fn start_with_claims(
     request
 }
 
-fn form_post_input(state: &str) -> OidcCallbackInput {
-    OidcCallbackInput::code_and_state("auth-code", state)
+fn form_post_input(request: &OidcAuthorizationRequest) -> OidcCallbackInput {
+    callback_with_code(request, "auth-code")
 }
 
 #[tokio::test]
@@ -129,7 +129,7 @@ async fn form_post_request_is_bound_into_state_and_completes() {
     let outcome = provider
         .handle_callback_in_mode(
             &store,
-            form_post_input(&request.state),
+            form_post_input(&request),
             OAuthResponseMode::FormPost,
         )
         .await
@@ -140,7 +140,7 @@ async fn form_post_request_is_bound_into_state_and_completes() {
     let replay = provider
         .handle_callback_in_mode(
             &store,
-            form_post_input(&request.state),
+            form_post_input(&request),
             OAuthResponseMode::FormPost,
         )
         .await
@@ -158,7 +158,7 @@ async fn query_delivery_of_a_form_post_flow_is_refused_without_consuming_state()
     let request = start_with_claims(&provider, &client, &store, |_| {}).await;
 
     let query = provider
-        .handle_callback(&store, form_post_input(&request.state))
+        .handle_callback(&store, form_post_input(&request))
         .await
         .unwrap_err();
     assert!(matches!(query, AuthError::OidcCallback(_)));
@@ -168,7 +168,7 @@ async fn query_delivery_of_a_form_post_flow_is_refused_without_consuming_state()
     provider
         .handle_callback_in_mode(
             &store,
-            form_post_input(&request.state),
+            form_post_input(&request),
             OAuthResponseMode::FormPost,
         )
         .await
@@ -187,7 +187,7 @@ async fn state_bound_to_one_mode_refuses_the_other_after_reconfiguration() {
 
     let form_request = start_with_claims(&form_post, &client, &store, |_| {}).await;
     let refused = query
-        .handle_callback(&store, form_post_input(&form_request.state))
+        .handle_callback(&store, form_post_input(&form_request))
         .await
         .unwrap_err();
     assert!(matches!(refused, AuthError::OidcCallback(_)));
@@ -196,7 +196,7 @@ async fn state_bound_to_one_mode_refuses_the_other_after_reconfiguration() {
     let refused = form_post
         .handle_callback_in_mode(
             &store,
-            form_post_input(&query_request.state),
+            form_post_input(&query_request),
             OAuthResponseMode::FormPost,
         )
         .await
@@ -204,9 +204,13 @@ async fn state_bound_to_one_mode_refuses_the_other_after_reconfiguration() {
     assert!(matches!(refused, AuthError::OidcCallback(_)));
     assert!(client.posts().is_empty());
 
-    for state in [form_request.state, query_request.state] {
+    for request in [&form_request, &query_request] {
         let consumed = form_post
-            .handle_callback_in_mode(&store, form_post_input(&state), OAuthResponseMode::FormPost)
+            .handle_callback_in_mode(
+                &store,
+                form_post_input(request),
+                OAuthResponseMode::FormPost,
+            )
             .await
             .unwrap_err();
         assert!(matches!(consumed, AuthError::InvalidOAuthState));
@@ -227,6 +231,8 @@ async fn form_post_error_callback_and_cross_site_failures_fail_closed() {
             OidcCallbackInput {
                 code: None,
                 state: Some(request.state.clone()),
+                iss: None,
+                browser_binding: request.browser_binding.clone(),
                 error: Some("user_cancelled_authorize".to_string()),
                 error_description: None,
             },
@@ -240,10 +246,12 @@ async fn form_post_error_callback_and_cross_site_failures_fail_closed() {
         OidcCallbackInput {
             code: Some("auth-code".to_string()),
             state: None,
+            iss: None,
+            browser_binding: request.browser_binding.clone(),
             error: None,
             error_description: None,
         },
-        form_post_input("forged-cross-site-state"),
+        OidcCallbackInput::code_and_state("auth-code", "forged-cross-site-state"),
     ] {
         let forged = provider
             .handle_callback_in_mode(&store, input, OAuthResponseMode::FormPost)
@@ -256,7 +264,7 @@ async fn form_post_error_callback_and_cross_site_failures_fail_closed() {
     let expired = provider
         .handle_callback_in_mode(
             &store,
-            form_post_input(&request.state),
+            form_post_input(&request),
             OAuthResponseMode::FormPost,
         )
         .await
@@ -288,7 +296,7 @@ async fn form_post_flow_keeps_nonce_issuer_and_audience_checks() {
         let error = provider
             .handle_callback_in_mode(
                 &store,
-                form_post_input(&request.state),
+                form_post_input(&request),
                 OAuthResponseMode::FormPost,
             )
             .await
@@ -318,6 +326,7 @@ async fn oidc_refuses_states_without_a_nonce() {
             scopes: Vec::new(),
             authorization_policy: None,
             response_mode: OAuthResponseMode::Query,
+            browser_binding_hash: None,
             created_at: clock.now(),
             expires_at: clock.now() + Duration::minutes(5),
             consumed_at: None,
@@ -329,7 +338,10 @@ async fn oidc_refuses_states_without_a_nonce() {
         "rsa01",
     ))));
     let error = provider
-        .handle_callback(&store, form_post_input("oauth2-state"))
+        .handle_callback(
+            &store,
+            OidcCallbackInput::code_and_state("auth-code", "oauth2-state"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, AuthError::InvalidOAuthState));
@@ -369,7 +381,7 @@ async fn signed_client_secret_is_fresh_verifiable_and_short_lived() {
     provider
         .handle_callback_in_mode(
             &store,
-            form_post_input(&request.state),
+            form_post_input(&request),
             OAuthResponseMode::FormPost,
         )
         .await
@@ -419,7 +431,7 @@ async fn signed_client_secret_is_fresh_verifiable_and_short_lived() {
     let result = provider
         .handle_callback_in_mode(
             &store,
-            form_post_input(&request.state),
+            form_post_input(&request),
             OAuthResponseMode::FormPost,
         )
         .await;
@@ -458,7 +470,7 @@ async fn private_key_jwt_and_basic_client_authentication_for_oidc() {
     for _ in 0..2 {
         let request = start_with_claims(&jwt_provider, &client, &store, |_| {}).await;
         jwt_provider
-            .handle_callback(&store, form_post_input(&request.state))
+            .handle_callback(&store, form_post_input(&request))
             .await
             .unwrap();
     }
@@ -472,7 +484,8 @@ async fn private_key_jwt_and_basic_client_authentication_for_oidc() {
             Some(CLIENT_ASSERTION_TYPE_JWT_BEARER)
         );
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[TOKEN_ENDPOINT]);
+        // A generic provider's assertion audience is the issuer identifier.
+        validation.set_audience(&[ISSUER]);
         validation.set_issuer(&[CLIENT_ID]);
         let claims = decode::<JsonValue>(
             post.form_value("client_assertion").unwrap(),
@@ -493,7 +506,7 @@ async fn private_key_jwt_and_basic_client_authentication_for_oidc() {
     let basic = provider(config.clone(), &basic_client, &clock);
     let request = start_with_claims(&basic, &basic_client, &store, |_| {}).await;
     basic
-        .handle_callback(&store, form_post_input(&request.state))
+        .handle_callback(&store, form_post_input(&request))
         .await
         .unwrap();
     let post = &basic_client.posts()[0];
@@ -671,7 +684,7 @@ async fn email_verified_accepts_booleans_and_exact_strings_only() {
         })
         .await;
         let outcome = provider
-            .handle_callback(&store, form_post_input(&request.state))
+            .handle_callback(&store, form_post_input(&request))
             .await
             .unwrap();
         assert_eq!(outcome.claims.email_verified, expected, "{value:?}");
@@ -690,6 +703,7 @@ fn legacy_state_records_deserialize_as_query_mode() {
         scopes: Vec::new(),
         authorization_policy: None,
         response_mode: OAuthResponseMode::Query,
+        browser_binding_hash: None,
         created_at: now,
         expires_at: now,
         consumed_at: None,

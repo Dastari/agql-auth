@@ -40,10 +40,19 @@ fn service_rejects_invalid_identity_and_lifetimes_at_construction() {
             );
         }
     }
-    // The existing custom-grant ceiling is deliberately not silently redefined
-    // as a limit on separately configured ordinary refreshable sessions.
+    // Since 0.27 the ordinary session lifetime is bounded by the access-token
+    // maximum too (this previously pinned that it was not).
     let mut config = AuthConfig::new(TEST_HS256_SECRET);
     config.access_token_ttl = Duration::days(2);
+    assert!(matches!(
+        AuthService::new(
+            config.clone(),
+            Arc::new(MemoryUserStore::default()),
+            Arc::new(MemoryRefreshTokenStore::default())
+        ),
+        Err(AuthError::InvalidConfiguration(_))
+    ));
+    config.max_access_token_ttl = Duration::days(2);
     assert!(
         AuthService::new(
             config,
@@ -93,9 +102,11 @@ async fn impossible_expiries_fail_before_credential_storage() {
         )),
         Err(AuthError::InvalidConfiguration(_))
     ));
+    let reset_store = MemoryPasswordResetStore::default();
     for ttl in [Duration::ZERO, Duration::seconds(-1), Duration::MAX] {
         assert!(matches!(
-            auth.issue_password_reset_token_with_ttl("fixture", ttl),
+            auth.issue_password_reset_token_with_store(&reset_store, "fixture", ttl)
+                .await,
             Err(AuthError::InvalidConfiguration(_))
         ));
     }

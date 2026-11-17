@@ -104,12 +104,34 @@ the store to revoke the token family. Hosts whose clients can lose a response af
 commit, such as browsers, can opt in to a short
 [refresh reuse grace](refresh-reuse-grace.md).
 
-Logout revokes either one refresh token or the whole family:
+Sign-out revokes the whole token family. Use this form:
 
 ```rust
-auth.logout(refresh_token, false).await?; // one token
-auth.logout(refresh_token, true).await?;  // token family
+auth.logout(refresh_token, true).await?;
 ```
+
+`logout(refresh_token, false)` revokes only the presented token while it is the
+family's live token. A token that rotation already superseded, or supersedes
+during the call, is treated as a reuse signal and revokes the whole family, so a
+successor held by someone else cannot outlive the sign-out.
+
+Rotation never extends a session past `AuthConfig::max_session_lifetime`, measured
+from the session's first issuance (90 days by default; `None` lets rotation slide
+indefinitely). Each replacement expires at the earlier of `refresh_token_ttl` from
+rotation and that deadline, which the record carries in `session_expires_at`.
+
+When you disable a user, change or reset a password, or offer "sign out everywhere",
+revoke every refresh family of the user:
+
+```rust
+use agql_auth::RefreshTokenRevocationReason;
+
+auth.revoke_user_sessions(&user_id, RefreshTokenRevocationReason::AdminRevoked)
+    .await?;
+```
+
+Refresh already refuses a disabled user, but without this a re-enabled user's old
+sessions would work again, and a password change would leave other sessions alive.
 
 Logout does not revoke already-issued stateless access tokens. They remain
 valid until `exp`, so keep access-token lifetimes short and add host-side
@@ -171,15 +193,32 @@ if let Some(directive) =
 }
 ```
 
-The helper extracts `refreshToken` and `refreshTokenExpiresAt`, optionally
-blanks `refreshToken` in the GraphQL response, and leaves cookie name/path,
-SameSite, Secure, and Max-Age formatting to the host.
+The helper extracts `session.refreshToken` and `session.refreshTokenExpiresAt`
+and leaves cookie name/path, SameSite, Secure, and Max-Age formatting to the host.
+It returns `Set` only when both fields are selected under their schema names, also
+when another field of the request failed, and `Clear` only for a response without
+errors.
+
+Whenever an issuing field is selected, the helper also removes raw refresh tokens
+from the body, whatever the response shape: aliased fields, nested selections, an
+omitted expiry and partial errors included. Run it on every response, including
+error responses. `sanitize_response = false` turns this off for clients that must
+read the token from the body. To keep the token out of the body by construction,
+leave `refreshToken` out of the schema and set the cookie from the resolver, for
+example with `async_graphql::Context::insert_http_header`.
 
 ## Issuing Sessions For Verified Users
 
+For OIDC and OAuth 2.0 logins prefer `OidcProvider::login_with_callback` and
+`OAuth2Provider::login_with_callback`: they bind the callback to the initiating
+browser, re-read the provisioned user and refuse a missing or disabled account
+before issuing a session. See [Microsoft Entra OIDC](microsoft-entra-oidc.md)
+and [OAuth 2.0 userinfo providers](oauth2-userinfo-providers.md).
+
 When the host has already verified the user through another trusted flow, such
-as an OIDC callback or a one-time login code, it can issue a normal local
-session directly:
+as a one-time login code, it can issue a normal local session directly. These
+methods do not load the user: the host must check that the account exists and
+is enabled first.
 
 ```rust
 use agql_auth::AuthMethod;

@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    AuthError, AuthRateLimitKey, AuthRateLimitSnapshot, AuthRateLimitState, AuthRateLimitStore,
-    AuthResult, Clock, SystemClock,
+    AuthError, AuthRateLimitFlow, AuthRateLimitKey, AuthRateLimitSnapshot, AuthRateLimitState,
+    AuthRateLimitStore, AuthResult, Clock, SystemClock,
 };
 
 /// Default maximum number of process-local abuse-control records.
@@ -24,6 +24,11 @@ pub const DEFAULT_MEMORY_AUTH_RATE_LIMIT_CAPACITY: usize = 16_384;
 /// existing counters can still update or clear. Active counters and lockouts are
 /// never evicted to admit a different principal. The expiry index has exactly one
 /// entry per stored key, including after repeated updates.
+///
+/// Request-initiation flows ([`AuthRateLimitFlow::PasswordResetRequest`] and
+/// [`AuthRateLimitFlow::LoginCodeRequest`]) may hold at most half the capacity,
+/// rounded down, so request spam cannot use the space credential verification
+/// needs to count attempts. Credential flows may use any free entry.
 ///
 /// Clones share the same state, capacity, and trusted clock. Hosts injecting an
 /// authentication rate-limit clock must supply the same time basis here.
@@ -51,6 +56,14 @@ impl Clone for MemoryAuthRateLimitStore {
 struct MemoryState {
     entries: HashMap<AuthRateLimitKey, AuthRateLimitSnapshot>,
     expirations: BTreeMap<OffsetDateTime, HashSet<AuthRateLimitKey>>,
+    request_entries: usize,
+}
+
+fn is_request_flow(key: &AuthRateLimitKey) -> bool {
+    matches!(
+        key.flow,
+        AuthRateLimitFlow::PasswordResetRequest | AuthRateLimitFlow::LoginCodeRequest
+    )
 }
 
 impl MemoryState {
@@ -63,7 +76,10 @@ impl MemoryState {
         {
             let (_, keys) = self.expirations.pop_first().expect("checked expiry bucket");
             for key in keys {
-                removed += usize::from(self.entries.remove(&key).is_some());
+                if self.entries.remove(&key).is_some() {
+                    removed += 1;
+                    self.request_entries -= usize::from(is_request_flow(&key));
+                }
             }
         }
         removed
@@ -71,6 +87,7 @@ impl MemoryState {
 
     fn remove(&mut self, key: &AuthRateLimitKey) {
         if let Some(previous) = self.entries.remove(key) {
+            self.request_entries -= usize::from(is_request_flow(key));
             let expiry = previous.state.expires_at;
             if let Some(keys) = self.expirations.get_mut(&expiry) {
                 keys.remove(key);
@@ -87,6 +104,7 @@ impl MemoryState {
             .entry(snapshot.state.expires_at)
             .or_default()
             .insert(key.clone());
+        self.request_entries += usize::from(is_request_flow(&key));
         self.entries.insert(key, snapshot);
     }
 }
@@ -175,7 +193,10 @@ impl AuthRateLimitStore for MemoryAuthRateLimitStore {
                 "rate-limit replacement is already expired under store clock".into(),
             ));
         }
-        if !states.entries.contains_key(key) && states.entries.len() >= self.capacity.get() {
+        if !states.entries.contains_key(key)
+            && (states.entries.len() >= self.capacity.get()
+                || (is_request_flow(key) && states.request_entries >= self.capacity.get() / 2))
+        {
             return Err(AuthError::AuthServiceUnavailable);
         }
         states.insert(key.clone(), replacement);

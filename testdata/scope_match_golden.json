@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "2.0",
   "description": "Language-neutral golden vectors for agql-auth hierarchical scope matching.",
   "defaults": {
     "separator": ".",
@@ -62,8 +62,8 @@
       "id": 8,
       "granted": ["a.b*"],
       "required": "a.bc",
-      "expected": true,
-      "notes": "raw trailing-wildcard prefix behavior when multi-segment mode is enabled"
+      "expected": false,
+      "notes": "a wildcard inside a segment has no wildcard meaning (changed in 0.27; was a raw prefix match)"
     },
     {
       "id": 9,
@@ -303,6 +303,62 @@
         "exact_only_scopes": ["payments.credentials.release"]
       },
       "notes": "a similar string is not a configured super-scope"
+    },
+    {
+      "id": 40,
+      "granted": ["tenant.1*"],
+      "required": "tenant.10.read",
+      "expected": false,
+      "notes": "a partial-segment wildcard never extends a segment"
+    },
+    {
+      "id": 41,
+      "granted": ["tenant.1*"],
+      "required": "tenant.1*",
+      "expected": true,
+      "notes": "a partial-segment wildcard matches only itself"
+    },
+    {
+      "id": 42,
+      "granted": ["tenant.1.*"],
+      "required": "tenant.10.read",
+      "expected": false,
+      "notes": "prefix segments before a trailing wildcard match whole segments"
+    },
+    {
+      "id": 43,
+      "granted": ["tenant.1.*"],
+      "required": "tenant.1.orders.read",
+      "expected": true,
+      "notes": "multi-segment trailing wildcard after a whole-segment prefix"
+    },
+    {
+      "id": 44,
+      "granted": ["tenant.1.*"],
+      "required": "tenant.1.orders.read",
+      "expected": false,
+      "options": {
+        "wildcard_matches_multi_segment": false
+      },
+      "notes": "single-segment trailing wildcard consumes exactly one segment"
+    },
+    {
+      "id": 45,
+      "granted": ["orders.*"],
+      "required": "orders.",
+      "expected": false,
+      "notes": "a trailing wildcard never matches an empty segment"
+    },
+    {
+      "id": 46,
+      "granted": ["platform.admin"],
+      "required": "payments.10.release",
+      "expected": true,
+      "options": {
+        "super_scopes": ["platform.admin"],
+        "exact_only_scope_patterns": ["payments.1*"]
+      },
+      "notes": "exact-only patterns follow the same whole-segment rule"
     }
   ]
 }

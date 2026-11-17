@@ -7,8 +7,11 @@ using a helper as an application security boundary.
 
 ## Password Reset
 
-Password reset tokens are signed local JWTs with a `password_reset` purpose and
-a token ID. To make them one-time use, pair them with `PasswordResetTokenStore`.
+Password reset tokens are signed local JWTs with a `password_reset` type and
+purpose and a token ID. Every token is recorded in a `PasswordResetTokenStore`
+at issuance; the crate does not issue an unrecorded token, because one could
+only pass validation, which repeats until expiry. A token without the
+`password_reset` type is refused.
 
 ```rust
 use time::Duration;
@@ -24,6 +27,10 @@ let issued = auth
 send_reset_email(&issued.token).await?;
 ```
 
+Issuing a token invalidates the user's other outstanding reset tokens, so only
+the newest link works. `issue_password_reset_token(&reset_store, user_id)` does
+the same with a one-hour TTL.
+
 When the token is submitted:
 
 ```rust
@@ -36,12 +43,16 @@ let verified = auth
     .await?;
 ```
 
+Consumption also invalidates the user's other outstanding reset tokens and
+revokes every refresh token of the user (`AuthService::revoke_user_sessions`).
+If either store call fails, the token stays consumed and an error is returned.
+
 `authenticate_password_reset_token` only validates claims and does not consult
 or consume a stored token ID, check revocation, or count attempts. It cannot by
 itself authorize a one-time reset. After consumption succeeds, the host checks
-current account/expiry, updates the password hash and implements required
-session/token revocation with transaction/fencing and recovery if a later write
-fails. See the [complete reset sequence](secure-primitive-flows.md#one-time-reset-through-password-update-and-revocation).
+current account/expiry, updates the password hash and implements any further
+revocation (API tokens, access-token status) with transaction/fencing and
+recovery if a later write fails. See the [complete reset sequence](secure-primitive-flows.md#one-time-reset-through-password-update-and-revocation).
 
 ## Login Challenges
 
@@ -50,7 +61,14 @@ The crate generates the code, stores only a password hash of that code, tracks
 attempts, and consumes the challenge once. Each verification first reserves an
 attempt atomically in the store. The cap includes all admitted guesses and
 cancelled work, preventing concurrent callers from sharing the last available
-attempt. Failed or expired attempts never create verified authority. The service
+attempt. The guess is also counted against the principal and client
+rate-limit buckets before the code is checked. Failed or expired attempts
+never create verified authority.
+
+`LoginChallengeOptions` is validated when the challenge is created:
+`code_length` must be 6 to 12 digits and `max_attempts` 1 to 10. Anything else
+returns `InvalidConfiguration`. Six digits with at most ten guesses keeps the
+chance of guessing one challenge at or below 1 in 100,000. The service
 uses system UTC by default; `with_login_challenge_clock` installs a separate
 trusted clock aligned with your challenge store.
 
@@ -81,6 +99,31 @@ let verified = auth
     .await?;
 ```
 
+This form checks no expectation: the challenge itself fixes the principal and
+channel, so use `verified.principal` and never a separately submitted one. When
+the host already knows who is completing the challenge (a second factor after a
+password, or step-up for the current session), or accepts only one delivery
+channel, bind the verification:
+
+```rust
+use agql_auth::LoginChallengeExpectation;
+
+let verified = auth
+    .verify_login_challenge_for(
+        &challenge_store,
+        challenge_id,
+        submitted_code,
+        &LoginChallengeExpectation::for_principal(&session_principal).with_channel("sms"),
+        client_metadata,
+    )
+    .await?;
+```
+
+A challenge created for another principal or channel fails with
+`InvalidLoginChallenge`, the error for an unknown challenge ID, before any
+attempt is admitted or the code is hashed. Values compare exactly, so normalize
+them as at creation.
+
 The host decides what verified challenges can do. For example, the host can
 issue a local session with `AuthMethod::EmailCode`:
 
@@ -110,6 +153,7 @@ The host stores the user's TOTP secret and owns enrollment UI.
 use agql_auth::TotpOptions;
 use time::OffsetDateTime;
 
+// 20 to 64 bytes; 20 (160 bits) is the length RFC 4226 recommends.
 let secret = auth.generate_totp_secret(20)?;
 let provisioning = auth.build_totp_provisioning(
     &secret,
@@ -124,12 +168,31 @@ confirmation succeeds. Generating/provisioning a secret does not enroll a factor
 or establish MFA. Verification below uses an existing confirmed factor loaded
 for the authenticated user, not the just-generated secret.
 
+TOTP inputs fail closed with `InvalidConfiguration` or `InvalidTotpSecret`:
+
+| Input | Accepted |
+| --- | --- |
+| `generate_totp_secret` length | 20 to 64 bytes |
+| Stored secret used for provisioning or verification | at least 16 bytes (128 bits, the RFC 4226 minimum) |
+| `digits` | 6 to 8 |
+| `period_seconds` | 15 to 300 |
+| `allowed_skew` | 0 to 2 steps each side |
+
+New secrets default to the 160 bits RFC 4226 recommends and match the
+HMAC-SHA1 output size; 64 bytes is the HMAC-SHA1 block size, beyond which keys
+are hashed down. Verification accepts 128-bit secrets so existing enrollments
+at the RFC minimum keep working. Factors enrolled with shorter secrets, such as
+80-bit ones, must be re-enrolled.
+
 `verify_totp_code` is stateless and has no attempt limiter.
 `verify_totp_code_for_principal` adds configured abuse controls but still permits
 replay. Neither changes enrollment or session assurance. Production flows
 should prefer `verify_totp_code_with_replay_store_and_metadata`, which records
 the accepted time step through `TotpReplayStore`, rejects the same step on
-reuse, and applies per-principal/per-client abuse protection:
+reuse, and applies per-principal/per-client abuse protection. Both rate-limited
+variants count the attempt before checking the code, so a concurrent burst
+cannot verify more codes than the lockout budget allows; a replayed step stays
+counted:
 
 ```rust
 // Host-owned lookup must enforce confirmed enrollment and user/session ownership.
@@ -164,14 +227,18 @@ enrollment records. Host services should:
 - keep challenge admission and one-time consume operations atomic
 - expire unused records
 - avoid logging reset tokens or login codes
-- revoke existing sessions when local policy requires it
+- call `revoke_user_sessions` when disabling a user or changing a password outside
+  the reset flow; reset consumption already does
 
 Credential throttling returns `AuthError::AuthThrottled` during exponential
 backoff and `AuthError::AuthLocked` during temporary lockout. Password-reset
 and login-code request helpers suppress those errors and return `Ok(false)` so
 the host can avoid revealing whether the principal exists.
 
-`Debug` output for issued reset tokens, TOTP secrets/provisioning URIs, local
-auth payloads, OIDC token responses, and issued API tokens redacts raw secret
-material. Serialization still contains the actual values when those structs are
-intentionally returned by the host.
+`Debug` output for issued reset tokens, issued login codes, TOTP
+secrets/provisioning URIs, local auth payloads, refresh-cookie directives, OIDC
+token responses and issued API tokens redacts raw secret material. Stored
+records (`StoredUser`, `StoredLoginChallenge`, `StoredRefreshToken`,
+`StoredApiToken`) redact their password, code and token hashes. Serialization
+still contains the actual values when those structs are intentionally returned
+or persisted by the host.

@@ -11,6 +11,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::scope_match::{
+    HierarchicalScopeMatch, HierarchicalScopeOptions, HierarchicalScopeValidationError,
+};
+
 /// Maximum number of scope definitions in one catalogue.
 pub const MAX_ROLE_SCOPE_CATALOGUE_SCOPES: usize = 4_096;
 /// Maximum number of role definitions in one catalogue.
@@ -37,6 +41,11 @@ pub struct RoleScopeDefinition {
     /// Exact scope identity.
     pub scope: String,
     /// Whether the host requires exact-grant matching for this scope.
+    ///
+    /// Enforced by a matcher built with
+    /// [`RoleScopeCatalogue::hierarchical_scope_match`] or
+    /// [`RoleScopeCatalogue::apply_exact_only`]: wildcard grants and (unless
+    /// explicitly allowed) super-scopes never satisfy the requirement.
     pub exact_only: bool,
 }
 
@@ -95,7 +104,8 @@ pub struct RoleScopeCatalogue {
     pub scopes: Vec<RoleScopeDefinition>,
     /// Role definitions and their exact scope expansions.
     pub roles: Vec<RoleScopeGrant>,
-    /// Host-defined exact-only wildcard patterns.
+    /// Host-defined exact-only wildcard patterns, enforced like
+    /// [`RoleScopeDefinition::exact_only`].
     #[serde(default)]
     pub exact_only_scope_patterns: Vec<String>,
 }
@@ -122,6 +132,45 @@ impl RoleScopeCatalogue {
     ) -> Self {
         self.exact_only_scope_patterns = patterns.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Adds this catalogue's exact-only scopes and patterns to `options`,
+    /// keeping the host's own entries.
+    ///
+    /// Call it after the catalogue is verified so the request-time matcher
+    /// enforces the classification the catalogue declares.
+    pub fn apply_exact_only(
+        &self,
+        mut options: HierarchicalScopeOptions,
+    ) -> HierarchicalScopeOptions {
+        for scope in self
+            .scopes
+            .iter()
+            .filter(|definition| definition.exact_only)
+            .map(|definition| &definition.scope)
+        {
+            if !options.exact_only_scopes.contains(scope) {
+                options.exact_only_scopes.push(scope.clone());
+            }
+        }
+        for pattern in &self.exact_only_scope_patterns {
+            if !options.exact_only_scope_patterns.contains(pattern) {
+                options.exact_only_scope_patterns.push(pattern.clone());
+            }
+        }
+        options
+    }
+
+    /// Builds a validated hierarchical matcher from `options` plus this
+    /// catalogue's exact-only classification.
+    ///
+    /// Surface [`HierarchicalScopeMatch::validation_warnings`] as with any
+    /// other matcher.
+    pub fn hierarchical_scope_match(
+        &self,
+        options: HierarchicalScopeOptions,
+    ) -> Result<HierarchicalScopeMatch, HierarchicalScopeValidationError> {
+        HierarchicalScopeMatch::new(self.apply_exact_only(options))
     }
 
     /// Validates all bounds, uniqueness, and role-to-scope references.
@@ -526,6 +575,39 @@ mod tests {
                 "inventory.write",
                 "profile.read"
             ]
+        );
+    }
+
+    #[test]
+    fn catalogue_exact_only_flags_are_enforced_by_its_matcher() {
+        use crate::scope_match::ScopeMatch;
+
+        let catalogue = catalogue();
+        let matcher = catalogue
+            .hierarchical_scope_match(
+                HierarchicalScopeOptions::default().with_super_scopes(["platform.admin"]),
+            )
+            .unwrap();
+        // inventory.write is flagged exact_only.
+        assert!(!matcher.matches("inventory.*", "inventory.write"));
+        assert!(!matcher.matches("platform.admin", "inventory.write"));
+        assert!(matcher.matches("inventory.write", "inventory.write"));
+        // inventory.read is not.
+        assert!(matcher.matches("inventory.*", "inventory.read"));
+        // The catalogue pattern covers resource-qualified scopes.
+        assert!(!matcher.matches("platform.admin", "inventory.item.7.delete"));
+        assert!(matcher.matches("platform.admin", "billing.read"));
+
+        let options = catalogue.apply_exact_only(
+            HierarchicalScopeOptions::default().with_exact_only_scopes(["host.release"]),
+        );
+        assert_eq!(
+            options.exact_only_scopes,
+            ["host.release", "inventory.write"]
+        );
+        assert_eq!(
+            options.exact_only_scope_patterns,
+            ["inventory.item.*.delete"]
         );
     }
 

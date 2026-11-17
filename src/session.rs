@@ -18,6 +18,8 @@ pub enum AuthMethod {
     Oidc,
     /// Microsoft Entra ID OIDC login flow.
     MicrosoftOidc,
+    /// OAuth 2.0 userinfo login flow ([`crate::OAuth2Provider`]).
+    OAuth2,
 }
 
 /// MFA state attached to the local session context.

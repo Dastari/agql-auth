@@ -5,13 +5,29 @@
 | Layer | API | Audience |
 |-------|-----|----------|
 | Stable public code | `AuthError::public_code()` | Clients, GraphQL extensions |
-| Safe public message | `AuthError::public_message()` | Clients |
-| Internal detail | `AuthError::internal_detail()` / `Display` | Server logs and tracing |
+| Safe public message | `AuthError::public_message()` / `Display` | Clients |
+| Internal detail | `AuthError::diagnostic()` / `internal_detail()` / `Debug` | Server logs and tracing |
 
-GraphQL `ErrorExtensions` exposes only the safe public message and code (plus
+`Display` (`to_string()`) is the safe public message. A resolver that returns
+an `AuthError` through a plain `?` therefore sends only that message; it carries
+no `extensions.code`, so prefer `.extend()` (`ErrorExtensions`) or
+`map_err(|err| err.extend())` to attach the stable code. GraphQL
+`ErrorExtensions` exposes only the safe public message and code (plus
 `retryAfterSeconds` for rate-limit errors). OIDC discovery strings, store
-messages, HTTP bodies, configuration dumps, and stack traces are never sent to
-clients by default.
+messages, hashing errors, HTTP bodies, configuration text and stack traces are
+never sent to clients.
+
+Log the detail explicitly:
+
+```rust
+match auth.login(principal, password, metadata).await {
+    Ok(payload) => Ok(payload),
+    Err(err) => {
+        tracing::warn!(error = %err.diagnostic(), code = err.public_code(), "login failed");
+        Err(err.extend())
+    }
+}
+```
 
 ## Stable Public Codes
 
@@ -26,6 +42,7 @@ clients by default.
 | `RATE_LIMITED` | Throttled or locked credential/request flows |
 | `AUTH_SERVICE_UNAVAILABLE` | Store failures, OIDC transport failures, token creation failures |
 | `INVALID_CONFIGURATION` | Host misconfiguration (usually fail-fast at startup) |
+| `PASSWORD_TOO_LONG` | A password to hash exceeds `PasswordHashingConfig::max_password_bytes` |
 
 OAuth 2.0 (`OAuth2Provider`) failures are distinct variants that map onto the
 stable codes above, so hosts branch on the variant and clients see no provider
@@ -35,16 +52,26 @@ detail:
 |---------|------|
 | `InvalidOAuthState` / `OAuthStateExpired` / `OAuthStateReplayed` | `INVALID_OAUTH_STATE` / `OAUTH_STATE_EXPIRED` / `OAUTH_STATE_REPLAYED` |
 | `OAuthProviderError` (error callback, e.g. cancelled) | `UNAUTHENTICATED` |
-| `OAuthCallback` (malformed callback, missing code) | `UNAUTHENTICATED` |
+| `OAuthCallback` (malformed callback, missing code, `iss` mismatch) | `UNAUTHENTICATED` |
 | `OAuthTokenExchange` | `AUTH_SERVICE_UNAVAILABLE` |
 | `OAuthUserInfo` (userinfo or verified-email list) | `AUTH_SERVICE_UNAVAILABLE` |
 | `OAuthMissingSubject` | `UNAUTHENTICATED` |
+
+Both `OidcProvider` and `OAuth2Provider` report a missing or wrong browser
+binding as `InvalidOAuthState` (`INVALID_OAUTH_STATE`). Their
+`login_with_callback` methods report a disabled local user as `UserDisabled`
+(`USER_DISABLED`) and a missing one as `ExternalLoginRejected` (`FORBIDDEN`).
+An OIDC `iss` mismatch is `OidcCallback` (`UNAUTHENTICATED`); a discovery
+document with another issuer or a non-https endpoint is `OidcDiscovery`
+(`AUTH_SERVICE_UNAVAILABLE`).
 
 Their internal detail is a fixed diagnostic string; provider response bodies,
 `error_description` text and tokens are never copied into an `AuthError`.
 
 Additional codes remain available for specific flows (refresh, password reset,
-login challenges, TOTP). Prefer the table above for cross-service contracts.
+login challenges, TOTP, purpose tokens). Prefer the table above for
+cross-service contracts. `PURPOSE_TOKEN_REPLAYED` (`PurposeTokenReplayed`) is
+new in 0.27 and returned when a consumed purpose token is presented again.
 
 ## Assurance Decisions
 
@@ -77,10 +104,14 @@ message: "authentication service unavailable"
 extensions.code: AUTH_SERVICE_UNAVAILABLE
 ```
 
-Server diagnostics still use `err.to_string()` / `internal_detail()` in logs.
+Server diagnostics use `err.diagnostic()` or `internal_detail()` in logs.
 
 ## Migration
 
 This is a deliberate hardening change in `0.7`. Callers that asserted on full
 `Display` strings inside GraphQL responses must switch to `extensions.code` or
 `public_code()`.
+
+Since `0.27`, `Display` itself is the safe public message. Logging that used
+`err.to_string()` or `{err}` to capture internal detail must switch to
+`err.diagnostic()` (or `{err:?}`); the old diagnostic text is unchanged there.

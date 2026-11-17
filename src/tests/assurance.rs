@@ -22,6 +22,8 @@ fn policy(maximum_age: Duration) -> RecentMfaPolicy {
         allowed_amr: vec!["otp".to_string()],
         allowed_acr: vec!["urn:example:loa:2".to_string()],
         match_mode: AssuranceMatchMode::All,
+        required_amr: vec![],
+        required_context: None,
     }
 }
 
@@ -142,6 +144,7 @@ fn legacy_refresh_record_deserializes_without_assurance_and_recent_mfa_fails_clo
         token_hash: "hash-only".to_string(),
         created_at: OffsetDateTime::UNIX_EPOCH,
         expires_at: OffsetDateTime::UNIX_EPOCH + Duration::days(1),
+        session_expires_at: None,
         last_used_at: None,
         revoked_at: None,
         replaced_by_token_id: None,

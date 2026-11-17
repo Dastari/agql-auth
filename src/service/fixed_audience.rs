@@ -23,7 +23,8 @@ const MAX_FIXED_AUDIENCE_LENGTH: usize = 1024;
 /// stores, abuse state, or clocks of its own, and only the JWT `aud` differs
 /// from [`AuthService::issue_session_bound_access_token_only`]. Every call runs
 /// the owner's existing preparation and second authoritative read. Both reads
-/// also require a current, enabled parent user in the owner's [`UserStore`].
+/// also require a current, enabled parent user in the owner's [`UserStore`],
+/// as they do for the owner.
 ///
 /// It holds a weak reference and never extends the owner's lifetime. Once every
 /// [`Arc`] to the owner is gone, including when the host retires it to change
@@ -196,9 +197,6 @@ where
         let owner = self.owner()?;
         let mut request = owner
             .prepare_session_bound_access_token_only(resolved, roles, scopes, binding)
-            .await?;
-        owner
-            .require_enabled_delegation_parent(&request.reference.subject)
             .await?;
         request.fixed_audience = Some(self.audience.to_string());
         Ok(request)

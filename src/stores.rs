@@ -37,10 +37,29 @@ pub trait UserStore: Send + Sync {
 /// Persists rotated opaque refresh tokens.
 ///
 /// Implementations should store only token hashes and should make revocation
-/// operations durable before returning. Refresh-token rotation must be atomic:
-/// [`AuthService::refresh`](crate::AuthService::refresh) relies on
-/// [`RefreshTokenStore::rotate_refresh_token`] to ensure only one concurrent
-/// refresh can replace a token.
+/// operations durable before returning. A session family has at most one
+/// unrevoked token, and only [`Self::rotate_refresh_token`] moves it to a new
+/// record. Every implementation must keep these rules under concurrency, with
+/// or without refresh reuse grace:
+///
+/// - [`Self::rotate_refresh_token`] is a compare-and-swap. Update the current
+///   record first, `... WHERE id = ? AND revoked_at IS NULL`, and insert the
+///   replacement in the same transaction only when exactly one row changed.
+///   Two rotations of one token must not both succeed.
+/// - [`Self::revoke_refresh_token`] leaves an already revoked record unchanged,
+///   checked in the same statement.
+/// - [`Self::revoke_refresh_token_family`] must not miss a replacement that a
+///   rotation commits while it runs, or that token stays live after sign-out
+///   or replay detection. At `READ COMMITTED` in PostgreSQL, SQL Server and
+///   MySQL a single `UPDATE ... WHERE session_family_id = ? AND revoked_at IS
+///   NULL` can miss one. Serialize the two per family, for example with a
+///   transaction-scoped lock taken in its own statement.
+///
+/// A unique index on `session_family_id` over unrevoked rows turns a broken
+/// rotation into an error instead of a second live token. See
+/// `docs/storage-traits.md` for the SQL shape and per-backend notes, and
+/// `testdata/consumer_refresh_token_store.py` for an example that passes the
+/// crate's conformance races.
 pub trait RefreshTokenStore: Send + Sync {
     /// Stores a newly issued refresh token record.
     async fn insert_refresh_token(&self, token: StoredRefreshToken) -> AuthResult<()>;
@@ -55,12 +74,12 @@ pub trait RefreshTokenStore: Send + Sync {
 
     /// Revokes a single refresh token.
     ///
-    /// A store that overrides [`Self::find_live_refresh_tokens_in_family`] must
-    /// leave an already revoked record unchanged, checked in the same atomic
+    /// Leave an already revoked record unchanged, checked in the same atomic
     /// statement, for example `UPDATE ... WHERE id = ? AND revoked_at IS NULL`.
     /// Otherwise a sign-out that read the token before a concurrent rotation
-    /// overwrites that rotation's `revoked_at` and `replaced_by_token_id`, which
-    /// ends the token's reuse grace early.
+    /// overwrites that rotation's `revoked_at` and `replaced_by_token_id`. The
+    /// service then cannot see that the token was rotated, and the replacement
+    /// outlives the sign-out.
     async fn revoke_refresh_token(
         &self,
         token_id: Uuid,
@@ -70,12 +89,38 @@ pub trait RefreshTokenStore: Send + Sync {
     ) -> AuthResult<()>;
 
     /// Revokes all refresh tokens in a session family.
+    ///
+    /// Must not miss a replacement committed by a concurrent
+    /// [`Self::rotate_refresh_token`]; see the trait documentation.
     async fn revoke_refresh_token_family(
         &self,
         session_family_id: Uuid,
         revoked_at: OffsetDateTime,
         reason: RefreshTokenRevocationReason,
     ) -> AuthResult<()>;
+
+    /// Revokes every unrevoked refresh token of a user, in all session
+    /// families, and returns how many were revoked.
+    ///
+    /// [`AuthService::revoke_user_sessions`](crate::AuthService::revoke_user_sessions)
+    /// calls this when a host disables a user, changes or resets a password,
+    /// or ends every session. Leave already revoked records unchanged.
+    ///
+    /// Like family revocation, it must not miss a replacement that a
+    /// concurrent [`Self::rotate_refresh_token`] commits while it runs. At
+    /// `READ COMMITTED` either serialize it with rotation, for example with a
+    /// per-user lock that rotation also takes, or repeat the update in the same
+    /// transaction until a fresh statement finds no unrevoked token of the
+    /// user. SQLite's `BEGIN IMMEDIATE` serializes writers on its own.
+    ///
+    /// This method has no default: a store that cannot do it must not appear
+    /// to succeed. Index `user_id` to keep it efficient.
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        reason: RefreshTokenRevocationReason,
+    ) -> AuthResult<u64>;
 
     /// Records metadata for a refresh-token use outside the rotation path.
     ///
@@ -99,6 +144,10 @@ pub trait RefreshTokenStore: Send + Sync {
     /// inserted durably. Return `Ok(false)` when the current token is missing or
     /// already revoked. If the replacement cannot be inserted, return `Err`
     /// and leave the current token unmodified.
+    ///
+    /// Decide the outcome from the row count of the conditional update, not
+    /// from an earlier read: a read without a lock can see a token that a
+    /// concurrent family revocation is revoking.
     async fn rotate_refresh_token(
         &self,
         current_token_id: Uuid,
@@ -121,23 +170,15 @@ pub trait RefreshTokenStore: Send + Sync {
     ///   all. One plain `SELECT` does this at `READ COMMITTED`. Do not lock the
     ///   rows it returns.
     ///
-    /// Overriding it also commits the store to these rules, which keep a family
-    /// to one live token:
+    /// The concurrency rules in the trait documentation apply to every store.
+    /// The grace window is measured from `revoked_at` and
+    /// `replaced_by_token_id`, so overriding this also relies on these:
     ///
-    /// - [`Self::rotate_refresh_token`] must keep its documented compare-and-swap
-    ///   behavior: when the token is already revoked, return `Ok(false)` and change
-    ///   nothing. Two calls replacing the same token must not both succeed.
     /// - `replaced_by_token_id` is set only by rotation.
     /// - Nothing changes `revoked_at` or `replaced_by_token_id` on an already
-    ///   revoked token while its family has an unrevoked token. A window is
-    ///   measured from them. [`Self::revoke_refresh_token`] must enforce this
-    ///   atomically, because a caller's earlier read can be stale.
-    /// - [`Self::revoke_refresh_token_family`] must not miss a replacement
-    ///   committed while it runs, or that token stays live after sign-out. A
-    ///   single `UPDATE` at PostgreSQL `READ COMMITTED` can miss one. Serialize
-    ///   this method and [`Self::rotate_refresh_token`] per family, for example
-    ///   with a transaction-scoped advisory lock taken in its own statement. See
-    ///   `docs/refresh-reuse-grace.md`.
+    ///   revoked token while its family has an unrevoked token.
+    ///
+    /// See `docs/refresh-reuse-grace.md`.
     async fn find_live_refresh_tokens_in_family(
         &self,
         _session_family_id: Uuid,
@@ -196,8 +237,13 @@ pub use crate::memory_rate_limit::MemoryAuthRateLimitStore;
 
 #[async_trait]
 /// Persists one-time password-reset token IDs.
+///
+/// Every reset token the crate issues has a record here; a token without one
+/// can never be consumed.
 pub trait PasswordResetTokenStore: Send + Sync {
-    /// Inserts a password-reset token ID with its expiry.
+    /// Inserts a password-reset token ID with its owning user and expiry.
+    ///
+    /// Persist `user_id` with the record; sibling invalidation selects by it.
     async fn insert_password_reset_token(
         &self,
         token_id: Uuid,
@@ -207,12 +253,42 @@ pub trait PasswordResetTokenStore: Send + Sync {
 
     /// Consumes a password-reset token exactly once.
     ///
-    /// Return `true` only for the first successful consume operation.
+    /// Must atomically require an existing record that is neither consumed nor
+    /// invalidated, then mark it consumed. Return `true` only for the first
+    /// successful consume operation, and `false` for a missing, consumed or
+    /// invalidated record, for example:
+    ///
+    /// ```sql
+    /// UPDATE password_reset_tokens SET consumed_at = ?
+    /// WHERE id = ? AND consumed_at IS NULL AND invalidated_at IS NULL;
+    /// -- true exactly when one row changed
+    /// ```
     async fn consume_password_reset_token(
         &self,
         token_id: Uuid,
         consumed_at: OffsetDateTime,
     ) -> AuthResult<bool>;
+
+    /// Invalidates every unconsumed reset token of `user_id`, except
+    /// `keep_token_id` when given, and returns how many it changed.
+    ///
+    /// Called after issuing a new token (keeping that one) and after a token is
+    /// consumed (keeping none). Afterwards
+    /// [`Self::consume_password_reset_token`] must return `false` for every
+    /// invalidated token. Return `Err` if this cannot be done; never succeed
+    /// without invalidating. One statement is enough:
+    ///
+    /// ```sql
+    /// UPDATE password_reset_tokens SET invalidated_at = ?
+    /// WHERE user_id = ? AND (? IS NULL OR id <> ?) AND consumed_at IS NULL
+    ///   AND invalidated_at IS NULL;
+    /// ```
+    async fn invalidate_password_reset_tokens_for_user(
+        &self,
+        user_id: &str,
+        keep_token_id: Option<Uuid>,
+        invalidated_at: OffsetDateTime,
+    ) -> AuthResult<u64>;
 }
 
 #[async_trait]
@@ -264,6 +340,10 @@ pub trait LoginChallengeStore: Send + Sync {
 /// Persists OIDC authorization state for one-time callback validation.
 pub trait OAuthStateStore: Send + Sync {
     /// Inserts an OAuth login state record.
+    ///
+    /// Persist every field and return it unchanged, including
+    /// `browser_binding_hash` and `response_mode`. A record reloaded without
+    /// its browser-binding hash is refused at the callback.
     async fn insert_oauth_state(&self, state: OAuthLoginState) -> AuthResult<()>;
 
     /// Consumes an OAuth state record exactly once.
@@ -306,11 +386,26 @@ pub trait OAuthStateStore: Send + Sync {
 ///
 /// Production MFA flows should prefer
 /// [`AuthService::verify_totp_code_with_replay_store`](crate::AuthService::verify_totp_code_with_replay_store)
-/// over stateless verification. Implementations should atomically insert the
-/// `(principal_id, factor_id, step)` tuple and return `Ok(true)` only for the
-/// first successful consume operation.
+/// over stateless verification.
 pub trait TotpReplayStore: Send + Sync {
     /// Consumes a valid TOTP time step once for a principal/factor.
+    ///
+    /// Must insert the `(principal_id, factor_id, step)` tuple in one atomic
+    /// operation backed by a uniqueness constraint, and return `Ok(true)` only
+    /// when this call inserted it. Concurrent calls for the same tuple, from
+    /// any process, must see exactly one `Ok(true)`. A read followed by a
+    /// separate insert is not atomic. Treat `factor_id = None` as one value
+    /// (for example store `''`), because SQL `NULL`s do not collide in a
+    /// unique index:
+    ///
+    /// ```sql
+    /// INSERT INTO totp_steps (principal_id, factor_id, step, consumed_at)
+    /// VALUES (?, COALESCE(?, ''), ?, ?)
+    /// ON CONFLICT (principal_id, factor_id, step) DO NOTHING;
+    /// -- Ok(true) exactly when one row was inserted
+    /// ```
+    ///
+    /// Return `Err` when the outcome is unknown; never `Ok(true)`.
     async fn consume_totp_step(
         &self,
         principal_id: &str,
@@ -331,6 +426,18 @@ pub trait ExternalIdentityStore: Send + Sync {
     ) -> AuthResult<Option<ExternalIdentity>>;
 
     /// Links an external identity to a local user.
+    ///
+    /// Must be atomic on `(provider_name, external_subject)`: a unique
+    /// constraint makes a concurrent second link for the same pair fail with
+    /// `Err`, and an existing link must never be silently re-pointed to
+    /// another user. Check-then-insert without the constraint is not enough:
+    ///
+    /// ```sql
+    /// -- UNIQUE (provider_name, external_subject)
+    /// INSERT INTO external_identities (provider_name, external_subject, user_id, ...)
+    /// VALUES (?, ?, ?, ...);
+    /// -- a unique violation is returned as Err
+    /// ```
     async fn link_external_identity(&self, identity: ExternalIdentity) -> AuthResult<()>;
 
     /// Updates the stored claims snapshot for an existing external identity.
@@ -366,6 +473,8 @@ pub trait OAuthTokenStore: Send + Sync {
 ///
 /// Implementations should store only token hashes. The raw token is returned
 /// once by [`crate::ApiTokenService`] and should not be persisted by hosts.
+/// Persist `audience`, `resource_type` and `resource_id` exactly: the service
+/// refuses tokens whose binding does not match its configuration.
 pub trait ApiTokenStore: Send + Sync {
     /// Stores a newly issued API token record.
     async fn insert_api_token(&self, token: StoredApiToken) -> AuthResult<()>;
@@ -377,6 +486,9 @@ pub trait ApiTokenStore: Send + Sync {
     async fn find_api_token_by_hash(&self, token_hash: &str) -> AuthResult<Option<StoredApiToken>>;
 
     /// Records metadata for a successful API-token use.
+    ///
+    /// Best effort: an error here does not fail authentication and is passed
+    /// to the service's [`crate::ApiTokenTouchObserver`], if any.
     async fn touch_api_token(
         &self,
         token_id: Uuid,
@@ -393,13 +505,15 @@ pub trait ApiTokenStore: Send + Sync {
         reason: ApiTokenRevocationReason,
     ) -> AuthResult<()>;
 
-    /// Optional bulk API-token revocation; the default is a no-op returning zero.
+    /// Optional bulk revocation of every active token of one principal.
     ///
-    /// `Ok(0)` alone does not prove the adapter supports bulk revocation or that
-    /// no active tokens remain. Hosts relying on this must require and test an
-    /// override, or use a known-supported per-token revocation workflow. It does
-    /// not revoke user sessions/JWTs or invalidate already accepted principals;
-    /// those require their own authoritative status/revalidation boundary.
+    /// The default returns [`AuthError::InvalidConfiguration`](crate::AuthError::InvalidConfiguration)
+    /// and changes nothing, so an adapter without it can never report a
+    /// revocation that did not happen. An override must revoke every matching
+    /// unrevoked token durably before returning `Ok(count)`; `Ok(0)` then means
+    /// no active token matched. It does not revoke user sessions/JWTs or
+    /// invalidate already accepted principals; those require their own
+    /// authoritative status/revalidation boundary.
     async fn revoke_api_tokens_for_principal(
         &self,
         _subject: &str,
@@ -407,15 +521,16 @@ pub trait ApiTokenStore: Send + Sync {
         _revoked_at: OffsetDateTime,
         _reason: ApiTokenRevocationReason,
     ) -> AuthResult<u64> {
-        Ok(0)
+        Err(crate::AuthError::InvalidConfiguration(
+            "api token store does not support bulk revocation by principal".to_string(),
+        ))
     }
 
-    /// Optional resource bulk revocation; the default is a no-op returning zero.
+    /// Optional bulk revocation of every active token bound to one resource.
     ///
-    /// Shares the capability/zero-result contract of
+    /// Shares the default-error and override contract of
     /// [`Self::revoke_api_tokens_for_principal`]. The host authorizes the exact
-    /// resource and must know the adapter implements this operation before
-    /// presenting it as a security guarantee.
+    /// resource.
     async fn revoke_api_tokens_for_resource(
         &self,
         _resource_type: &str,
@@ -423,6 +538,27 @@ pub trait ApiTokenStore: Send + Sync {
         _revoked_at: OffsetDateTime,
         _reason: ApiTokenRevocationReason,
     ) -> AuthResult<u64> {
-        Ok(0)
+        Err(crate::AuthError::InvalidConfiguration(
+            "api token store does not support bulk revocation by resource".to_string(),
+        ))
     }
+}
+
+#[async_trait]
+/// Records consumed purpose-token ids so a purpose token succeeds at most once.
+///
+/// Used by
+/// [`AuthService::consume_purpose_token`](crate::AuthService::consume_purpose_token).
+/// Implementations must insert `token_id` atomically (for example a unique-key
+/// insert) and return `Ok(true)` only for the first call with that id, and
+/// `Ok(false)` for every later call. Records must be kept at least until
+/// `expires_at`; they may be deleted afterwards because the token no longer
+/// validates. Return an error, never `Ok(true)`, when the outcome is unknown.
+pub trait PurposeTokenReplayStore: Send + Sync {
+    /// Atomically marks a purpose-token id as consumed.
+    async fn consume_purpose_token(
+        &self,
+        token_id: Uuid,
+        expires_at: OffsetDateTime,
+    ) -> AuthResult<bool>;
 }

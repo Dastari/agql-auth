@@ -29,7 +29,11 @@ Important refresh-token behavior:
 - `find_refresh_token_by_hash` must return revoked records too, so replay can
   be detected.
 - `revoke_refresh_token` is used during logout and expiry.
-- `revoke_refresh_token_family` is used after replay detection.
+- `revoke_refresh_token_family` is used for sign-out and after replay detection.
+- `revoke_refresh_tokens_for_user` revokes every unrevoked token of one user,
+  for `AuthService::revoke_user_sessions`. It is required and has no default, so
+  a store cannot appear to support it without doing it. Return the number of
+  tokens revoked and index `user_id`.
 - `touch_refresh_token` records use metadata outside refresh rotation.
 - `rotate_refresh_token` atomically revokes the current token and inserts the
   replacement during refresh.
@@ -41,6 +45,14 @@ replacement row. Missing values from pre-0.8 rows deserialize as `None`; never
 backfill `auth_time` with refresh or migration time. See
 [session assurance](session-assurance.md) and [MIGRATION.md](../MIGRATION.md).
 
+Since `0.27`, `session_expires_at` holds the session family's absolute deadline,
+set at issuance from `AuthConfig::max_session_lifetime` and copied to every
+replacement. Persist it in a nullable column, or keep it in a serialized record.
+Rows written before the column existed, and a store that drops it, read as `None`;
+while a maximum lifetime is configured the service then never extends that session
+past the row's own `expires_at`. Dropping the field therefore shortens sessions,
+never lengthens them. Do not backfill it from migration time.
+
 `rotate_refresh_token` is required in `0.6.0`. It must return `Ok(true)` only
 when the current token exists, is not revoked, is marked used/revoked for
 rotation, and the replacement token is inserted in the same transaction. Return
@@ -48,38 +60,134 @@ rotation, and the replacement token is inserted in the same transaction. Return
 replacement cannot be inserted, return `Err(...)` and leave the current token
 unmodified.
 
-SQL-style shape:
+### Concurrency rules
+
+A session family has at most one unrevoked token, and only rotation moves it to a
+new record. Every `RefreshTokenStore` must keep that true under concurrency, with or
+without the reuse grace:
+
+1. **Rotation is a compare-and-swap decided by the update.** Update the current row
+   first and insert the replacement only when exactly one row changed. Do not decide
+   from an earlier `SELECT`: a read without a lock can see a token that a concurrent
+   family revocation is revoking, and the port then inserts a live replacement after
+   sign-out.
+2. **Single revocation leaves a revoked row unchanged**, checked in the same
+   statement. Sign-out reads the token before it revokes it. If a rotation commits in
+   between, overwriting `revoked_at` and `replaced_by_token_id` hides the rotation
+   from the service, and the replacement outlives the sign-out.
+3. **Family revocation cannot miss a replacement.** At `READ COMMITTED` (PostgreSQL's
+   default, SQL Server with or without RCSI, MySQL when configured), a single
+   `UPDATE ... WHERE session_family_id = ? AND revoked_at IS NULL` can block on the
+   current row while a rotation commits, then skip it and never see the replacement,
+   which was committed after the statement's snapshot. Serialize family revocation
+   and rotation per family.
+
+Canonical rotation, update first and row-count checked:
 
 ```sql
 BEGIN;
-
-SELECT id, revoked_at
-FROM refresh_tokens
-WHERE id = ?
-FOR UPDATE;
-
--- if missing or revoked: ROLLBACK; return false
-
-INSERT INTO refresh_tokens (...) VALUES (...);
+-- Per-family lock here, as its own statement (see the backend notes).
 
 UPDATE refresh_tokens
-SET revoked_at = ?,
-    replaced_by_token_id = ?,
-    last_used_at = ?,
-    ip_address = ?,
-    user_agent = ?
-WHERE id = ?
+SET revoked_at = :now,
+    replaced_by_token_id = :replacement_id,
+    last_used_at = :now,
+    ip_address = :ip_address,
+    user_agent = :user_agent
+WHERE id = :current_id
   AND revoked_at IS NULL;
 
+-- affected rows != 1: ROLLBACK; return Ok(false)
+
+INSERT INTO refresh_tokens (...) VALUES (...);
+-- insert fails: ROLLBACK; return Err(...)
+
+COMMIT; -- return Ok(true)
+```
+
+Family revocation takes the same lock:
+
+```sql
+BEGIN;
+-- The same per-family lock.
+UPDATE refresh_tokens
+SET revoked_at = :now, revocation_reason = :reason
+WHERE session_family_id = :family_id
+  AND revoked_at IS NULL;
 COMMIT;
 ```
+
+Single revocation is one statement:
+`UPDATE refresh_tokens SET ... WHERE id = :id AND revoked_at IS NULL`.
+
+Backend notes:
+
+- **PostgreSQL.** Take `SELECT pg_advisory_xact_lock(hashtextextended(:family_id::text, 0))`
+  as the first statement of both transactions. It must be its own statement, so that
+  the statements after it read what the previous holder committed. `SERIALIZABLE`
+  with retry on serialization failure also works.
+- **SQLite.** Open both transactions with `BEGIN IMMEDIATE`, which serializes
+  writers. SQLite has no `SELECT ... FOR UPDATE`, so the update-first shape is the
+  natural one; read the row count from `changes()` or the driver.
+- **SQL Server.** `FOR UPDATE` exists only for cursors. Use the update-first shape
+  with `@@ROWCOUNT`, and serialize per family with
+  `sp_getapplock @Resource = <family id>, @LockMode = 'Exclusive', @LockOwner = 'Transaction'`
+  at the start of both transactions, or run both at `SERIALIZABLE`.
+- **MySQL (InnoDB).** Under `READ COMMITTED` gap locks are off, so take a per-family
+  lock in both transactions, for example `SELECT ... FOR UPDATE` on a per-family or
+  per-user row that both always lock first. Check `ROW_COUNT()` after the update.
+
+Add a unique index over unrevoked rows, so a broken rotation or an accidental branch
+fails instead of leaving two live tokens:
+
+```sql
+-- PostgreSQL and SQLite; SQL Server accepts the same filtered index.
+CREATE UNIQUE INDEX refresh_tokens_one_live_per_family
+ON refresh_tokens (session_family_id)
+WHERE revoked_at IS NULL;
+
+-- MySQL has no partial index: index a generated column that is NULL once revoked.
+ALTER TABLE refresh_tokens
+  ADD COLUMN live_family_id BINARY(16)
+    AS (IF(revoked_at IS NULL, session_family_id, NULL)) STORED,
+  ADD UNIQUE INDEX refresh_tokens_one_live_per_family (live_family_id);
+```
+
+The index needs the update-first order: the current row must be revoked before the
+replacement row is inserted in the same transaction.
+
+User-wide revocation has the same hazard as family revocation, across every family
+of the user. Either serialize it with rotation (a per-user lock that rotation also
+takes, before its family lock) or, at `READ COMMITTED`, repeat the update inside the
+transaction until a fresh statement finds no unrevoked token of the user:
+
+```sql
+BEGIN;
+-- Repeat these two statements until the SELECT returns no row. At READ COMMITTED
+-- each statement reads what was committed before it started, so a replacement the
+-- previous UPDATE skipped is found by the next one.
+UPDATE refresh_tokens SET revoked_at = :now, revocation_reason = :reason
+WHERE user_id = :user_id AND revoked_at IS NULL;
+SELECT 1 FROM refresh_tokens
+WHERE user_id = :user_id AND revoked_at IS NULL
+LIMIT 1;
+COMMIT;
+```
+
+SQLite's `BEGIN IMMEDIATE` needs neither.
 
 Use a unique index on the refresh-token hash and indexes on session-family IDs
 to make revocation efficient.
 
+`testdata/consumer_refresh_token_store.py` implements these rules on SQLite and
+PostgreSQL. The ignored `*_refresh_reuse_grace_consumer_conformance` tests run the
+crate's rotation, sign-out and family-revocation races against it, including a
+rotation that starts while a family revocation is uncommitted and the reverse. Run
+the same races against your adapter.
+
 `find_live_refresh_tokens_in_family` is optional. Its default reports no support.
-It is only needed for the opt-in [refresh reuse grace](refresh-reuse-grace.md), and
-overriding it adds requirements listed there.
+It is only needed for the opt-in [refresh reuse grace](refresh-reuse-grace.md), which
+relies on the concurrency rules above and adds the requirements listed there.
 
 ## Abuse Protection
 
@@ -95,7 +203,8 @@ The store receives opaque keys:
   `totp_verification`, `password_reset_token_consumption`,
   `password_reset_request`, or `login_code_request`
 - `bucket`, either `principal` or `client`
-- `value_hash`, a SHA-256 hash of the normalized principal/user/client value
+- `value_hash`, a SHA-256 hash of the normalized principal/user/client value;
+  password login uses the resolved local user ID for known accounts
 
 The store persists `AuthRateLimitSnapshot`: the state plus a fresh UUID
 revision. `compare_exchange_auth_rate_limit_state` must conditionally insert
@@ -143,7 +252,13 @@ The store must support:
 - revoking a token
 
 Optional trait methods support revoking all tokens for a principal or all
-tokens bound to a generic resource.
+tokens bound to a generic resource. Their defaults return
+`AuthError::InvalidConfiguration` and change nothing; an override must revoke
+every matching active token durably before returning the count.
+
+Persist the audience and resource binding exactly: the service refuses tokens
+whose binding does not match its configuration. A `touch_api_token` error does
+not fail authentication.
 
 Store only `StoredApiToken.token_hash`, never the raw token returned in
 `IssuedApiToken`. Use a unique index on `token_hash`; revoked records should
@@ -168,7 +283,20 @@ let verified = auth
 ```
 
 `consume_password_reset_token` must be atomic. If two requests try to consume
-the same token ID, exactly one should return `true`.
+the same token ID, exactly one may return `true`. It must return `false` for a
+missing, consumed or invalidated record.
+
+Persist the `user_id` passed to `insert_password_reset_token`.
+`invalidate_password_reset_tokens_for_user` is required: the service calls it
+after issuing a token (keeping the new one) and after consuming one (keeping
+none). It must mark every other unconsumed token of that user invalidated, or
+return `Err`; it must never succeed without doing so.
+
+```sql
+UPDATE password_reset_tokens SET invalidated_at = ?
+WHERE user_id = ? AND (? IS NULL OR id <> ?)
+  AND consumed_at IS NULL AND invalidated_at IS NULL;
+```
 
 ## Login Challenges
 
@@ -221,8 +349,9 @@ flows.
 
 `create_authorization_request` stores an `OAuthLoginState` containing the hashed
 state, nonce, PKCE verifier, redirect URI, requested scopes, expiry, an
-optional versioned `authorization_policy`, and the `response_mode` the
-callback must arrive in. The typed-options API binds that policy to the exact
+optional versioned `authorization_policy`, the `response_mode` the
+callback must arrive in, and `browser_binding_hash` (hex SHA-256 of the
+browser-binding secret returned to the host for its cookie). The typed-options API binds that policy to the exact
 state; legacy/default requests store `None`. The raw state is returned only to
 the browser redirect flow. `OAuth2Provider` states carry an empty nonce;
 `OidcProvider` refuses such a state and `OAuth2Provider` refuses a state with a
@@ -247,8 +376,8 @@ WHERE provider_name = ?
   AND state_hash = ?
   AND consumed_at IS NULL
 RETURNING provider_name, state_hash, nonce, code_verifier, redirect_uri,
-          scopes, authorization_policy, response_mode, created_at, expires_at,
-          NULL AS consumed_at;
+          scopes, authorization_policy, response_mode, browser_binding_hash,
+          created_at, expires_at, NULL AS consumed_at;
 ```
 
 Recommended database constraints:
@@ -259,6 +388,9 @@ Recommended database constraints:
   request, never satisfied step-up
 - `response_mode` (`query` or `form_post`); a missing legacy value means
   `query`. A store that drops it makes `form_post` callbacks fail closed
+- nullable `browser_binding_hash` (64 hex characters). It is `NULL` only for
+  providers configured with `OAuthBrowserBinding::NotRequiredHostBindsState`;
+  a store that drops it makes every callback fail with `INVALID_OAUTH_STATE`
 - `nonce` may be empty (plain OAuth 2.0 states)
 - compare expiry before accepting the callback
 - update `consumed_at` in the same statement that verifies it is currently null
@@ -267,8 +399,18 @@ Recommended database constraints:
 
 `TotpReplayStore` is optional but recommended for production MFA. Stateless
 TOTP verification can accept the same valid code more than once within the skew
-window. `consume_totp_step` should atomically insert or mark
-`(principal_id, factor_id, step)` and return `true` only for the first consume.
+window. `consume_totp_step` must insert `(principal_id, factor_id, step)` in one
+atomic operation backed by a uniqueness constraint and return `true` only when
+that call inserted it, across all processes. A read followed by a separate
+insert is not atomic. Store a missing `factor_id` as one value such as `''`,
+since SQL `NULL`s do not collide in a unique index:
+
+```sql
+INSERT INTO totp_steps (principal_id, factor_id, step, consumed_at)
+VALUES (?, COALESCE(?, ''), ?, ?)
+ON CONFLICT (principal_id, factor_id, step) DO NOTHING;
+-- true exactly when one row was inserted
+```
 
 ## External Identities
 
@@ -277,7 +419,11 @@ window. `consume_totp_step` should atomically insert or mark
 For Microsoft Entra work/school accounts, `agql-auth` prefers `tid + oid` as
 the stable external subject. For generic OIDC it falls back to `iss + sub`.
 
-The store should treat `(provider_name, external_subject)` as unique. Do not use
+`link_external_identity` must enforce `(provider_name, external_subject)`
+uniqueness atomically, with a unique constraint: a concurrent second link for
+the same pair returns `Err`, and an existing link is never re-pointed to another
+user. The OIDC callback links only when no link was found, so a concurrent
+first login fails closed rather than creating two links. Do not use
 email, UPN, display name, or preferred username as authorization identifiers;
 those fields can change and are not stable identity keys.
 

@@ -1,31 +1,52 @@
+mod abuse_controls;
+mod api_token_binding;
 mod api_tokens;
 mod assurance;
+mod assurance_policy_edges;
 mod auth_lifecycle;
 mod bounded_memory;
 mod challenge_admission;
+mod challenge_binding;
 mod challenges;
 mod channel;
 mod claims_and_status;
+mod clock_unification;
 mod combined;
+mod confirmation;
 mod consumer_refresh_store;
 mod consumer_store;
 mod current_authority;
+mod delegation_reference;
+mod error_display;
 mod grant;
+mod graphql_refresh_cookie;
 mod graphql_transport;
+mod guard_edges;
 mod jwt_signing;
+mod key_rotation;
+mod model_redaction;
 mod oauth2;
+mod oauth_callback_binding;
 mod oidc;
 mod oidc_client_credentials;
+mod oidc_hardening;
+mod password_hashing;
 mod password_login;
+mod password_reset_siblings;
 mod principal_reference;
 mod provider_http;
+mod purpose_token_replay;
 mod rate_limits;
 mod recovery;
 mod refresh_reuse_grace;
+mod refresh_store_conformance;
 mod scope_match;
 mod scopes;
+mod session_lifetime;
 mod time_invariants;
+mod token_config;
 mod totp;
+mod validation_defaults;
 mod validator;
 
 use std::collections::{HashMap, HashSet};
@@ -161,6 +182,22 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
             }
         }
         Ok(())
+    }
+
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        user_id: &str,
+        revoked_at: OffsetDateTime,
+        _reason: RefreshTokenRevocationReason,
+    ) -> crate::AuthResult<u64> {
+        let mut revoked = 0;
+        for token in self.tokens_by_id.lock().unwrap().values_mut() {
+            if token.user_id == user_id && token.revoked_at.is_none() {
+                token.revoked_at = Some(revoked_at);
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
     }
 
     async fn touch_refresh_token(
@@ -337,7 +374,7 @@ impl ApiTokenStore for MemoryApiTokenStore {
 
 #[derive(Clone, Default)]
 pub(super) struct MemoryPasswordResetStore {
-    issued: Arc<Mutex<HashSet<Uuid>>>,
+    issued: Arc<Mutex<HashMap<Uuid, String>>>,
     consumed: Arc<Mutex<HashSet<Uuid>>>,
 }
 
@@ -346,10 +383,13 @@ impl PasswordResetTokenStore for MemoryPasswordResetStore {
     async fn insert_password_reset_token(
         &self,
         token_id: Uuid,
-        _user_id: &str,
+        user_id: &str,
         _expires_at: OffsetDateTime,
     ) -> crate::AuthResult<()> {
-        self.issued.lock().unwrap().insert(token_id);
+        self.issued
+            .lock()
+            .unwrap()
+            .insert(token_id, user_id.to_string());
         Ok(())
     }
 
@@ -358,10 +398,27 @@ impl PasswordResetTokenStore for MemoryPasswordResetStore {
         token_id: Uuid,
         _consumed_at: OffsetDateTime,
     ) -> crate::AuthResult<bool> {
-        if !self.issued.lock().unwrap().contains(&token_id) {
+        if !self.issued.lock().unwrap().contains_key(&token_id) {
             return Ok(false);
         }
         Ok(self.consumed.lock().unwrap().insert(token_id))
+    }
+
+    async fn invalidate_password_reset_tokens_for_user(
+        &self,
+        user_id: &str,
+        keep_token_id: Option<Uuid>,
+        _invalidated_at: OffsetDateTime,
+    ) -> crate::AuthResult<u64> {
+        let issued = self.issued.lock().unwrap();
+        let mut consumed = self.consumed.lock().unwrap();
+        let mut invalidated = 0;
+        for (token_id, owner) in issued.iter() {
+            if owner == user_id && Some(*token_id) != keep_token_id && consumed.insert(*token_id) {
+                invalidated += 1;
+            }
+        }
+        Ok(invalidated)
     }
 }
 

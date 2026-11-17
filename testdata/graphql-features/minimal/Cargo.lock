@@ -10,7 +10,7 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "agql-auth"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -22,7 +22,6 @@ dependencies = [
  "jsonwebtoken",
  "percent-encoding",
  "rand",
- "rsa",
  "serde",
  "serde_json",
  "sha1",
@@ -31,6 +30,7 @@ dependencies = [
  "thiserror",
  "time",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -724,9 +724,9 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "10.4.0"
+version = "11.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
+checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
 dependencies = [
  "base64",
  "ed25519-dalek",

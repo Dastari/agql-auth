@@ -10,14 +10,14 @@ use uuid::Uuid;
 use crate::AuthResult;
 use crate::claims::{
     AccessTokenGrantKind, AccessTokenMetadata, ActorIdentity, ClaimRequirements,
-    ConfirmationClaims, ExactOperationBinding,
+    ConfirmationClaims, ExactOperationBinding, PresentedConfirmation,
 };
 use crate::clock::{Clock, SystemClock};
 use crate::config::{AccessTokenScopeClaimFormat, LegacyScopeClaims};
 use crate::errors::AuthError;
 use crate::models::AuthUser;
 use crate::session::SessionContext;
-use crate::util::map_access_token_decode_error;
+use crate::util::{dedupe_stable, map_access_token_decode_error};
 
 pub(crate) const ACCESS_TOKEN_TYPE: &str = "access";
 pub(crate) const ACCESS_TOKEN_PURPOSE: &str = "access_token";
@@ -33,23 +33,27 @@ pub const MAX_ACCESS_TOKEN_SCOPE_LENGTH: usize = 512;
 /// Maximum aggregate encoded byte length of access-token scope values.
 pub const MAX_ACCESS_TOKEN_SCOPE_CLAIM_LENGTH: usize = 16 * 1024;
 
-/// How missing `purpose` claims are treated.
+/// How missing `typ` and `purpose` claims are treated.
+///
+/// Every access token issued since 0.6.0 carries `typ = "access"` and
+/// `purpose = "access_token"`, so the strict default accepts all of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PurposePolicy {
-    /// Accept `purpose = access_token` and legacy tokens without purpose.
-    #[default]
+    /// Legacy opt-in: also accept pre-0.6 tokens that omit `typ` or
+    /// `purpose`. A present claim must still carry the access-token value.
     AccessTokenOrLegacy,
-    /// Require `purpose = access_token`.
+    /// Require `typ = "access"` and `purpose = "access_token"`.
+    #[default]
     RequireAccessToken,
 }
 
 /// Whether raw tokens without a `Bearer` scheme are accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BearerParseMode {
-    /// Accept `Bearer <token>` and raw token values.
-    #[default]
+    /// Legacy opt-in: accept `Bearer <token>` and raw token values.
     BearerOrRaw,
     /// Require an explicit `Bearer` scheme.
+    #[default]
     RequireBearer,
 }
 
@@ -122,6 +126,9 @@ pub(crate) struct AccessTokenDecodeConfig {
     pub(crate) purpose_policy: PurposePolicy,
     pub(crate) legacy_scope_claims: LegacyScopeClaims,
     pub(crate) claim_requirements: ClaimRequirements,
+    /// Key or certificate the host verified for this request, compared with
+    /// `cnf` when [`ClaimRequirements::require_cnf`] is set.
+    pub(crate) presented_confirmation: Option<PresentedConfirmation>,
     pub(crate) clock: Arc<dyn Clock>,
     /// When set, algorithm is taken from the resolved key path instead.
     pub(crate) allowed_algorithms: Vec<jsonwebtoken::Algorithm>,
@@ -140,9 +147,10 @@ impl AccessTokenDecodeConfig {
             validation,
             expected_kid,
             leeway_seconds: 0,
-            purpose_policy: PurposePolicy::AccessTokenOrLegacy,
+            purpose_policy: PurposePolicy::RequireAccessToken,
             legacy_scope_claims,
             claim_requirements: ClaimRequirements::default(),
+            presented_confirmation: None,
             clock: Arc::new(SystemClock),
             allowed_algorithms,
         }
@@ -185,8 +193,17 @@ pub(crate) fn decode_access_token_claims(
     let metadata = claims_to_metadata(&claims);
     config
         .claim_requirements
-        .validate(&metadata)
+        .validate_with_confirmation(&metadata, config.presented_confirmation.as_ref())
         .map_err(|_| AuthError::InvalidAccessToken)?;
+    // A caller that presents proof-of-possession material always gets the
+    // binding checked when the token carries one, even without require_cnf.
+    if let Some(presented) = &config.presented_confirmation
+        && metadata.cnf.is_some()
+    {
+        metadata
+            .verify_confirmation(presented)
+            .map_err(|_| AuthError::InvalidAccessToken)?;
+    }
 
     Ok(DecodedAccessTokenClaims { claims, scopes })
 }
@@ -228,22 +245,21 @@ fn validate_type_and_purpose(
     claims: &AccessTokenClaims,
     purpose_policy: PurposePolicy,
 ) -> AuthResult<()> {
-    if !matches!(claims.typ.as_deref(), None | Some(ACCESS_TOKEN_TYPE)) {
-        return Err(AuthError::InvalidAccessToken);
-    }
-    match purpose_policy {
+    let accepted = match purpose_policy {
         PurposePolicy::AccessTokenOrLegacy => {
-            if !matches!(claims.purpose.as_deref(), None | Some(ACCESS_TOKEN_PURPOSE)) {
-                return Err(AuthError::InvalidAccessToken);
-            }
+            matches!(claims.typ.as_deref(), None | Some(ACCESS_TOKEN_TYPE))
+                && matches!(claims.purpose.as_deref(), None | Some(ACCESS_TOKEN_PURPOSE))
         }
         PurposePolicy::RequireAccessToken => {
-            if claims.purpose.as_deref() != Some(ACCESS_TOKEN_PURPOSE) {
-                return Err(AuthError::InvalidAccessToken);
-            }
+            claims.typ.as_deref() == Some(ACCESS_TOKEN_TYPE)
+                && claims.purpose.as_deref() == Some(ACCESS_TOKEN_PURPOSE)
         }
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidAccessToken)
     }
-    Ok(())
 }
 
 pub(crate) fn claims_to_metadata(claims: &AccessTokenClaims) -> AccessTokenMetadata {
@@ -381,16 +397,6 @@ fn canonical_scopes(scopes: &[String]) -> Vec<&str> {
     canonical.sort_unstable();
     canonical.dedup();
     canonical
-}
-
-fn dedupe_stable(scopes: Vec<String>) -> Vec<String> {
-    let mut result = Vec::with_capacity(scopes.len());
-    for scope in scopes {
-        if !result.contains(&scope) {
-            result.push(scope);
-        }
-    }
-    result
 }
 
 fn valid_scope_token(scope: &str) -> bool {

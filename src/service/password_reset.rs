@@ -10,35 +10,39 @@ use crate::models::AuthRateLimitFlow;
 use crate::models::{PasswordResetToken, VerifiedPasswordResetToken};
 use crate::stores::{PasswordResetTokenStore, RefreshTokenStore, UserStore};
 use crate::util::map_password_reset_decode_error;
-use crate::{AuthError, AuthResult};
+use crate::{AuthError, AuthResult, RefreshTokenRevocationReason};
 
 impl<U, R> AuthService<U, R>
 where
     U: UserStore + 'static,
     R: RefreshTokenStore + 'static,
 {
-    /// Issues a signed password-reset token with the default one-hour TTL.
+    /// Issues a password-reset token with the default one-hour TTL and records
+    /// it in `store`.
     ///
-    /// This does not persist a one-time-use record, send delivery, check user
-    /// state or apply request admission. Complete reset flows should use
-    /// [`Self::should_process_password_reset_request`] and
-    /// [`Self::issue_password_reset_token_with_store`].
-    pub fn issue_password_reset_token(
+    /// Shares the contract of [`Self::issue_password_reset_token_with_store`].
+    pub async fn issue_password_reset_token<S>(
         &self,
+        store: &S,
         user_id: impl Into<String>,
-    ) -> AuthResult<PasswordResetToken> {
-        self.issue_password_reset_token_with_ttl(user_id, Duration::hours(1))
+    ) -> AuthResult<PasswordResetToken>
+    where
+        S: PasswordResetTokenStore,
+    {
+        self.issue_password_reset_token_with_store(store, user_id, Duration::hours(1))
+            .await
     }
 
-    /// Issues a signed reset token without persisting its one-time-use record.
-    /// Shares the primitive contract of [`Self::issue_password_reset_token`].
-    pub fn issue_password_reset_token_with_ttl(
+    /// Signs a reset token. Callers must record it before returning it: a
+    /// token without a store record could only pass validation, which is
+    /// repeatable until expiry, so the crate never hands one out.
+    fn sign_password_reset_token(
         &self,
         user_id: impl Into<String>,
         ttl: Duration,
     ) -> AuthResult<PasswordResetToken> {
         let user_id = user_id.into();
-        let issued_at = OffsetDateTime::now_utc();
+        let issued_at = self.session_clock.now();
         let expires_at = crate::util::checked_jwt_expiry(issued_at, ttl, "password-reset ttl")?;
         let token_id = Uuid::new_v4();
         let claims = PasswordResetTokenClaims {
@@ -62,7 +66,13 @@ where
         })
     }
 
-    /// Issues a password-reset token and records its token ID in a store.
+    /// Issues a password-reset token, records its token ID in a store, and
+    /// invalidates the user's other outstanding reset tokens.
+    ///
+    /// Only the newest token for a user can be consumed. If invalidation fails
+    /// the error is returned and the new token must not be delivered. This does
+    /// not send delivery, check user state or apply request admission; call
+    /// [`Self::should_process_password_reset_request`] first.
     pub async fn issue_password_reset_token_with_store<S>(
         &self,
         store: &S,
@@ -72,16 +82,24 @@ where
     where
         S: PasswordResetTokenStore,
     {
-        let issued = self.issue_password_reset_token_with_ttl(user_id, ttl)?;
+        let issued = self.sign_password_reset_token(user_id, ttl)?;
         store
             .insert_password_reset_token(issued.token_id, &issued.user_id, issued.expires_at)
+            .await?;
+        store
+            .invalidate_password_reset_tokens_for_user(
+                &issued.user_id,
+                Some(issued.token_id),
+                self.session_clock.now(),
+            )
             .await?;
         Ok(issued)
     }
 
     /// Validates a signed reset token without consulting or consuming its store.
     ///
-    /// Checks cryptographic claims/purpose/expiry, not one-time use, store
+    /// Checks cryptographic claims, the reset `typ` and purpose, and expiry, not
+    /// one-time use, store
     /// revocation, attempt limits, current user state or a password change.
     /// Repeated validation can succeed for the same token. Never use validation
     /// alone to authorize a reset; use
@@ -92,16 +110,14 @@ where
         &self,
         token: &str,
     ) -> AuthResult<VerifiedPasswordResetToken> {
-        self.validate_local_jwt_header(token)
+        let decoding_key = self
+            .local_jwt_decoding_key(token)
             .map_err(|_| AuthError::InvalidPasswordResetToken)?;
-        let token_data =
-            decode::<PasswordResetTokenClaims>(token, &self.decoding_key, &self.validation)
-                .map_err(map_password_reset_decode_error)?;
+        let token_data = decode::<PasswordResetTokenClaims>(token, decoding_key, &self.validation)
+            .map_err(map_password_reset_decode_error)?;
         let claims = token_data.claims;
-        if !matches!(
-            claims.typ.as_deref(),
-            None | Some(PASSWORD_RESET_TOKEN_TYPE)
-        ) || claims.purpose != PASSWORD_RESET_TOKEN_PURPOSE
+        if claims.typ.as_deref() != Some(PASSWORD_RESET_TOKEN_TYPE)
+            || claims.purpose != PASSWORD_RESET_TOKEN_PURPOSE
         {
             return Err(AuthError::InvalidPasswordResetToken);
         }
@@ -112,7 +128,7 @@ where
             .map_err(|_| AuthError::InvalidPasswordResetToken)?;
         let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
             .map_err(|_| AuthError::InvalidPasswordResetToken)?;
-        if expires_at <= OffsetDateTime::now_utc() {
+        if expires_at <= self.session_clock.now() {
             return Err(AuthError::PasswordResetTokenExpired);
         }
 
@@ -137,13 +153,49 @@ where
             .await
     }
 
-    /// Validates and atomically consumes a reset ID with configured abuse protection.
+    /// Validates and atomically consumes a reset ID with configured abuse
+    /// protection, then invalidates the user's other outstanding reset tokens.
     ///
-    /// Requires an atomic [`PasswordResetTokenStore`] implementation. This does
-    /// not update a password or revoke other sessions/tokens. The host binds the
-    /// verified user, persists the new password and implements revocation and
-    /// recovery/fencing if any step fails after consumption.
+    /// It then revokes every refresh token of the user through
+    /// [`Self::revoke_user_sessions`], so no refresh session survives a reset.
+    ///
+    /// Requires an atomic [`PasswordResetTokenStore`] implementation. If sibling
+    /// invalidation or session revocation fails the token stays consumed and
+    /// the error is returned; the user needs a fresh reset. This does not
+    /// update a password, revoke API tokens or invalidate access tokens already
+    /// issued. The host binds the verified user, persists the new password and
+    /// implements any further revocation and recovery/fencing if a step fails
+    /// after consumption.
     pub async fn consume_password_reset_token_with_metadata<S>(
+        &self,
+        store: &S,
+        token: &str,
+        metadata: ClientMetadata,
+    ) -> AuthResult<VerifiedPasswordResetToken>
+    where
+        S: PasswordResetTokenStore,
+    {
+        let verified = self
+            .consume_one_password_reset_token(store, token, metadata)
+            .await?;
+        store
+            .invalidate_password_reset_tokens_for_user(
+                &verified.user_id,
+                None,
+                self.session_clock.now(),
+            )
+            .await?;
+        // A consumed reset proves the account may be compromised: end every
+        // refresh session before the host writes the new password.
+        self.revoke_user_sessions(
+            &verified.user_id,
+            RefreshTokenRevocationReason::AdminRevoked,
+        )
+        .await?;
+        Ok(verified)
+    }
+
+    async fn consume_one_password_reset_token<S>(
         &self,
         store: &S,
         token: &str,
@@ -178,7 +230,7 @@ where
             .await?;
 
         let consumed = store
-            .consume_password_reset_token(verified.token_id, OffsetDateTime::now_utc())
+            .consume_password_reset_token(verified.token_id, self.session_clock.now())
             .await?;
         if !consumed {
             self.record_rate_limit_attempt(&self.config.rate_limits.credential, &rate_limit_keys)
