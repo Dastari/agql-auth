@@ -162,6 +162,8 @@ some error codes change. Read MIGRATION.md, including its upgrade order, first.
 
 - Upgrade `jsonwebtoken` to 11.1 (matching graphql-orm-router, removing a
   duplicate) and the `tokio` dev-dependency to 1.54.1 (RUSTSEC-2026-0386).
+- Lock `rustix` 1.1.6, a transitive dependency of `async-graphql`
+  (RUSTSEC-2026-0486, unsound xattr buffers; agql-auth does not call xattr).
 - Remove the direct `rsa` dependency; RS256 JWKS `n`/`e` are derived through
   `jsonwebtoken`. RUSTSEC-2023-0071 (rsa 0.9) and RUSTSEC-2026-0387
   (crypto-bigint 0.5) remain reachable only through `jsonwebtoken`'s
